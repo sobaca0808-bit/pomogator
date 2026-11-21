@@ -41,11 +41,13 @@ namespace PomogatorWifi
         private readonly Label access = new Label { AutoSize = true };
         private readonly Label sharing = new Label { AutoSize = true };
         private readonly Label message = new Label { AutoSize = true, MaximumSize = new Size(460, 0) };
+        private readonly Label checkMessage = new Label { AutoSize = true, MaximumSize = new Size(460, 0) };
         private readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 3000 };
         private HostedNetwork wlan;
         private Session session;
         private bool busy;
-        private bool checksPassed;
+        private bool wlanReady;
+        private bool icsChecked;
         private string lastCheckError;
 
         internal WifiForm()
@@ -68,6 +70,7 @@ namespace PomogatorWifi
             Add(layout, actions);
             Add(layout, access);
             Add(layout, sharing);
+            Add(layout, checkMessage);
             Add(layout, message);
             var log = new LinkLabel { Text = "Открыть диагностический журнал", AutoSize = true };
             log.LinkClicked += (sender, args) => OpenLog();
@@ -77,7 +80,7 @@ namespace PomogatorWifi
             start.Click += (sender, args) => Run(StartWifi);
             stop.Click += (sender, args) => Run(() => StopWifi(true));
             timer.Tick += (sender, args) => RefreshState();
-            Shown += (sender, args) => { Log.Write("application_started"); RefreshState(); timer.Start(); };
+            Shown += (sender, args) => { Log.Write("application_started version=0.1.1"); RefreshState(); timer.Start(); };
             FormClosing += (sender, args) =>
             {
                 if (busy) { args.Cancel = true; return; }
@@ -116,7 +119,7 @@ namespace PomogatorWifi
         private void Buttons()
         {
             bool owned = HasOwnedChanges;
-            start.Enabled = !busy && !owned && checksPassed;
+            start.Enabled = !busy && !owned && wlanReady;
             stop.Enabled = !busy && owned;
             name.Enabled = password.Enabled = !busy && !owned;
         }
@@ -124,49 +127,56 @@ namespace PomogatorWifi
         private void RefreshState()
         {
             if (busy) return;
-            Guid target;
-            var state = HostedNetwork.State.Unavailable;
-            checksPassed = false;
+            wlanReady = false;
+            string stage = "wlan_open";
             try
             {
                 if (wlan == null) wlan = new HostedNetwork();
-                state = wlan.Query(out target);
+                stage = "wlan_status";
+                Guid target;
+                var state = wlan.Query(out target);
                 access.Text = "Точка доступа: " + (state == HostedNetwork.State.Active ? "включена" :
                     state == HostedNetwork.State.Idle ? "выключена" : "Hosted Network недоступна");
-                sharing.Text = "Раздача интернета: " + (state == HostedNetwork.State.Active ? "проверяется" : "выключена");
+                wlanReady = state == HostedNetwork.State.Idle;
+                if (state == HostedNetwork.State.Unavailable)
+                    throw new WifiError("Hosted Network недоступна. Проверьте Ralink и выполните netsh wlan show drivers.");
+
+                stage = "ics_snapshot";
                 using (var snapshot = new IcsSnapshot())
                 {
-                    if (state == HostedNetwork.State.Unavailable)
-                        throw new WifiError("Hosted Network недоступна. Проверьте, подключён ли Ralink, и выполните netsh wlan show drivers.");
+                    if (!icsChecked) Log.Write("ics_snapshot_ok connections=" + snapshot.Connections.Count);
+                    icsChecked = true;
+                    stage = "pppoe_select";
                     var source = session == null ? Policy.ChooseSource(snapshot.Connections).Id : session.Source;
-                    if (state == HostedNetwork.State.Active)
-                        sharing.Text = snapshot.IsSharing(source, target)
-                            ? "Раздача интернета: ICS настроен"
-                            : "Раздача интернета: ICS не настроен или PPPoE отключено";
-                    checksPassed = state == HostedNetwork.State.Idle;
-                    if (state == HostedNetwork.State.Active && !wlan.Started)
-                        throw new WifiError("Точка уже работает. Чтобы настроить её здесь, сначала выключите её тем способом, которым запустили.");
+                    sharing.Text = "Раздача интернета: " +
+                        (state != HostedNetwork.State.Active ? "выключена" :
+                            snapshot.IsSharing(source, target) ? "ICS настроен" :
+                            "ICS не настроен или PPPoE отключено");
                 }
-                if (lastCheckError != null)
-                {
-                    if (message.Text == lastCheckError) message.Text = "";
-                    lastCheckError = null;
-                    Log.Write("checks_recovered");
-                }
+                if (lastCheckError != null) Log.Write("checks_recovered");
+                lastCheckError = null;
+                checkMessage.Text = state == HostedNetwork.State.Active && !wlan.Started
+                    ? "Точка уже работает. Выключите её тем способом, которым запустили, чтобы настроить её здесь."
+                    : "";
             }
             catch (Exception error)
             {
-                if (state == HostedNetwork.State.Unavailable) access.Text = "Точка доступа: недоступна";
-                if (state != HostedNetwork.State.Active) sharing.Text = "Раздача интернета: выключена";
-                else if (sharing.Text == "Раздача интернета: проверяется")
-                    sharing.Text = "Раздача интернета: не удалось проверить";
-                var info = Explain(error);
-                if (lastCheckError != info)
+                if (stage == "wlan_open" || stage == "wlan_status")
                 {
-                    lastCheckError = info;
-                    Log.Error("checks_failed", error);
-                    message.Text = info;
+                    access.Text = "Точка доступа: недоступна";
+                    sharing.Text = "Раздача интернета: не проверена";
                 }
+                else sharing.Text = "Раздача интернета: проверка не пройдена";
+
+                if (stage == "ics_snapshot") icsChecked = false;
+                var info = Explain(error);
+                var fingerprint = stage + "|" + info;
+                if (lastCheckError != fingerprint)
+                {
+                    lastCheckError = fingerprint;
+                    Log.Error("checks_failed stage=" + stage, error);
+                }
+                checkMessage.Text = info + (wlanReady ? " Точку Wi-Fi можно включить отдельно." : "");
             }
             Buttons();
         }
@@ -175,17 +185,24 @@ namespace PomogatorWifi
         {
             var ssid = Policy.EncodeSsid(name.Text);
             Policy.CheckPassword(password.Text);
-            Connection source;
-            using (var snapshot = new IcsSnapshot()) source = Policy.ChooseSource(snapshot.Connections);
-            Log.Write("pppoe_detected " + source.Id);
+            message.Text = "Запуск Hosted Network…";
+            message.Update();
+            wlan.Start(ssid, password.Text);
+            Log.Write("hosted_network_started");
+            password.Clear();
+
+            var stage = "pppoe_select";
             try
             {
-                message.Text = "Запуск Hosted Network и поиск виртуального адаптера…";
+                Connection source;
+                using (var snapshot = new IcsSnapshot()) source = Policy.ChooseSource(snapshot.Connections);
+                Log.Write("pppoe_detected " + source.Id);
+                message.Text = "Поиск виртуального адаптера…";
                 message.Update();
-                wlan.Start(ssid, password.Text);
-                Log.Write("hosted_network_started");
+                stage = "hosted_adapter_find";
                 session = Session.Find(wlan, source);
                 Log.Write("hosted_adapter_detected " + session.Target);
+                stage = "ics_pair_check";
                 if (session.NeedsSharing())
                 {
                     if (MessageBox.Show(this, session.Pair + "\r\n\r\nВключить общий доступ Windows (ICS) для этой пары? " +
@@ -193,28 +210,34 @@ namespace PomogatorWifi
                         "Подтверждение общего доступа", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2)
                         != DialogResult.Yes)
                     {
-                        StopWifi(false);
-                        message.Text = "Настройка общего доступа отменена.";
+                        Log.Write("ics_confirmation_declined");
+                        message.Text = "Точка Wi-Fi включена. Общий доступ не изменён.";
                         return;
                     }
+                    stage = "ics_enable";
                     session.Enable(wlan);
                     Log.Write("ics_verified");
                 }
                 else Log.Write("existing_ics_pair_reused");
-                password.Clear();
                 message.Text = "Подключите смартфон к Wi-Fi и проверьте, открывается ли сайт.";
             }
             catch (Exception error)
             {
-                try { StopWifi(false); }
-                catch (Exception cleanup)
+                Log.Error("ics_setup_failed stage=" + stage, error);
+                message.Text = "Настройка ICS не завершена. " + Explain(error);
+                if (session != null && session.OwnsChanges)
                 {
-                    Log.Error("rollback_failed", cleanup);
-                    ShowError(error);
-                    message.Text += " " + Explain(cleanup) + " Повторите «Выключить Wi-Fi».";
-                    return;
+                    try
+                    {
+                        session.Restore();
+                        Log.Write("ics_rollback_ok");
+                    }
+                    catch (Exception cleanup)
+                    {
+                        Log.Error("ics_rollback_failed", cleanup);
+                        message.Text += " " + Explain(cleanup) + " Повторите «Выключить Wi-Fi».";
+                    }
                 }
-                throw;
             }
         }
 
@@ -246,6 +269,8 @@ namespace PomogatorWifi
         private static string Explain(Exception error)
         {
             if (error is WifiError) return error.Message;
+            if (error is IcsFailure ics)
+                return ics.InnerException is WifiError ? ics.InnerException.Message : ics.Message;
             if (error is EntryPointNotFoundException || error is DllNotFoundException)
                 return "Windows не предоставляет интерфейс Hosted Network. Проверьте версию Windows и драйвер Ralink.";
             return string.Format("Windows не выполнила сетевую операцию (0x{0:X8}). Проверьте службу ICS и вкладку «Доступ» в ncpa.cpl.",
@@ -283,6 +308,7 @@ namespace PomogatorWifi
         internal static void Error(string action, Exception error)
         {
             var cause = error.GetBaseException();
+            if (error is IcsFailure ics) action += " operation=" + ics.Operation;
             // Only application-defined messages and numeric Windows codes are written.
             Write(string.Format("{0} {1} 0x{2:X8} {3}", action, cause.GetType().Name, cause.HResult,
                 cause is WifiError ? cause.Message : ""));

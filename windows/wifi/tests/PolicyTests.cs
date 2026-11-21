@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using PomogatorWifi;
 
 var source = new Connection { Id = Guid.NewGuid(), Name = "Мой провайдер", IsPppoe = true, Connected = true };
@@ -8,6 +10,32 @@ var ethernet = new Connection { Id = Guid.NewGuid(), Name = "Обычный Ethe
 var second = new Connection { Id = Guid.NewGuid(), Name = "Второй PPPoE", IsPppoe = true, Connected = true };
 var connections = new List<Connection> { ethernet, source, target };
 var tests = new (string Name, Action Run)[] {
+    ("Use explicit COM signatures for collection and connection arguments", () => {
+        Check(typeof(INetSharingManager).IsImport);
+        Check(typeof(INetConnection).GUID == new Guid("C08956A1-1CD3-11D1-B1C5-00805FC1270E"));
+        Check(typeof(INetConnection).GetCustomAttribute<InterfaceTypeAttribute>().Value ==
+            ComInterfaceType.InterfaceIsIUnknown);
+        foreach (var method in new[] { "GetConnectionProps", "GetConfiguration" })
+            Check(typeof(INetSharingManager).GetMethod(method).GetParameters()[0].ParameterType == typeof(INetConnection));
+        Check(typeof(INetSharingEveryConnectionCollection).GetMethod("GetNewEnum").ReturnParameter
+            .GetCustomAttribute<MarshalAsAttribute>().Value == UnmanagedType.IUnknown);
+    }),
+    ("Treat only S_FALSE as a successful end to enumeration", () => {
+        Check(IcsEnumeration.HasItem(0));
+        Check(!IcsEnumeration.HasItem(1));
+        int noInterface = unchecked((int)0x80004002);
+        try { IcsEnumeration.HasItem(noInterface); }
+        catch (COMException error) when (error.HResult == noInterface) { return; }
+        throw new InvalidOperationException("Enumeration hid the native error");
+    }),
+    ("Retain the exact operation and HRESULT for a failed interface query", () => {
+        const string operation = "QueryInterface(INetConnection) #2";
+        var original = new InvalidCastException("external diagnostic");
+        var error = new IcsFailure(operation, original);
+        Check(error.Operation == operation && error.HResult == original.HResult);
+        Check(error.InnerException == original && error.Message.Contains("0x80004002"));
+        Check(!error.Message.Contains(original.Message));
+    }),
     ("Detect PPPoE by type and state rather than name", () => Check(Policy.ChooseSource(connections) == source)),
     ("Reject missing PPPoE", () => Reject(() => Policy.ChooseSource(new[] { ethernet }))),
     ("Reject multiple active PPPoE links", () => Reject(() => Policy.ChooseSource(new[] { source, second }))),
