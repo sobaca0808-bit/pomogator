@@ -9,5 +9,7 @@
     <Compile Include="../Ics.cs" Link="Ics.cs" />
     <Compile Include="../IcsInterop.cs" Link="IcsInterop.cs" />
     <Compile Include="../Policy.cs" Link="Policy.cs" />
+    <Compile Include="../Session.cs" Link="Session.cs" />
+    <Compile Include="../HostedNetwork.cs" Link="HostedNetwork.cs" />
   </ItemGroup>
 </Project>

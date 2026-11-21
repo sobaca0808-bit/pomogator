@@ -12,12 +12,27 @@ namespace PomogatorWifi
 
     internal enum SharingRole { Public = 0, Private = 1 }
 
+    // Values from Windows SDK netcon.h.
+    internal enum MediaType { None = 0, Lan = 3, Pppoe = 6, SharedAccessHostLan = 8, SharedAccessHostRas = 9 }
+    internal enum ConnectionStatus { Disconnected = 0, Connected = 2, HardwareDisabled = 5 }
+
+    [Flags]
+    internal enum Characteristics : uint
+    {
+        Shared = 0x100, HomeNetCapable = 0x1000, SharedPrivate = 0x2000, HostedNetwork = 0x10000
+    }
+
     internal class Connection
     {
         internal Guid Id;
         internal string Name;
-        internal bool IsPppoe;
-        internal bool Connected;
+        internal MediaType Media;
+        internal ConnectionStatus Status;
+        internal Characteristics Flags;
+        internal bool IsPppoe => Media == MediaType.Pppoe;
+        internal bool Connected => Status == ConnectionStatus.Connected;
+        internal bool IsWanSharingMedia => IsPppoe || Media == MediaType.SharedAccessHostRas;
+        internal bool IsLan => Media == MediaType.Lan || Media == MediaType.SharedAccessHostLan;
         internal SharingRole? Sharing;
     }
 
@@ -55,14 +70,28 @@ namespace PomogatorWifi
                 (ownsPrivate && c.Id == target && c.Sharing == SharingRole.Private));
         }
 
+        internal static Connection FindTarget(IEnumerable<Connection> connections, Guid hostedAdapter)
+        {
+            if (hostedAdapter == Guid.Empty) return null;
+            return connections.SingleOrDefault(c => c.Id == hostedAdapter && c.Connected && c.IsLan);
+        }
+
+        // The source GUID was selected as PPPoE before enabling sharing; Windows may report a shared WAN afterward.
+        internal static bool ConfirmsSharing(IList<Connection> connections, Guid source, Guid target)
+        {
+            return source != target && connections.Count(c => c.Sharing.HasValue) == 2 &&
+                connections.Any(c => c.Id == source && c.Connected && c.IsWanSharingMedia && c.Sharing == SharingRole.Public) &&
+                FindTarget(connections, target)?.Sharing == SharingRole.Private;
+        }
+
         // False means the existing pair already has the exact requested sharing roles.
         internal static bool NeedsSharing(IList<Connection> connections, Guid source, Guid target)
         {
             if (source == Guid.Empty || target == Guid.Empty || source == target)
                 throw new WifiError("Не удалось однозначно определить пару подключений для раздачи.");
             var actualSource = ChooseSource(connections);
-            var actualTarget = connections.SingleOrDefault(c => c.Id == target);
-            if (actualSource.Id != source || actualTarget == null || !actualTarget.Connected || actualTarget.IsPppoe)
+            var actualTarget = FindTarget(connections, target);
+            if (actualSource.Id != source || actualTarget == null)
                 throw new WifiError("Подключения изменились или виртуальный адаптер ещё не готов. Выключите точку и попробуйте снова.");
             var shared = connections.Where(c => c.Sharing.HasValue).ToArray();
             if (shared.Length == 0) return true;

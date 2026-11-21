@@ -4,72 +4,125 @@ using System.Threading;
 
 namespace PomogatorWifi
 {
+    internal enum SharingResult { Declined, Existing, Verified }
+    internal delegate HostedNetwork.State QueryHosted(out Guid adapter);
+
     internal sealed class Session
     {
-        internal Guid Source { get; private set; }
-        internal Guid Target { get; private set; }
-        internal string SourceName { get; private set; }
-        internal string TargetName { get; private set; }
+        private readonly Func<IcsSnapshot> openSnapshot;
+        private readonly QueryHosted query;
+        private readonly Action pause;
+        internal Guid Source { get; }
+        internal Guid Target { get; }
+        private readonly string sourceName;
+        private readonly string targetName;
         private bool publicAttempted;
         private bool privateAttempted;
-        internal bool OwnsChanges { get { return publicAttempted || privateAttempted; } }
-        internal string Pair { get { return "Интернет: " + SourceName + "\r\nАдаптер Wi-Fi: " + TargetName; } }
+        internal bool OwnsChanges => publicAttempted || privateAttempted;
+        internal string Pair => "Интернет: " + sourceName + "\r\nАдаптер Wi-Fi: " + targetName;
 
-        internal static Session Find(HostedNetwork wlan, Connection source)
+        private Session(QueryHosted query, Func<IcsSnapshot> openSnapshot, Action pause, Connection source, Connection target)
         {
-            // The virtual interface may first appear after Hosted Network becomes active.
+            this.query = query;
+            this.openSnapshot = openSnapshot;
+            this.pause = pause;
+            Source = source.Id;
+            Target = target.Id;
+            sourceName = source.Name;
+            targetName = target.Name;
+        }
+
+        internal static Session Find(QueryHosted query, Func<IcsSnapshot> openSnapshot, Action pause = null)
+        {
+            if (pause == null) pause = () => Thread.Sleep(250);
             for (int attempt = 0; attempt < 24; attempt++)
             {
                 Guid targetId;
-                if (wlan.Query(out targetId) != HostedNetwork.State.Active)
+                if (query(out targetId) != HostedNetwork.State.Active)
                     throw new WifiError("Точка доступа остановилась. Проверьте, подключён ли Ralink.");
                 if (targetId != Guid.Empty)
                 {
-                    using (var snapshot = new IcsSnapshot())
+                    using (var snapshot = openSnapshot())
                     {
-                        var target = snapshot.Connections.SingleOrDefault(c => c.Id == targetId);
-                        if (target != null && target.Connected)
-                            return new Session { Source = source.Id, SourceName = source.Name,
-                                Target = targetId, TargetName = target.Name };
+                        snapshot.RequireVerified(Guid.Empty, targetId);
+                        var source = Policy.ChooseSource(snapshot.Connections);
+                        var target = Policy.FindTarget(snapshot.Connections, targetId);
+                        if (target != null) return new Session(query, openSnapshot, pause, source, target);
                     }
                 }
-                Thread.Sleep(250);
+                pause();
             }
             throw new WifiError("Windows не показала активный виртуальный адаптер Hosted Network. Проверьте диспетчер устройств и драйвер Ralink.");
         }
 
-        internal bool NeedsSharing()
+        internal SharingResult ConfigureSharing(Func<string, bool> confirm)
         {
-            using (var snapshot = new IcsSnapshot())
-                return Policy.NeedsSharing(snapshot.Connections, Source, Target);
-        }
-
-        internal void Enable(HostedNetwork wlan)
-        {
-            Guid target;
-            if (wlan.Query(out target) != HostedNetwork.State.Active || target != Target)
-                throw new WifiError("Точка доступа изменилась после подтверждения. Запустите её снова.");
-            using (var snapshot = new IcsSnapshot())
+            RequireActiveTarget();
+            using (var snapshot = openSnapshot())
             {
-                if (!Policy.NeedsSharing(snapshot.Connections, Source, Target)) return;
+                if (!NeedsSharing(snapshot)) return SharingResult.Existing;
+            }
+
+            if (!confirm(Pair)) return SharingResult.Declined;
+            RequireActiveTarget();
+            using (var snapshot = openSnapshot())
+            {
+                if (!NeedsSharing(snapshot)) return SharingResult.Existing;
                 publicAttempted = true;
-                privateAttempted = true;
+                privateAttempted = true; // Windows can assign the private role when public sharing starts.
                 snapshot.Enable(Source, SharingRole.Public);
             }
-            using (var snapshot = new IcsSnapshot())
+
+            for (int attempt = 0; attempt < 8; attempt++)
             {
-                // Some Windows versions can configure the private role automatically.
-                var existing = snapshot.Connections.SingleOrDefault(c => c.Id == Target);
-                var upstream = snapshot.Connections.SingleOrDefault(c => c.Id == Source);
-                if (upstream == null || !upstream.Connected || upstream.Sharing != SharingRole.Public ||
-                    existing == null || !existing.Connected ||
-                    !Policy.CanRestore(snapshot.Connections, Source, Target, true, true))
-                    throw new WifiError("Список подключений изменился при включении общего доступа. Проверьте вкладку «Доступ» в ncpa.cpl.");
-                if (!existing.Sharing.HasValue) snapshot.Enable(Target, SharingRole.Private);
+                RequireActiveTarget();
+                using (var snapshot = openSnapshot())
+                {
+                    snapshot.RequireVerified(Source, Target);
+                    var target = Policy.FindTarget(snapshot.Connections, Target);
+                    var upstream = snapshot.Connections.SingleOrDefault(c => c.Id == Source);
+                    if (upstream == null || !upstream.Connected || !upstream.IsWanSharingMedia || target == null ||
+                        !Policy.CanRestore(snapshot.Connections, Source, Target, true, true))
+                        throw new WifiError("Подключения изменились при включении общего доступа. Проверьте вкладку «Доступ» в ncpa.cpl.");
+                    if (upstream.Sharing == SharingRole.Public)
+                    {
+                        if (target.Sharing == SharingRole.Private && snapshot.IsSharing(Source, Target))
+                            return SharingResult.Verified;
+                        if (!target.Sharing.HasValue) snapshot.Enable(Target, SharingRole.Private);
+                        break;
+                    }
+                }
+                pause();
             }
-            using (var snapshot = new IcsSnapshot())
-                if (!snapshot.IsSharing(Source, Target))
-                    throw new WifiError("Windows не подтвердила настройку раздачи. Проверьте службу ICS и вкладку «Доступ» в ncpa.cpl.");
+
+            for (int attempt = 0; attempt < 8; attempt++)
+            {
+                RequireActiveTarget();
+                using (var snapshot = openSnapshot())
+                    if (snapshot.IsSharing(Source, Target)) return SharingResult.Verified;
+                pause();
+            }
+            throw new WifiError("Windows не подтвердила роли ICS для PPPoE и виртуального адаптера. Проверьте вкладку «Доступ» в ncpa.cpl.");
+        }
+
+        private bool NeedsSharing(IcsSnapshot snapshot)
+        {
+            snapshot.RequireVerified(Source, Target);
+            return Policy.NeedsSharing(snapshot.Connections, Source, Target);
+        }
+
+        private void RequireActiveTarget()
+        {
+            Guid adapter;
+            if (query(out adapter) != HostedNetwork.State.Active || adapter != Target)
+                throw new WifiError("Точка доступа остановилась или виртуальный адаптер изменился. Запустите точку снова.");
+        }
+
+        internal static string SetupFailureMessage(Exception error)
+        {
+            var detail = error is WifiError || error is IcsFailure
+                ? error.Message : string.Format("Ошибка Windows (0x{0:X8}).", error.GetBaseException().HResult);
+            return "Настройка ICS не завершена. " + detail;
         }
 
         internal void Restore()
@@ -82,12 +135,13 @@ namespace PomogatorWifi
 
         private void Disable(Guid id, SharingRole role)
         {
-            using (var snapshot = new IcsSnapshot())
+            using (var snapshot = openSnapshot())
             {
+                snapshot.RequireVerified(Source, Target);
                 var current = snapshot.Connections.SingleOrDefault(c => c.Id == id);
                 if (current == null || !current.Sharing.HasValue) return;
                 if (!Policy.CanRestore(snapshot.Connections, Source, Target, publicAttempted, privateAttempted))
-                    throw new WifiError("Общий доступ изменён в Windows. Проверьте текущую пару в ncpa.cpl. Утилита оставила её настройки.");
+                    throw new WifiError("Общий доступ изменён в Windows. Проверьте текущую пару в ncpa.cpl.");
                 if (current.Sharing == role) snapshot.Disable(id);
             }
         }

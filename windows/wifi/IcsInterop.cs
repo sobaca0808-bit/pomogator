@@ -10,9 +10,11 @@ namespace PomogatorWifi
         [return: MarshalAs(UnmanagedType.VariantBool)]
         bool GetSharingInstalled();
         void _VtblGap1_2();
-        INetSharingConfiguration GetConfiguration(INetConnection connection);
+        [PreserveSig]
+        int GetConfiguration([MarshalAs(UnmanagedType.Interface)] INetConnection connection,
+            [MarshalAs(UnmanagedType.Interface)] out INetSharingConfiguration configuration);
         INetSharingEveryConnectionCollection GetEveryConnection();
-        INetConnectionProps GetConnectionProps(INetConnection connection);
+        INetConnectionProps GetConnectionProps([MarshalAs(UnmanagedType.Interface)] INetConnection connection);
     }
 
     [ComImport, Guid("33C4643C-7811-46FA-A89A-768597BD7223"), InterfaceType(ComInterfaceType.InterfaceIsDual)]
@@ -36,6 +38,7 @@ namespace PomogatorWifi
         void _VtblGap1_1();
         int GetStatus();
         int GetMediaType();
+        uint GetCharacteristics();
     }
 
     [ComImport, Guid("C08956B6-1CD3-11D1-B1C5-00805FC1270E"), InterfaceType(ComInterfaceType.InterfaceIsDual)]
