@@ -84,6 +84,20 @@ Test("Leave proxy changes from another program untouched", () => {
     Assert(ProxyControl.Restore(windows, change) == RestoreResult.ChangedElsewhere && windows.State == foreign && windows.Writes == 1);
 });
 
+if (OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable("POMOGATOR_TEST_WININET") == "1")
+{
+    var windows = new WinInet();
+    var initial = windows.Read();
+    Assert(!initial.InUse);
+    var change = ProxyControl.Prepare(windows, 62003);
+    // Explicit opt-in, reserved for an isolated Windows runner.
+    try { ProxyControl.Apply(windows, change); }
+    finally { ProxyControl.Restore(windows, change); }
+    Assert(windows.Read() == initial);
+    Console.WriteLine("PASS Windows WinINet settings applied and restored");
+    passed++;
+}
+
 var executable = Environment.GetEnvironmentVariable("POMOGATOR_TEST_XRAY");
 if (!string.IsNullOrWhiteSpace(executable))
 {
@@ -125,7 +139,11 @@ if (!string.IsNullOrWhiteSpace(executable))
     var names = new SubjectAlternativeNameBuilder();
     names.AddIpAddress(IPAddress.Loopback);
     request.CertificateExtensions.Add(names.Build());
-    using var certificate = request.CreateSelfSigned(DateTimeOffset.Now.AddMinutes(-1), DateTimeOffset.Now.AddMinutes(10));
+    using var generated = request.CreateSelfSigned(DateTimeOffset.Now.AddMinutes(-1), DateTimeOffset.Now.AddMinutes(10));
+    // Schannel requires an imported key handle for a temporary server certificate on Windows.
+    using var certificate = OperatingSystem.IsWindows()
+        ? new X509Certificate2(generated.Export(X509ContentType.Pfx), (string?)null, X509KeyStorageFlags.UserKeySet)
+        : generated;
     try
     {
         var endpoint = new Uri($"https://127.0.0.1:{destinationPort}/fixture");
@@ -135,7 +153,20 @@ if (!string.IsNullOrWhiteSpace(executable))
             ServerCertificateCustomValidationCallback = (_, candidate, _, _) => candidate?.Thumbprint == certificate.Thumbprint
         };
         using var http = new HttpClient(handler);
-        await Xray.VerifyAsync(http, endpoint, deadline.Token);
+        var verification = Xray.VerifyAsync(http, endpoint, deadline.Token);
+        var completed = await Task.WhenAny(verification, responder);
+        if (completed == responder) await responder;
+        try { await verification; }
+        catch
+        {
+            deadline.Cancel();
+            // The fixture contains only synthetic data, so surface server handshake failures in CI.
+            try { await responder; }
+            catch (Exception fixtureError) when (fixtureError is not OperationCanceledException)
+            { Console.Error.WriteLine(fixtureError); }
+            catch (OperationCanceledException) { }
+            throw;
+        }
         await responder;
     }
     finally { destination.Stop(); }
@@ -144,19 +175,6 @@ if (!string.IsNullOrWhiteSpace(executable))
 }
 else Console.WriteLine("SKIP Core integration: set POMOGATOR_TEST_XRAY to the pinned binary.");
 
-if (OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable("POMOGATOR_TEST_WININET") == "1")
-{
-    var windows = new WinInet();
-    var initial = windows.Read();
-    Assert(!initial.InUse);
-    var change = ProxyControl.Prepare(windows, 62003);
-    // Explicit opt-in, reserved for an isolated Windows runner.
-    try { ProxyControl.Apply(windows, change); }
-    finally { ProxyControl.Restore(windows, change); }
-    Assert(windows.Read() == initial);
-    Console.WriteLine("PASS Windows WinINet settings applied and restored");
-    passed++;
-}
 Console.WriteLine($"{passed} checks passed.");
 
 void Test(string name, Action action)
