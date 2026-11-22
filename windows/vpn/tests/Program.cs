@@ -166,6 +166,7 @@ Test("Leave proxy changes from another program untouched", () => {
 
 if (OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable("POMOGATOR_TEST_WININET") == "1")
 {
+    Assert(RasProxyScope.Active() == null); // CI has no dial-up connections.
     var windows = new WinInet();
     var initial = windows.Read();
     Assert(!initial.InUse);
@@ -178,6 +179,24 @@ if (OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable("POMOGATOR
     passed++;
 }
 
+Test("Select a single active RAS scope and refuse ambiguous proxy changes", () => {
+    Assert(RasProxyScope.Select(Array.Empty<(string, string)>()) == null);
+    Assert(RasProxyScope.Select(new[] { ("Broadband", "PPPoE"), ("broadband", "pppoe") }) == "Broadband");
+    Throws(() => RasProxyScope.Select(new[] { ("Broadband", "PPPoE"), ("Another connection", "PPPoE") }));
+    Throws(() => RasProxyScope.Select(new[] { ("Other VPN", "vpn") }));
+});
+await TestAsync("Xray chooses a fresh port with bounded retries and never retries a profile error", async () => {
+    var plans = 0;
+    var failure = await Fails(() => Xray.StartWithPortsAsync("", () => ("{}", ++plans, Array.Empty<int>()),
+        CancellationToken.None, _ => null, (_, _) => false,
+        launch: (_, _, _) => throw new VpnError("busy", Check.Proxy)));
+    Assert(plans == 3 && failure.FailedCheck == Check.Proxy);
+    plans = 0;
+    await Fails(() => Xray.StartWithPortsAsync("", () => ("{}", ++plans, Array.Empty<int>()),
+        CancellationToken.None, _ => null, (_, _) => false,
+        launch: (_, _, _) => throw new VpnError("profile", Check.Xray)));
+    Assert(plans == 1);
+});
 Test("TUN splits public IPv4 routes around the pinned peer and LAN", () => {
     var peer = IPAddress.Parse("203.0.113.71");
     var routes = TunConfig.Routes(peer).Select(IPNetwork.Parse).ToArray();
@@ -185,10 +204,228 @@ Test("TUN splits public IPv4 routes around the pinned peer and LAN", () => {
         route.Contains(IPAddress.Parse("127.0.0.1"))));
     Assert(routes.Any(route => route.Contains(IPAddress.Parse(TunConfig.Resolver))));
     Assert(routes.Any(route => route.Contains(IPAddress.Parse("203.0.113.70"))));
-    using var config = JsonDocument.Parse(TunConfig.Engine(Guid.NewGuid(), peer, 12345, new string('a', 48), 12346));
+    using var config = JsonDocument.Parse(TunConfig.Engine(Guid.NewGuid(), peer, IPAddress.Parse("192.0.2.31"), Profiles.Parse(Base + "?security=tls"), 12346));
     var settings = config.RootElement.GetProperty("inbounds")[0].GetProperty("settings");
     Assert(settings.GetProperty("autoOutboundsInterface").GetString() == "");
+    Assert(config.RootElement.GetProperty("outbounds")[0].GetProperty("protocol").GetString() == "vless");
+    Assert(config.RootElement.GetProperty("outbounds")[0].GetProperty("settings").GetProperty("vnext")[0]
+        .GetProperty("address").GetString() == peer.ToString());
     Assert(settings.GetProperty("autoSystemWfpBlockLeak").EnumerateArray().Any(entry => entry.GetString() == "[::/0]:all"));
+});
+await TestAsync("TUN waits for a slow adapter, tentative IPv4, planned routes and delayed DNS", async () => {
+    var expected = new TunObservation(Guid.NewGuid(), "fixture", Uplink: 7, ExpectedDns: TunConfig.Resolver);
+    var up = expected with { Status = System.Net.NetworkInformation.OperationalStatus.Up, Index = 42 };
+    var ipv4 = up with { AddressState = "Preferred", AddressReady = true };
+    var routed = ipv4 with { PeerRoute = 7, ResolverRoute = 42, InternetRoute = 42 };
+    var ready = routed with { Dns = new[] { TunConfig.Resolver } };
+    var samples = new Queue<TunObservation>(new[] { expected, up, up with { AddressState = "Tentative" }, ipv4, routed, ready });
+    var result = await TunReadiness.Wait(samples.Dequeue, () => true, TimeSpan.FromSeconds(2),
+        TimeSpan.FromMilliseconds(6), CancellationToken.None);
+    Assert(samples.Count == 0 && result.Ready && result.WaitedMilliseconds > 0);
+    Assert(result.Lines().Any(line => line.Contains(result.Id.ToString())));
+
+    var wrongRoute = ready with { PeerRoute = 42 };
+    Assert(wrongRoute.Failure!.Contains("к VPN-серверу"));
+    var timedOut = await TunReadiness.Wait(() => wrongRoute, () => true, TimeSpan.FromMilliseconds(20),
+        TimeSpan.FromMilliseconds(5), CancellationToken.None);
+    Assert(!timedOut.Ready && timedOut.WaitedMilliseconds >= 19);
+    Assert((ready with { ResolverRoute = 7 }).Failure!.Contains("контрольный DNS"));
+    Assert((ready with { InternetRoute = 7 }).Failure!.Contains("контрольный HTTPS"));
+    Assert((ready with { Dns = Array.Empty<string>() }).Failure!.Contains("назначение DNS"));
+    var exited = await TunReadiness.Wait(() => up, () => false, TimeSpan.FromSeconds(2),
+        TimeSpan.FromMilliseconds(10), CancellationToken.None);
+    Assert(exited.ErrorCode == "TUN_XRAY_EXITED" && exited.Failure!.Contains("Ядро TUN завершилось"));
+    var restarted = await TunReadiness.Wait(() => ready, () => true, TimeSpan.FromSeconds(1),
+        TimeSpan.FromMilliseconds(10), CancellationToken.None);
+    Assert(restarted.Ready);
+    using var cancellation = new CancellationTokenSource();
+    cancellation.Cancel();
+    try
+    {
+        await TunReadiness.Wait(() => up, () => true, TimeSpan.FromSeconds(1), TimeSpan.FromMilliseconds(10), cancellation.Token);
+        throw new InvalidOperationException("Wintun wait ignored cancellation.");
+    }
+    catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+});
+Test("TUN reports DNS RCODE and rejects unrelated, malformed, or empty answers", () => {
+    var request = TunDns.Query(TunConnectivity.ControlName);
+    var reply = NativeTunTests.DnsAnswer(request);
+    Assert(TunDns.Read(request, reply, out var ok) == TunDnsAnswer.Resolved && ok == 0);
+    var nxdomain = NativeTunTests.DnsAnswer(request, 3);
+    Assert(TunDns.Read(request, nxdomain, out var error) == TunDnsAnswer.ServerError && error == 3);
+    var truncated = request.ToArray();
+    truncated[2] = 0x83;
+    Assert(TunDns.Read(request, truncated, out _) == TunDnsAnswer.Truncated);
+    truncated[2] = 0x81;
+    Assert(TunDns.Read(request, truncated, out _) == TunDnsAnswer.NoAddress);
+    Assert(TunDns.Read(request, reply.AsSpan(0, reply.Length - 1), out _) == TunDnsAnswer.Invalid);
+    reply[0] ^= 1;
+    Assert(TunDns.Read(request, reply, out _) == TunDnsAnswer.Invalid);
+    Assert(TunDns.Read(request, NativeTunTests.DnsAnswer(TunDns.Query("example.com")), out _) == TunDnsAnswer.Invalid);
+});
+Test("TUN cannot report ready with failed DNS even when IPv4 HTTPS is verified", () => {
+    var pass = new TunProbe(true, "fixture", 1);
+    var fail = new TunProbe(false, "DNS_TIMEOUT", 3000);
+    var system = new TunChecks(pass, fail, pass);
+    var direct = new TunChecks(fail, pass, pass);
+    Assert(!system.Success && system.FailedStage == "системное разрешение DNS");
+    Assert(!direct.Success && direct.FailedStage == "запрос к DNS на Wintun");
+    Assert(system.Lines().Any(line => line.Contains("DNS_TIMEOUT")));
+    var state = new ConnectionState();
+    state.Begin();
+    foreach (var check in Enum.GetValues<Check>()) state.Record(check, CheckResult.Passed);
+    state.Confirm(DateTimeOffset.Now, false);
+    state.ReportHealth(system.Success, system.Https.Success);
+    Assert(state.Phase == Phase.Unstable && state.Result(Check.Https) == CheckResult.Passed);
+    state.ReportHealth(true, true);
+    Assert(state.Phase == Phase.Connected);
+});
+Test("Only classified Xray diagnostics and its exit code can appear in the TUN report", () => {
+    var diagnostic = new TunEngineDiagnostic();
+    diagnostic.Read("fixture-secret-vless://ignored");
+    Assert(diagnostic.Description == null);
+    diagnostic.Read("fixture-secret unable to set routes other-credential");
+    diagnostic.Exited(23);
+    Assert(diagnostic.Description!.Contains("23") && diagnostic.Description.Contains("установка маршрутов") &&
+        !diagnostic.Description.Contains("fixture-secret") && !diagnostic.Description.Contains("other-credential"));
+});
+Test("Production TUN routes encrypted DNS and keeps telemetry on loopback", () => {
+    using var config = JsonDocument.Parse(TunConfig.Engine(Guid.NewGuid(), IPAddress.Parse("203.0.113.71"), IPAddress.Parse("192.0.2.31"),
+        Profiles.Parse(Base + "?security=tls"), 34002, 34003));
+    var root = config.RootElement;
+    Assert(root.GetProperty("dns").GetProperty("servers")[0].GetString() == "https://dns.quad9.net/dns-query");
+    Assert(root.GetProperty("dns").GetProperty("disableFallback").GetBoolean());
+    Assert(root.GetProperty("api").GetProperty("listen").GetString() == "127.0.0.1:34003");
+    Assert(root.GetProperty("api").GetProperty("services")[0].GetString() == "StatsService");
+    var rules = root.GetProperty("routing").GetProperty("rules").EnumerateArray().ToArray();
+    Assert(rules[0].GetProperty("inboundTag")[0].GetString() == root.GetProperty("dns").GetProperty("tag").GetString());
+    Assert(rules[0].GetProperty("outboundTag").GetString() == "vpn");
+    Assert(rules.Any(rule => rule.TryGetProperty("port", out var port) && port.GetString() == "53" &&
+        rule.GetProperty("network").GetString() == "tcp,udp"));
+    var dns = root.GetProperty("outbounds").EnumerateArray().Single(item => item.GetProperty("protocol").GetString() == "dns");
+    Assert(dns.GetProperty("streamSettings").GetProperty("sockopt").GetProperty("dialerProxy").GetString() == "vpn");
+});
+Test("Pin the TUN VLESS source and reject the VPN peer re-entering Wintun", () => {
+    var peer = IPAddress.Parse("203.0.113.71");
+    var source = IPAddress.Parse("192.0.2.31");
+    var profile = Profiles.Parse(Base + "?security=reality&type=tcp&flow=xtls-rprx-vision&sni=vpn.example&pbk=" + RealityKey + "&sid=01");
+    using var config = JsonDocument.Parse(TunConfig.Engine(Guid.NewGuid(), peer, source, profile, 34002));
+    var root = config.RootElement;
+    var outbound = root.GetProperty("outbounds")[0];
+    Assert(outbound.GetProperty("sendThrough").GetString() == source.ToString());
+    Assert(outbound.GetProperty("streamSettings").GetProperty("realitySettings").GetProperty("serverName").GetString() == "vpn.example");
+    var rules = root.GetProperty("routing").GetProperty("rules").EnumerateArray().ToArray();
+    var rejected = Array.FindIndex(rules, rule => rule.TryGetProperty("ruleTag", out var tag) &&
+        tag.GetString() == "pmt-peer-reentry");
+    Assert(rejected >= 0 && rejected < rules.Length - 1);
+    var guard = rules[rejected];
+    Assert(guard.GetProperty("inboundTag")[0].GetString() == "pomogator-tun" &&
+        guard.GetProperty("ip")[0].GetString() == peer + "/32" && guard.GetProperty("outboundTag").GetString() == "block");
+    using var proxy = JsonDocument.Parse(XrayConfig.Create(profile, 34003));
+    Assert(!proxy.RootElement.GetProperty("outbounds")[0].TryGetProperty("sendThrough", out _));
+    var baseline = new TunBaseline(7, "fixture", new[] { source.ToString(), TunConfig.Address }, [], 7);
+    Assert(baseline.HasSource(source) && !baseline.HasSource(peer) && !baseline.HasSource(IPAddress.Parse(TunConfig.Address)));
+});
+Test("Only the authenticated diagnostic inlet can reach the pinned destination", () => {
+    var endpoint = new TunControlEndpoint(34004, "fixture-user", "fixture-password", "1.1.1.1", 443);
+    using var config = JsonDocument.Parse(TunConfig.Engine(Guid.NewGuid(), IPAddress.Parse("203.0.113.71"), IPAddress.Parse("192.0.2.31"),
+        Profiles.Parse(Base + "?security=tls"), 34002, 34003, endpoint));
+    var root = config.RootElement;
+    var inlet = root.GetProperty("inbounds").EnumerateArray().Single(item =>
+        item.GetProperty("tag").GetString() == "pmt-tun-control");
+    Assert(inlet.GetProperty("listen").GetString() == "127.0.0.1");
+    Assert(inlet.GetProperty("settings").GetProperty("accounts")[0].GetProperty("pass").GetString() == endpoint.Password);
+    var rules = root.GetProperty("routing").GetProperty("rules").EnumerateArray().Where(rule =>
+        rule.TryGetProperty("ruleTag", out var tag) && tag.GetString()!.StartsWith("pmt-control-")).ToArray();
+    Assert(rules.Length == 2 && rules[0].GetProperty("ip")[0].GetString() == "1.1.1.1/32" &&
+        rules[0].GetProperty("port").GetString() == "443" && rules[0].GetProperty("network").GetString() == "tcp" &&
+        rules[0].GetProperty("outboundTag").GetString() == "vpn" && rules[1].GetProperty("outboundTag").GetString() == "block");
+    Assert(root.GetProperty("log").GetProperty("access").GetString() == "none");
+});
+Test("Differential diagnosis and Xray event sampling export categories without raw secrets", () => {
+    var engine = new TunEngineDiagnostic();
+    Assert(!engine.Started);
+    engine.Read("2026/11/22 [Warning] core: Xray 26.11.9 started");
+    Assert(engine.Started);
+    engine.Read("Hit route rule: [pmt-control-vless] marker");
+    engine.Read("transport/internet/tcp: failed to dial to dest marker");
+    engine.Read("proxy/vless/outbound: failed to transfer response payload > no route to host");
+    engine.Read("app/proxyman/outbound: failed to process outbound traffic > REALITY: received real certificate marker");
+    engine.Read("failed to handle DOH response marker");
+    engine.Read("failed to decode response header marker");
+    engine.Read("Hit route rule: [pmt-peer-reentry] marker");
+    engine.Read("proxy/vless/outbound: tunneling request to marker");
+    var events = engine.TakeEvents();
+    Assert(events.Length == 8 && events.Single(line => line.Contains("сбой открытия исходящего сокета")).EndsWith("× 1") &&
+        !string.Join(" ", events).Contains("marker") && engine.TakeEvents().Length == 0);
+    var fail = new TunProbe(false, "пример ошибки", 3);
+    var pass = new TunProbe(true, "пример успеха", 5);
+    var report = new TunChecks(pass, pass, fail, events, fail, pass);
+    Assert(!report.Success);
+    Assert(report.Lines().Any(line => line.Contains("Сбой наблюдается на пути через Wintun")));
+    Assert(report.Lines().Any(line => line.Contains("HTTPS через локальный вход того же Xray")));
+    Assert(new TunChecks(fail, fail, fail, DirectPinned: fail, SameEngine: fail).FailedStage.Contains("VLESS"));
+    Assert(new TunChecks(fail, fail, pass, DirectPinned: pass, SameEngine: pass).FailedStage.Contains("DNS"));
+    Assert(TunConnectivity.PeerLine(PeerTcp.Seen | PeerTcp.ExpectedSource | PeerTcp.Established, 7, 7).Contains("ESTABLISHED"));
+    Assert(TunConnectivity.PeerLine(PeerTcp.None, 7, 7).Contains("сокет не зафиксирован"));
+});
+Test("Correlate known socket destinations and separate raw TCP, TLS and VLESS failure", () => {
+    var events = new TunSocketDiagnostic(IPAddress.Parse("203.0.113.71"), 443, rawTransport: true);
+    events.Read("[Info] [192] app/dispatcher: Hit route rule: [pmt-control-vless] so taking detour [vpn] for [tcp:1.1.1.1:443]");
+    events.Read("[Info] [192] transport/internet/tcp: dialing TCP to tcp:203.0.113.71:443");
+    events.Read("[Info] [193] app/dispatcher: Hit route rule: [pmt-wintun-probe] so taking detour [vpn] for [tcp:1.1.1.1:443]");
+    events.Read("[Info] [192] app/proxyman/outbound: failed to process outbound traffic > proxy/vless/outbound: failed to find an available destination > [transport/internet/tcp: failed to dial to dest > dial tcp 192.0.2.31:0->203.0.113.71:443: connectex: WinSock 10061]");
+    events.Read("[Info] [193] app/proxyman/outbound: failed to process outbound traffic > proxy/vless/outbound: failed to find an available destination > [read tcp 192.0.2.31:35158->203.0.113.8:1443: wsarecv: winapi error #10054]");
+    events.Read("[Info] app/dispatcher: Hit route rule: [pmt-doh-vless] so taking detour [vpn] for [tcp:dns.quad9.net:443]");
+    events.Read("[Info] app/proxyman/outbound: failed to process outbound traffic > proxy/vless/outbound: failed to decode response header > EOF");
+    events.Read("[Error] app/dns: failed to retrieve response for fixture-secret");
+    var report = string.Join("\n", events.TakeEvents());
+    Assert(report.Contains("контроль через Xray → IP:порт VPN-сервера · подключение TCP (ConnectEx) · WinSock 10061"));
+    Assert(report.Contains("Wintun к цели HTTPS → другой IP:порт · ввод-вывод после TCP") && report.Contains("WinSock 10054"));
+    Assert(report.Contains("поток без метки → назначение не подтверждено · передача VLESS · код WinSock не передан"));
+    Assert(report.Contains("резолвер DoH") && !report.Contains("fixture-secret") && !report.Contains("203.0.113."));
+    Assert(events.TakeEvents().Length == 0);
+    events.Read("[Info] [192] proxy/vless/outbound: tunneling request to tcp:1.1.1.1:443 via 203.0.113.71:443");
+    Assert(events.TakeEvents().Single().Contains("контроль через Xray → IP:порт VPN-сервера · внешний транспорт открыт"));
+});
+Test("Report Windows packets separately from Xray bytes and preserve unknown/reset", () => {
+    const string json = """
+        {"stat":[{"name":"inbound>>>pomogator-tun>>>traffic>>>uplink","value":"31"},
+        {"name":"inbound>>>pomogator-tun>>>traffic>>>downlink"},
+        {"name":"outbound>>>vpn>>>traffic>>>uplink","value":70},
+        {"name":"outbound>>>vpn>>>traffic>>>downlink","value":"4"},
+        {"name":"unrelated","value":833}]}
+        """;
+    var parsed = TunXrayCounters.Parse(json);
+    Assert(parsed == new TunXraySample(31, 0, 70, 4));
+    Assert(TunXrayCounters.Parse("""{"stat":[]}""") == null);
+    var before = new TunTrafficSample(new TunPacketSample(9, 10, 5, 2, 0, 0), new TunXraySample(3, 0, 4, 0));
+    var after = new TunTrafficSample(new TunPacketSample(11, 10, 4, 2, 0, 0), parsed);
+    var lines = after.Describe("DNS", before).ToArray();
+    Assert(lines.Any(line => line.Contains("Windows → Wintun: 2") && line.Contains("н/д/0")));
+    Assert(lines.Any(line => line.Contains("байты полезной нагрузки Xray TUN ↑/↓: 28/0")));
+    Assert(lines.Any(line => line.Contains("возврат полезной нагрузки")));
+});
+Test("Link a WFP block only to an unambiguous ConnectEx tuple from the denied server flow", () => {
+    var peer = IPAddress.Parse("203.0.113.71");
+    var local = TunWfpDiagnostic.Address(IPAddress.Parse("192.0.2.31"));
+    var diagnostic = new TunSocketDiagnostic(peer, 443, rawTransport: true);
+    diagnostic.Read("[Info] [192] transport/internet/tcp: dialing TCP to tcp:203.0.113.71:443");
+    diagnostic.Read("[Info] [192] app/proxyman/outbound: failed to process outbound traffic > proxy/vless/outbound: failed to find an available destination > common/retry: [transport/internet/tcp: failed to dial to dest > dial tcp 192.0.2.31:38158->203.0.113.71:443: connectex: winapi error #10013 transport/internet/tcp: failed to dial to dest > dial tcp 192.0.2.31:38159->203.0.113.8:443: connectex: winapi error #10013]");
+    diagnostic.TakeEvents(out var denials);
+    Assert(denials.Length == 1 && denials[0].FlowId == 192 && denials[0].LocalPort == 38158 && denials[0].LocalAddress == local);
+    var attempt = denials[0];
+    var drop = new TunWfpDrop(attempt.Until, local, 38158, 512, 48, true, "TEST WFP");
+    var exact = TunWfpDiagnostic.Correlate(denials, [drop], local).Single();
+    Assert(exact.Contains("ID потока Xray 192") && exact.Contains("фильтр 512") && exact.Contains("ожидаемый IPv4") &&
+        !exact.Contains("192.0.2.") && !exact.Contains("203.0.113."));
+    Assert(TunWfpDiagnostic.Correlate([attempt with { LocalPort = 0 }], [drop]).Single().Contains("конкретный поток не установлен"));
+    Assert(TunWfpDiagnostic.Correlate(denials, [drop with { ConnectLayer = false }]).Single().Contains("конкретный поток не установлен"));
+    Assert(TunWfpDiagnostic.Correlate([attempt, attempt with { FlowId = 193 }], [drop]).Single().Contains("конкретный поток не установлен"));
+    Assert(TunWfpDiagnostic.Correlate(denials, [drop with { At = drop.At.AddMinutes(-1) }]).Single().Contains("не найдено"));
+    diagnostic.Read("[Info] [194] app/proxyman/outbound: failed to process outbound traffic > proxy/vless/outbound: failed to find an available destination > transport/internet/tcp: failed to dial to dest > dial tcp 192.0.2.31:0->203.0.113.71:443: connectex: winapi error #10013");
+    diagnostic.TakeEvents(out denials);
+    Assert(denials.Single().LocalPort == 0);
 });
 Test("TUN detects overlay and UBoost, while PPPoE is a valid uplink", () => {
     Assert(!TunWindows.Conflicts(new[] { ("PPPoE", true, System.Net.NetworkInformation.NetworkInterfaceType.Ppp) }));
@@ -197,6 +434,9 @@ Test("TUN detects overlay and UBoost, while PPPoE is a valid uplink", () => {
     var before = new TunBaseline(9, "synthetic", new[] { "192.0.2.2" }, new[] { "192.0.2.53" }, 9);
     Assert(!TunWindows.Same(before, before with { Uplink = 10 }));
     Assert(!TunWindows.Same(before, before with { Addresses = new[] { "192.0.2.3" } }));
+    Assert(TunWindows.MatchesBaseline(before, before with { PublicRoute = 9 })); // Older DPAPI records omit PublicRoute.
+    Assert(!TunWindows.MatchesBaseline(before with { PublicRoute = 9 }, before with { PublicRoute = 42 }));
+    Assert(!TunWindows.MatchesBaseline(before, before with { InternetRoute = 42 }));
 });
 Test("Crash recovery rejects a foreign route gateway, metric or destination", () => {
     var planned = new HashSet<string> { "198.51.100.53/32" };
@@ -236,7 +476,10 @@ if (!string.IsNullOrWhiteSpace(executable))
     }) await CheckConfiguration(executable, profile);
     var advanced = Profiles.ParseList(EasyGo("server.example", 443, Id, RealityKey), keepRouting: true).Single();
     await CheckConfiguration(executable, advanced);
-    Console.WriteLine("PASS Pinned Xray validates transports and full EasyGo configuration");
+    var tunConfig = TunConfig.Engine(Guid.NewGuid(), IPAddress.Parse("203.0.113.71"), IPAddress.Parse("192.0.2.31"), advanced, 34010, 34011,
+        new TunControlEndpoint(34012, "fixture-user", "fixture-password", TunConfig.InternetProbe, 443));
+    await CheckConfiguration(executable, advanced, tunConfig);
+    Console.WriteLine("PASS Pinned Xray validates transports, full EasyGo and TUN DoH/StatsService configuration");
     passed++;
 
     await TestAsync("Classify a core startup failure separately from a proxy failure", async () => {
@@ -244,6 +487,7 @@ if (!string.IsNullOrWhiteSpace(executable))
         var error = await Fails(() => Xray.StartAsync(executable, "{", port, CancellationToken.None));
         Assert(error.FailedCheck == Check.Xray);
     });
+    await TestAsync("Pinned Xray reports a reset after TCP separately from failed TCP opening", () => CheckOuterReset(executable));
 
     using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(16));
     var destination = new TcpListener(IPAddress.Loopback, 0);
@@ -409,7 +653,75 @@ static VpnError Throws(Action action)
     throw new InvalidOperationException("Expected validation error.");
 }
 
-static async Task CheckConfiguration(string executable, Profile profile)
+static async Task CheckOuterReset(string executable)
+{
+    using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+    using var endpoint = new TcpListener(IPAddress.Loopback, 0);
+    endpoint.Start();
+    var peerPort = ((IPEndPoint)endpoint.LocalEndpoint).Port;
+    var clientPort = Xray.FreePort();
+    var profile = Profiles.Parse($"vless://{Id}@127.0.0.1:{peerPort}?security=tls&sni=fixture.example");
+    var diagnostic = new TunSocketDiagnostic(IPAddress.Loopback, peerPort, rawTransport: true);
+    using var resetDeadline = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
+    var config = JsonSerializer.Serialize(new {
+        log = new { loglevel = "info", access = "none" },
+        inbounds = new[] { new { listen = "127.0.0.1", port = clientPort, protocol = "http", tag = "fixture" } },
+        outbounds = new[] { XrayConfig.Outbound(profile, "vpn") },
+        routing = new { rules = new[] { new { type = "field", ruleTag = "pmt-control-vless",
+            inboundTag = new[] { "fixture" }, outboundTag = "vpn" } } }
+    });
+    using var core = await Xray.StartAsync(executable, config, clientPort, deadline.Token, diagnosticLine: diagnostic.Read);
+    var accepted = 0;
+    async Task ResetConnections()
+    {
+        var hello = new byte[1];
+        while (true)
+        {
+            using var socket = await endpoint.AcceptSocketAsync(resetDeadline.Token);
+            Assert(await socket.ReceiveAsync(hello, SocketFlags.None, resetDeadline.Token) == 1 && hello[0] == 0x16);
+            socket.LingerState = new LingerOption(true, 0);
+            Interlocked.Increment(ref accepted);
+        }
+    }
+    var reset = ResetConnections();
+    using var http = Xray.ThroughProxy(clientPort);
+    try
+    {
+        await Fails(() => Xray.VerifyAsync(http, new Uri("https://fixture.example/"), deadline.Token));
+        var report = await ReadFailure("ввод-вывод после TCP");
+        Assert(Volatile.Read(ref accepted) > 0);
+        if (!report.Any(line => line.Contains("контроль через Xray → IP:порт VPN-сервера · ввод-вывод после TCP") &&
+            (!OperatingSystem.IsWindows() || line.Contains("WinSock 10054"))))
+            throw new InvalidOperationException("No classified reset after TCP. " + string.Join(" | ", report));
+        Assert(!report.Any(line => line.Contains("открытие TCP-соединения") || line.Contains("внешний транспорт открыт")));
+    }
+    finally
+    {
+        resetDeadline.Cancel();
+        try { await reset; }
+        catch (OperationCanceledException) when (resetDeadline.IsCancellationRequested) { }
+    }
+    endpoint.Stop();
+    await Fails(() => Xray.VerifyAsync(http, new Uri("https://fixture.example/"), deadline.Token));
+    var refused = await ReadFailure(OperatingSystem.IsWindows() ? "подключение TCP (ConnectEx)" : "открытие TCP-соединения");
+    if (!refused.Any(line => line.Contains("контроль через Xray → IP:порт VPN-сервера") &&
+        (OperatingSystem.IsWindows() ? line.Contains("ConnectEx") && line.Contains("WinSock 10061") : line.Contains("открытие TCP"))))
+        throw new InvalidOperationException("No classified TCP refusal. " + string.Join(" | ", refused));
+
+    async Task<List<string>> ReadFailure(string expected)
+    {
+        var report = new List<string>();
+        for (var attempt = 0; attempt < 15; attempt++)
+        {
+            report.AddRange(diagnostic.TakeEvents());
+            if (report.Any(line => line.Contains(expected))) break;
+            await Task.Delay(100, deadline.Token);
+        }
+        return report;
+    }
+}
+
+static async Task CheckConfiguration(string executable, Profile profile, string? config = null)
 {
     using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(8));
     var info = new ProcessStartInfo(executable) {
@@ -422,7 +734,7 @@ static async Task CheckConfiguration(string executable, Profile profile)
     var stderr = process.StandardError.ReadToEndAsync(deadline.Token);
     try
     {
-        await process.StandardInput.WriteAsync(XrayConfig.Create(profile, 34000, 34001, 34002));
+        await process.StandardInput.WriteAsync(config ?? XrayConfig.Create(profile, 34000, 34001, 34002));
         process.StandardInput.Close();
         await process.WaitForExitAsync(deadline.Token);
         await Task.WhenAll(stdout, stderr);

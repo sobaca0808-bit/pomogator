@@ -13,7 +13,9 @@ public sealed class Xray : IDisposable
     private bool disposed;
     private readonly Func<int, int, bool>? ownsPort;
     public int Port { get; }
+    public int ProcessId => process.Id;
     public bool Running => !disposed && !process.HasExited;
+    public int? ExitCode => !disposed && process.HasExited ? process.ExitCode : null;
 
     private Xray(Process process, int port, Func<int, int, bool>? ownsPort)
     { this.process = process; Port = port; this.ownsPort = ownsPort; }
@@ -26,8 +28,49 @@ public sealed class Xray : IDisposable
         finally { listener.Stop(); }
     }
 
+    public static async Task<Xray> StartWithPortsAsync(string executable,
+        Func<(string Config, int Port, int[] OtherPorts)> plan, CancellationToken token,
+        Func<Process, IDisposable?> protect, Func<int, int, bool> ownsPort, Action<int>? startupExit = null,
+        Func<string, int, CancellationToken, Task<Xray>>? launch = null)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            token.ThrowIfCancellationRequested();
+            var (config, port, otherPorts) = plan();
+            var collision = 0;
+            Xray? candidate = null;
+            try
+            {
+                candidate = launch != null ? await launch(config, port, token) :
+                    await StartAsync(executable, config, port, token, protect, ownsPort, startupSeconds: 10,
+                        diagnosticLine: line =>
+                        {
+                            if (line.Contains("address already in use", StringComparison.OrdinalIgnoreCase) ||
+                                line.Contains("Only one usage of each socket address", StringComparison.OrdinalIgnoreCase))
+                                Interlocked.Exchange(ref collision, 1);
+                        }, startupExit: startupExit);
+                using var ready = CancellationTokenSource.CreateLinkedTokenSource(token);
+                ready.CancelAfter(TimeSpan.FromSeconds(3));
+                try
+                {
+                    foreach (var additional in otherPorts)
+                        while (!await candidate.IsProxyReadyAsync(additional, ready.Token))
+                            await Task.Delay(100, ready.Token);
+                }
+                catch (OperationCanceledException) when (!token.IsCancellationRequested)
+                { throw new VpnError("Xray не подтвердил один из входов локального прокси.", Check.Proxy); }
+                return candidate;
+            }
+            catch (VpnError error) when (attempt < 3 && !token.IsCancellationRequested &&
+                (error.FailedCheck == Check.Proxy || Volatile.Read(ref collision) != 0))
+            { candidate?.Dispose(); }
+            catch { candidate?.Dispose(); throw; }
+        }
+    }
+
     public static async Task<Xray> StartAsync(string executable, string config, int port, CancellationToken token,
-        Func<Process, IDisposable?>? protect = null, Func<int, int, bool>? ownsPort = null, Action? started = null, bool inheritConsole = false, int startupSeconds = 6)
+        Func<Process, IDisposable?>? protect = null, Func<int, int, bool>? ownsPort = null, Action? started = null, bool inheritConsole = false, int startupSeconds = 6,
+        Action<string>? diagnosticLine = null, Action<int>? startupExit = null)
     {
         var info = new ProcessStartInfo(executable) {
             UseShellExecute = false, CreateNoWindow = !inheritConsole, RedirectStandardInput = true,
@@ -53,6 +96,11 @@ public sealed class Xray : IDisposable
         {
             result.lifetime = protect?.Invoke(process);
             started?.Invoke();
+            if (diagnosticLine != null)
+            {
+                process.OutputDataReceived += (_, e) => { if (e.Data is { } line) diagnosticLine(line); };
+                process.ErrorDataReceived += (_, e) => { if (e.Data is { } line) diagnosticLine(line); };
+            }
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
             using var startup = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -64,7 +112,10 @@ public sealed class Xray : IDisposable
             while (true)
             {
                 if (!result.Running)
+                {
+                    RecordExit();
                     throw new VpnError("Ядро отклонило профиль или завершило запуск. Проверьте параметры TLS, REALITY и транспорта.", Check.Xray);
+                }
                 if (await result.IsProxyReadyAsync(port, startup.Token)) return result;
                 await Task.Delay(100, startup.Token);
             }
@@ -76,6 +127,7 @@ public sealed class Xray : IDisposable
         }
         catch (IOException)
         {
+            RecordExit();
             result.Dispose();
             throw new VpnError("Ядро завершилось до загрузки профиля.", Check.Xray);
         }
@@ -83,6 +135,12 @@ public sealed class Xray : IDisposable
         {
             result.Dispose();
             throw;
+        }
+
+        void RecordExit()
+        {
+            if (startupExit == null || result.ExitCode is not { } code) return;
+            startupExit(code);
         }
     }
 
@@ -95,7 +153,10 @@ public sealed class Xray : IDisposable
         catch (OperationCanceledException) when (!token.IsCancellationRequested) { return false; }
     }
 
-    public static async Task<TimeSpan> CheckServerAsync(Profile profile, CancellationToken token)
+    public static async Task<TimeSpan> CheckServerAsync(Profile profile, CancellationToken token) =>
+        (await CheckServerSourceAsync(profile, token)).Elapsed;
+
+    public static async Task<(TimeSpan Elapsed, IPAddress Source)> CheckServerSourceAsync(Profile profile, CancellationToken token)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         deadline.CancelAfter(TimeSpan.FromSeconds(6));
@@ -104,7 +165,8 @@ public sealed class Xray : IDisposable
         {
             var watch = Stopwatch.StartNew();
             await client.ConnectAsync(profile.Host, profile.Port, deadline.Token);
-            return watch.Elapsed;
+            var address = ((IPEndPoint)client.Client.LocalEndPoint!).Address;
+            return (watch.Elapsed, address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address);
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested)
         { throw new VpnError("VPN-сервер не ответил на TCP-проверку за 6 секунд."); }

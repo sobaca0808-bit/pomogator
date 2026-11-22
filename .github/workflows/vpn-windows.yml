@@ -1,8 +1,8 @@
-name: ПОМОГАТОР VPN 0.3 — Windows x64
+name: ПОМОГАТОР VPN 0.3.7 — Windows x64
 
 on:
   push:
-    branches: [vpn-v0.3.0-tun]
+    branches: [vpn-v0.3.0-tun, vpn-v0.3.1-tun-fix]
     paths:
       - windows/vpn/**
       - .github/workflows/vpn-windows.yml
@@ -41,7 +41,7 @@ jobs:
         run: dotnet run --project windows/vpn/tests/ui/UiTests.csproj -c Release -- "$env:RUNNER_TEMP/pomogator-vpn-screenshots"
       - uses: actions/upload-artifact@v4
         with:
-          name: PomogatorVpn-0.3.0-screenshots
+          name: PomogatorVpn-0.3.7-screenshots
           path: ${{ runner.temp }}/pomogator-vpn-screenshots/
           if-no-files-found: error
       - name: Build Windows x64 package
@@ -52,6 +52,6 @@ jobs:
           Copy-Item "$env:RUNNER_TEMP/pomogator-xray/*" windows/vpn/dist
       - uses: actions/upload-artifact@v4
         with:
-          name: PomogatorVpn-0.3.0-win-x64
+          name: PomogatorVpn-0.3.7-win-x64
           path: windows/vpn/dist/
           if-no-files-found: error

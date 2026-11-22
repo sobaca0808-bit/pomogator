@@ -215,7 +215,7 @@ public static class XrayConfig
         return inbound;
     }
 
-    internal static object Outbound(Profile profile, string tag)
+    internal static Dictionary<string, object> Outbound(Profile profile, string tag)
     {
         var stream = new Dictionary<string, object> {
             ["network"] = profile.Transport, ["security"] = profile.Security
@@ -252,10 +252,13 @@ public static class XrayConfig
                 };
                 break;
         }
-        return new { tag, protocol = "vless", settings = new {
-            vnext = new[] { new { address = profile.Host, port = profile.Port, users = new[] {
-                new { id = profile.Id.ToString("D"), encryption = "none", flow = profile.Option("flow") }
-            } } }
-        }, streamSettings = stream };
+        return new Dictionary<string, object> {
+            ["tag"] = tag, ["protocol"] = "vless", ["settings"] = new {
+                vnext = new[] { new { address = profile.Host, port = profile.Port, users = new[] {
+                    new { id = profile.Id.ToString("D"), encryption = "none", flow = profile.Option("flow") }
+                } } }
+            },
+            ["streamSettings"] = stream
+        };
     }
 }

@@ -1,7 +1,9 @@
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Security;
+using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
@@ -9,6 +11,7 @@ using System.Security.Principal;
 using Microsoft.Win32.SafeHandles;
 using System.Security.Cryptography.X509Certificates;
 using System.Net.Sockets;
+using System.Text;
 using System.Text.Json;
 using Pomogator.Vpn;
 
@@ -53,74 +56,177 @@ internal static class NativeTunTests
         var dns = IPAddress.Parse(dnsTarget);
         var beforeWeb = TunWindows.Index(web);
         var beforeDns = TunWindows.Index(dns);
-        var snapshot = TunWindows.Capture(web);
+        var peer = IPAddress.Parse("203.0.113.21");
+        var snapshot = TunWindows.Capture(peer);
+        var uplinkAddress = snapshot.Addresses.Select(IPAddress.Parse).First(snapshot.HasSource);
         var fixtureRoutes = new[] { webTarget + "/32", dnsTarget + "/32" };
-        var recovery = new TunRecovery(fixtureId, webTarget, snapshot, fixtureRoutes, dnsTarget);
+        var recovery = new TunRecovery(fixtureId, peer.ToString(), snapshot, fixtureRoutes, dnsTarget);
         Require(TunWindows.Vacant(recovery), "Test adapter was not initially absent.");
 
         using var httpDestination = new TcpListener(IPAddress.Loopback, 0);
         httpDestination.Start();
         var httpPort = ((IPEndPoint)httpDestination.LocalEndpoint).Port;
         using var udpDestination = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
-        var udpPort = ((IPEndPoint)udpDestination.Client.LocalEndPoint!).Port;
-        using var timeLimit = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+        var dnsPort = ((IPEndPoint)udpDestination.Client.LocalEndPoint!).Port;
+        using var tcpDnsDestination = new TcpListener(IPAddress.Loopback, dnsPort);
+        tcpDnsDestination.Start();
+        using var timeLimit = new CancellationTokenSource(TimeSpan.FromSeconds(75));
 
         var upstreamPort = Xray.FreePort();
+        var upstreamReady = Xray.FreePort();
+        while (upstreamReady == upstreamPort) upstreamReady = Xray.FreePort();
+        const string upstreamHost = "vless-fixture.test";
+        using var upstreamKey = RSA.Create(2048);
+        var keyPem = upstreamKey.ExportRSAPrivateKeyPem().Split('\n');
+        using var upstreamCertificate = CreateCertificate(upstreamHost, upstreamKey);
         var upstreamConfig = JsonSerializer.Serialize(new {
             log = new { loglevel = "none" },
-            inbounds = new[] { new { listen = "127.0.0.1", port = upstreamPort, protocol = "vless",
-                settings = new { clients = new[] { new { id } }, decryption = "none" } } },
-            outbounds = new[] { Redirect("web", httpPort), Redirect("dns", udpPort) },
-            routing = new { rules = new[] {
-                new { type = "field", ip = new[] { dnsTarget }, outboundTag = "dns" }
+            inbounds = new object[] {
+                new { listen = "127.0.0.1", port = upstreamReady, protocol = "http" },
+                new { listen = uplinkAddress.ToString(), port = upstreamPort, protocol = "vless",
+                    settings = new { clients = new[] { new { id } }, decryption = "none" },
+                    streamSettings = new { network = "raw", security = "tls", tlsSettings = new {
+                        certificates = new[] { new { certificate = upstreamCertificate.ExportCertificatePem().Split('\n'),
+                            key = keyPem } }
+                    } }
+                }
+            },
+            outbounds = new object[] { new { tag = "block", protocol = "blackhole" }, Redirect("web", httpPort), Redirect("dns", dnsPort) },
+            routing = new { rules = new object[] {
+                new { type = "field", ip = new[] { webTarget }, port = httpPort.ToString(), network = "tcp", outboundTag = "web" },
+                new { type = "field", ip = new[] { dnsTarget }, port = "53", network = "tcp,udp", outboundTag = "dns" }
             } }
         });
-        using var upstream = await Xray.StartAsync(executable, upstreamConfig, upstreamPort, timeLimit.Token,
+        using var upstream = await Xray.StartAsync(executable, upstreamConfig, upstreamReady, timeLimit.Token,
             WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback);
-        var clientPort = Xray.FreePort();
-        var socks = Distinct(clientPort);
-        var readiness = Distinct(clientPort, socks);
-        const string password = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        var client = Profiles.Parse($"vless://{id}@127.0.0.1:{upstreamPort}");
-        using var bridge = await Xray.StartAsync(executable, TunConfig.Bridge(client, IPAddress.Loopback, clientPort, socks, password),
-            clientPort, timeLimit.Token, WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback);
-
-        // This test is intentionally not a default-route test. The runner's connection and DNS are left on its original interface.
+        var readiness = Xray.FreePort();
+        var diagnosticsPort = Xray.FreePort();
+        while (diagnosticsPort == readiness || diagnosticsPort == upstreamPort) diagnosticsPort = Xray.FreePort();
+        var controlPort = Xray.FreePort();
+        while (controlPort == readiness || controlPort == diagnosticsPort || controlPort == upstreamPort)
+            controlPort = Xray.FreePort();
+        var control = new TunControlEndpoint(controlPort, "tun-fixture", Convert.ToHexString(RandomNumberGenerator.GetBytes(24)),
+            webTarget, httpPort);
+        var client = Profiles.Parse($"vless://{id}@{uplinkAddress}:{upstreamPort}?security=tls&sni={upstreamHost}");
+        var outbound = TunConfig.UplinkOutbound(uplinkAddress, uplinkAddress, client);
+        var stream = (Dictionary<string, object>)outbound["streamSettings"];
+        var tls = (Dictionary<string, object>)stream["tlsSettings"];
+        tls["pinnedPeerCertSha256"] = Convert.ToHexString(SHA256.HashData(upstreamCertificate.RawData));
+        // The test peer listens on the runner's non-loopback IPv4 and uses an ephemeral pinned certificate.
         using var console = new TunConsole();
-        var fixture = TunConfig.CreateEngine(fixtureId, fixtureRoutes,
-            new[] { "[2001:db8:9::/48]:all" }, socks, password, readiness, dnsTarget);
+        var fixture = TunConfig.CreateEngine(fixtureId, fixtureRoutes, new[] { "198.51.100.0/24:all", "[2001:db8:9::/48]:all" },
+            outbound, readiness, dnsTarget, diagnosticsPort: diagnosticsPort, control: control, peer: uplinkAddress);
         var seenIndex = 0;
         Process? child = null;
         IDisposable Track(Process process) { child = process; return WindowsLifetime.Attach(process); }
 
-        using (var tunnel = await Xray.StartAsync(executable, fixture, readiness, timeLimit.Token, Track,
+        using (var failed = await Xray.StartAsync(executable, fixture, readiness, timeLimit.Token, Track,
             WindowsLifetime.OwnsLoopback, inheritConsole: true, startupSeconds: 24))
         {
             try
             {
+                var missing = IPAddress.Parse("198.51.100.70");
+                var observation = await TunReadiness.Wait(() => TunWindows.Observe(recovery, missing), () => failed.Running,
+                    TimeSpan.FromSeconds(2), TimeSpan.FromMilliseconds(150), timeLimit.Token);
+                Require(!observation.Ready && observation.Failure!.Contains("контрольный HTTPS") &&
+                    observation.AddressReady && observation.DnsReady, "Route failure did not identify the failed stage.");
+            }
+            finally { failed.RequestGracefulStop(console.Signal); }
+        }
+        Require(await TunWindows.WaitClean(recovery, TimeSpan.FromSeconds(5)) &&
+            TunWindows.MatchesBaseline(snapshot, TunWindows.Capture(peer)),
+            "Failed readiness did not restore the initial network before a retry.");
+
+        var engineDiagnostic = new TunEngineDiagnostic(uplinkAddress, upstreamPort, rawTransport: true);
+        using (var tunnel = await Xray.StartAsync(executable, fixture, readiness, timeLimit.Token, Track,
+            WindowsLifetime.OwnsLoopback, inheritConsole: true, startupSeconds: 24, diagnosticLine: line =>
+            {
+                engineDiagnostic.Read(line);
+                // Capture only fixed markers. The test needs to distinguish local CONNECT, dispatch and VLESS.
+                foreach (var marker in ControlLogMarkers)
+                    if (line.Contains(marker, StringComparison.OrdinalIgnoreCase))
+                        Console.WriteLine("Xray native fixture: " + marker);
+            }))
+        {
+            try
+            {
+                var observation = await TunReadiness.Wait(() => TunWindows.Observe(recovery, web), () => tunnel.Running,
+                    TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(200), timeLimit.Token);
+                Require(observation.Ready, "Native Wintun readiness failed: " + string.Join(" | ", observation.Lines()));
                 var adapter = TunWindows.Find(fixtureId);
                 Require(adapter is { OperationalStatus: OperationalStatus.Up }, "Native Wintun adapter did not appear.");
                 seenIndex = TunWindows.Index(adapter!);
                 Require(seenIndex != beforeWeb && TunWindows.Index(web) == seenIndex &&
                     TunWindows.Index(dns) == seenIndex, "Windows did not pick the TUN routes.");
                 Require(adapter!.GetIPProperties().DnsAddresses.Contains(dns), "Wintun DNS did not have the fixture address.");
+                await CheckWfpBlock(uplinkAddress, timeLimit.Token);
 
-                using var key = RSA.Create(2048);
-                var certificateRequest = new CertificateRequest("CN=" + webTarget, key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
-                var subject = new SubjectAlternativeNameBuilder();
-                subject.AddIpAddress(web);
-                certificateRequest.CertificateExtensions.Add(subject.Build());
-                using var generated = certificateRequest.CreateSelfSigned(DateTimeOffset.Now.AddMinutes(-1), DateTimeOffset.Now.AddMinutes(5));
-                using var certificate = new X509Certificate2(generated.Export(X509ContentType.Pfx), (string?)null, X509KeyStorageFlags.UserKeySet);
-                var tcp = AnswerTcp(httpDestination, certificate, timeLimit.Token);
-                using var http = TunWindows.Http(fixtureId, (_, candidate, _, _) => candidate?.GetCertHashString() == certificate.Thumbprint);
-                var response = await http.GetStringAsync("https://" + webTarget + ":" + httpPort + "/fixture", timeLimit.Token);
-                Require(response == "tun-ok", "Unproxied Windows HTTPS did not reach the VLESS server through the adapter.");
+                // Distinct payloads exceed the MTU in both directions. Validate the actual forwarded
+                // HTTP request and response after proving TLS selected the expected certificate.
+                const string tlsHost = "tls-fixture.test";
+                using var certificate = CreateCertificate(tlsHost);
+                using var unexpected = CreateCertificate(tlsHost);
+                var countersBefore = TunPacketCounters.Read(fixtureId);
+                var xrayBefore = await TunXrayCounters.Read(executable, diagnosticsPort, child!.Id, timeLimit.Token);
+                var requestBody = RandomNumberGenerator.GetBytes(32768);
+                var responseBody = RandomNumberGenerator.GetBytes(32768);
+                var tcp = AnswerHttps(httpDestination, certificate, tlsHost, requestBody, responseBody, timeLimit.Token);
+                var endpoint = new Uri($"https://{tlsHost}:{httpPort}/fixture");
+                using (var http = TunWindows.Http(fixtureId, (_, candidate, _, errors) =>
+                    candidate?.GetCertHashString() == certificate.Thumbprint &&
+                    (errors & SslPolicyErrors.RemoteCertificateNameMismatch) == 0, requiredHost: tlsHost, pinnedAddress: web))
+                using (var reply = await http.PostAsync(endpoint, new ByteArrayContent(requestBody), timeLimit.Token))
+                {
+                    reply.EnsureSuccessStatusCode();
+                    Require((await reply.Content.ReadAsByteArrayAsync(timeLimit.Token)).SequenceEqual(responseBody),
+                        "TLS response payload did not return through Wintun and VLESS.");
+                }
                 await tcp;
 
+                var rejected = RejectHttps(httpDestination, unexpected, timeLimit.Token);
+                string? observedCertificate = null;
+                using (var http = TunWindows.Http(fixtureId, (_, candidate, _, _) =>
+                {
+                    observedCertificate = candidate?.GetCertHashString();
+                    return observedCertificate == certificate.Thumbprint;
+                }, requiredHost: tlsHost, pinnedAddress: web))
+                {
+                    try
+                    {
+                        using var reply = await http.GetAsync(endpoint, timeLimit.Token);
+                        throw new InvalidOperationException("Unpinned HTTPS certificate was accepted.");
+                    }
+                    catch (HttpRequestException error) when (error.HttpRequestError == HttpRequestError.SecureConnectionError)
+                    {
+                        Require(observedCertificate == unexpected.Thumbprint,
+                            "The expected TLS failure did not receive the fixture certificate.");
+                    }
+                }
+                await rejected;
+
                 using var dnsFixture = CancellationTokenSource.CreateLinkedTokenSource(timeLimit.Token);
+                var question = TunDns.Query(TunConnectivity.ControlName)[2..];
+                var dropUdp = false;
+                var dropped = 0;
                 var echoed = 0;
-                var answer = AnswerUdp(udpDestination, () => Interlocked.Increment(ref echoed), dnsFixture.Token);
+                var answeredUdp = 0;
+                var answer = AnswerUdp(udpDestination, packet =>
+                {
+                    if (packet.Length == 4)
+                    {
+                        Interlocked.Increment(ref echoed);
+                        return true;
+                    }
+                    // Ignore Windows background DNS so unrelated requests cannot consume the HTTPS listener.
+                    if (!IsQuestion(packet, question)) return false;
+                    if (!Volatile.Read(ref dropUdp))
+                    {
+                        Interlocked.Increment(ref answeredUdp);
+                        return true;
+                    }
+                    Interlocked.Increment(ref dropped);
+                    return false;
+                }, dnsFixture.Token);
                 try
                 {
                     using var udp = new UdpClient(new IPEndPoint(IPAddress.Parse(TunConfig.Address), 0));
@@ -134,7 +240,37 @@ internal static class NativeTunTests
                         try { passed = (await udp.ReceiveAsync(retry.Token)).Buffer.SequenceEqual(packet); }
                         catch (OperationCanceledException) when (!timeLimit.IsCancellationRequested) { }
                     }
-                    Require(passed, "No UDP reply crossed the tunnel; test packets echoed by VLESS server: " + echoed);
+                    Require(passed && Volatile.Read(ref echoed) > 0,
+                        "No UDP payload made the round trip through Wintun and VLESS.");
+                    var dnsProbe = await TunConnectivity.CheckResolver(dns, seenIndex, timeLimit.Token);
+                    Require(dnsProbe.Success && Volatile.Read(ref answeredUdp) > 0,
+                        "DNS request did not complete over UDP through Wintun and VLESS: " + dnsProbe.Outcome);
+
+                    Volatile.Write(ref dropUdp, true);
+                    var tcpDns = AnswerDnsTcp(tcpDnsDestination, question, dnsFixture.Token);
+                    var fallback = await TunConnectivity.CheckResolver(dns, seenIndex, timeLimit.Token);
+                    Require(fallback.Success && Volatile.Read(ref dropped) > 0,
+                        "DNS over TCP did not recover after UDP loss through Wintun and VLESS: " + fallback.Outcome);
+                    await tcpDns.WaitAsync(TimeSpan.FromSeconds(2), timeLimit.Token);
+
+                    var countersAfter = TunPacketCounters.Read(fixtureId);
+                    var xrayAfter = await TunXrayCounters.Read(executable, diagnosticsPort, child!.Id, timeLimit.Token);
+                    Require(countersBefore != null && countersAfter != null &&
+                        countersAfter.SentByWindows > countersBefore.SentByWindows &&
+                        countersAfter.ReceivedByWindows > countersBefore.ReceivedByWindows,
+                        "Windows Wintun packet counters did not confirm traffic in both directions.");
+                    Require(xrayAfter != null &&
+                        xrayAfter.InboundUplink - (xrayBefore?.InboundUplink ?? 0) >= requestBody.Length &&
+                        xrayAfter.InboundDownlink - (xrayBefore?.InboundDownlink ?? 0) >= responseBody.Length &&
+                        xrayAfter.OutboundUplink - (xrayBefore?.OutboundUplink ?? 0) >= requestBody.Length &&
+                        xrayAfter.OutboundDownlink - (xrayBefore?.OutboundDownlink ?? 0) >= responseBody.Length,
+                        "Xray inbound and VLESS outbound byte counters did not confirm duplex traffic.");
+                    try
+                    {
+                        using var socket = TunWindows.OpenSocket(seenIndex, IPAddress.Loopback, SocketType.Stream, ProtocolType.Tcp);
+                        throw new InvalidOperationException("Probe accepted a route outside Wintun.");
+                    }
+                    catch (SocketException) { }
                 }
                 finally
                 {
@@ -142,18 +278,64 @@ internal static class NativeTunTests
                     try { await answer; }
                     catch (OperationCanceledException) when (dnsFixture.IsCancellationRequested) { }
                 }
+
+                // The same elevated Xray and VLESS serve this request with Wintun and WFP active.
+                // It enters through the authenticated loopback control inlet and validates the same certificate.
+                await RequireControlAuthentication(control, timeLimit.Token);
+                var controlResponse = AnswerHttps(httpDestination, certificate, tlsHost, requestBody, responseBody, timeLimit.Token,
+                    stage =>
+                    {
+                        Console.WriteLine("TLS control fixture: " + stage);
+                        if (stage != "server received request payload") return;
+                        var observed = WindowsLifetime.ReadPeerTcp(child!.Id, uplinkAddress, upstreamPort, uplinkAddress);
+                        const PeerTcp expected = PeerTcp.Seen | PeerTcp.Established | PeerTcp.ExpectedSource;
+                        Require(observed.HasValue && (observed.Value & expected) == expected &&
+                            (observed.Value & (PeerTcp.TunSource | PeerTcp.OtherSource)) == 0 &&
+                            TunWindows.Index(uplinkAddress) != seenIndex,
+                            "Did not observe the TUN Xray's outbound TCP socket with the expected non-Wintun source.");
+                    });
+                using (var http = TunControlProbe.Client(control, child!.Id, tlsHost, (_, candidate, _, errors) =>
+                    candidate?.GetCertHashString() == certificate.Thumbprint &&
+                    (errors & SslPolicyErrors.RemoteCertificateNameMismatch) == 0,
+                    stage => Console.WriteLine("TLS control client: " + stage)))
+                using (var body = new ByteArrayContent(requestBody))
+                using (var reply = await ReceiveControl(http, endpoint, body, controlResponse, timeLimit.Token))
+                {
+                    reply.EnsureSuccessStatusCode();
+                    Require((await reply.Content.ReadAsByteArrayAsync(timeLimit.Token)).SequenceEqual(responseBody),
+                        "The running TUN engine's authenticated control path did not return the VLESS response.");
+                }
+                await controlResponse;
+                const string correlated = "контроль через Xray → IP:порт VPN-сервера · внешний транспорт открыт";
+                var matchedControl = false;
+                for (var attempt = 0; attempt < 10 && !matchedControl; attempt++)
+                {
+                    matchedControl = engineDiagnostic.TakeEvents().Any(item => item.Contains(correlated));
+                    if (!matchedControl) await Task.Delay(100, timeLimit.Token);
+                }
+                Require(matchedControl, "Pinned Xray logs did not correlate CONNECT with its actual protected transport.");
+                await RejectControlDestination(control, "198.51.100.11", control.DestinationPort, httpDestination, timeLimit.Token);
+                var otherPort = control.DestinationPort == 65535 ? 65534 : control.DestinationPort + 1;
+                await RejectControlDestination(control, control.Destination, otherPort, httpDestination, timeLimit.Token);
             }
             finally { tunnel.RequestGracefulStop(console.Signal); }
         }
 
         Require(await TunWindows.WaitClean(recovery, TimeSpan.FromSeconds(5)), "Normal stop left the Wintun device.");
         Require(TunWindows.Index(web) == beforeWeb && TunWindows.Index(dns) == beforeDns &&
-            TunWindows.Same(snapshot, TunWindows.Capture(web)), "Initial routes or DNS differ after stop.");
+            TunWindows.MatchesBaseline(snapshot, TunWindows.Capture(peer)), "Initial routes or DNS differ after stop.");
         Require(seenIndex != 0, "No TUN interface was observed.");
 
+        var crashDiagnostic = new TunEngineDiagnostic();
         using (var crashed = await Xray.StartAsync(executable, fixture, readiness, timeLimit.Token, Track,
-            WindowsLifetime.OwnsLoopback, inheritConsole: true, startupSeconds: 24))
+            WindowsLifetime.OwnsLoopback, inheritConsole: true, startupSeconds: 24, diagnosticLine: crashDiagnostic.Read))
         {
+            var active = await TunReadiness.Wait(() =>
+            {
+                var state = TunWindows.Observe(recovery, web);
+                return state.Ready && !crashDiagnostic.Started ? state with { ErrorCode = "TUN_ENGINE_NOT_READY" } : state;
+            }, () => crashed.Running, TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(150), timeLimit.Token);
+            Require(active.Ready, "TUN did not become ready before the simulated crash: " + active.Failure);
             child!.Kill();
             await child.WaitForExitAsync(timeLimit.Token);
         }
@@ -167,8 +349,47 @@ internal static class NativeTunTests
             Require(clean, "Could not clean the adapter left by an abrupt exit: " + diagnostic);
         }
         Require(TunWindows.Index(web) == beforeWeb && TunWindows.Index(dns) == beforeDns &&
-            TunWindows.Same(snapshot, TunWindows.Capture(web)), "Initial routes or DNS differ after crash recovery.");
-        Console.WriteLine("PASS Native Wintun: Windows HTTPS (UseProxy=false), UDP, DNS/route scope, graceful restoration and process-crash recovery");
+            TunWindows.MatchesBaseline(snapshot, TunWindows.Capture(peer)), "Initial routes or DNS differ after crash recovery.");
+        Console.WriteLine("PASS Native Wintun: TLS VLESS with a verified non-Wintun source, duplex HTTPS and restricted same-engine control, DNS UDP/TCP and cleanup");
+    }
+
+    private static async Task CheckWfpBlock(IPAddress source, CancellationToken token)
+    {
+        // The fixture already blocks this documentation subnet outside Wintun. Only the two
+        // other /32 destinations in that subnet are routed into Wintun.
+        var target = IPAddress.Parse("198.51.100.70");
+        const int port = 58445;
+        using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        socket.Bind(new IPEndPoint(source, 0));
+        var local = (IPEndPoint)socket.LocalEndPoint!;
+        var start = DateTimeOffset.UtcNow;
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(3));
+        try
+        {
+            await socket.ConnectAsync(target, port, timeout.Token);
+            throw new InvalidOperationException("Vended WFP fixture did not block outbound TCP.");
+        }
+        catch (SocketException error) when (error.SocketErrorCode == SocketError.AccessDenied) { }
+        var denied = new TunDialDenial(1729, TunWfpDiagnostic.Address(source), (ushort)local.Port, start, DateTimeOffset.UtcNow);
+        string[] lines = [];
+        for (var i = 0; i < 5; i++)
+        {
+            lines = TunWfpDiagnostic.Read(Environment.ProcessPath!, target, port, source, [denied]);
+            if (lines.Any(line => line.Contains("сбор сетевых событий Windows выключен")))
+            {
+                Console.WriteLine("PASS Native WFP: real WinSock 10013, event capture disabled by Windows");
+                return;
+            }
+            if (lines.Any(line => line.Contains("ID потока Xray 1729") && line.Contains("ALE_AUTH_CONNECT_V4") &&
+                line.Contains("Xray TUN")))
+            {
+                Console.WriteLine("PASS Native WFP: real WinSock 10013 linked to the Xray TUN filter and ALE_AUTH_CONNECT_V4");
+                return;
+            }
+            await Task.Delay(100, token);
+        }
+        throw new InvalidOperationException("WFP fixture did not identify the blocking filter. " + string.Join(" | ", lines));
     }
 
     private static object Redirect(string tag, int port) => new { tag, protocol = "freedom", settings = new {
@@ -176,32 +397,181 @@ internal static class NativeTunTests
         finalRules = new[] { new { action = "allow", ip = new[] { "127.0.0.1/32" } } }
     } };
 
-    private static int Distinct(params int[] used)
+    private static X509Certificate2 CreateCertificate(string host)
     {
-        int port;
-        do { port = Xray.FreePort(); } while (used.Contains(port));
-        return port;
+        using var key = RSA.Create(2048);
+        return CreateCertificate(host, key);
     }
 
-    private static async Task AnswerTcp(TcpListener listener, X509Certificate2 certificate, CancellationToken token)
+    private static X509Certificate2 CreateCertificate(string host, RSA key)
+    {
+        var request = new CertificateRequest("CN=" + host, key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        var subject = new SubjectAlternativeNameBuilder();
+        subject.AddDnsName(host);
+        request.CertificateExtensions.Add(subject.Build());
+        using var generated = request.CreateSelfSigned(DateTimeOffset.Now.AddMinutes(-1), DateTimeOffset.Now.AddMinutes(10));
+        return new X509Certificate2(generated.Export(X509ContentType.Pfx), (string?)null, X509KeyStorageFlags.UserKeySet);
+    }
+
+    private static readonly string[] ControlLogMarkers = ["request to Method [CONNECT]", "pmt-control-vless",
+        "pmt-control-block", "failed to process outbound traffic", "tunneling request to", "failed to decode response header"];
+
+    private static async Task<HttpResponseMessage> ReceiveControl(HttpClient http, Uri target, HttpContent body, Task server,
+        CancellationToken token)
+    {
+        var response = http.PostAsync(target, body, token);
+        if (await Task.WhenAny(response, server) == server) await server;
+        return await response;
+    }
+
+    private static async Task AnswerHttps(TcpListener listener, X509Certificate2 certificate, string expectedSni,
+        byte[] expected, byte[] response, CancellationToken token, Action<string>? observe = null)
+    {
+        using var socket = await listener.AcceptTcpClientAsync(token);
+        observe?.Invoke("server accepted connection");
+        await using var stream = new SslStream(socket.GetStream());
+        string? receivedSni = null;
+        await stream.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
+        {
+            ServerCertificateSelectionCallback = (_, name) =>
+            {
+                receivedSni = name;
+                return certificate;
+            }
+        }, token);
+        observe?.Invoke("server completed TLS handshake");
+        Require(receivedSni == expectedSni, "TLS did not send the expected DNS name as SNI for the pinned address.");
+
+        // Read only the headers here. StreamReader can buffer bytes from the binary request body.
+        var headers = new List<byte>();
+        var next = new byte[1];
+        while (headers.Count < 8192)
+        {
+            await stream.ReadExactlyAsync(next, token);
+            headers.Add(next[0]);
+            if (headers.Count >= 4 && headers[^4] == '\r' && headers[^3] == '\n' &&
+                headers[^2] == '\r' && headers[^1] == '\n') break;
+        }
+        var text = Encoding.ASCII.GetString(headers.ToArray());
+        Require(text.StartsWith("POST /fixture HTTP/1.", StringComparison.Ordinal) &&
+            text.Contains($"\r\nContent-Length: {expected.Length}\r\n", StringComparison.OrdinalIgnoreCase),
+            "Unexpected TLS fixture request headers.");
+        var body = new byte[expected.Length];
+        await stream.ReadExactlyAsync(body, token);
+        observe?.Invoke("server received request payload");
+        Require(body.SequenceEqual(expected), "Wrong TLS request payload at the VLESS egress fixture.");
+        var responseHeader = Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Length: {response.Length}\r\nConnection: close\r\n\r\n");
+        await stream.WriteAsync(responseHeader, token);
+        await stream.WriteAsync(response, token);
+    }
+
+    private static async Task RequireControlAuthentication(TunControlEndpoint control, CancellationToken token)
+    {
+        using var client = new TcpClient(AddressFamily.InterNetwork);
+        await client.ConnectAsync(IPAddress.Loopback, control.Port, token);
+        using var stream = client.GetStream();
+        var authority = $"{control.Destination}:{control.DestinationPort}";
+        await stream.WriteAsync(Encoding.ASCII.GetBytes($"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n"), token);
+        using var reader = new StreamReader(stream, Encoding.ASCII, leaveOpen: true);
+        Require((await reader.ReadLineAsync(token))?.StartsWith("HTTP/1.1 407 ", StringComparison.Ordinal) == true,
+            "The running TUN engine's control inlet accepted a request without authentication.");
+    }
+
+    private static async Task RejectControlDestination(TunControlEndpoint control, string destination, int port,
+        TcpListener upstream, CancellationToken token)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(TimeSpan.FromSeconds(3));
+        using var client = new TcpClient(AddressFamily.InterNetwork);
+        var authority = $"{destination}:{port}";
+        var credentials = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{control.User}:{control.Password}"));
+        try
+        {
+            await client.ConnectAsync(IPAddress.Loopback, control.Port, deadline.Token);
+            using var stream = client.GetStream();
+            var connect = $"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nProxy-Authorization: Basic {credentials}\r\n\r\n";
+            await stream.WriteAsync(Encoding.ASCII.GetBytes(connect), deadline.Token);
+            using var reader = new StreamReader(stream, Encoding.ASCII, leaveOpen: true);
+            // Xray acknowledges valid credentials before dispatch. The blocked route must then end
+            // without relaying any application bytes or opening a connection to the VLESS destination.
+            Require((await reader.ReadLineAsync(deadline.Token))?.StartsWith("HTTP/1.1 200 ", StringComparison.Ordinal) == true,
+                "The routing test did not complete the authenticated CONNECT handshake.");
+            string? header;
+            do { header = await reader.ReadLineAsync(deadline.Token); } while (header is { Length: > 0 });
+            Require(header != null && await reader.ReadAsync(new char[1], deadline.Token) == 0 &&
+                !upstream.Pending(), "The control inlet relayed an authenticated request to a disallowed destination.");
+        }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested)
+        {
+            throw new InvalidOperationException("An authenticated request to a disallowed destination did not close.");
+        }
+    }
+
+    private static async Task RejectHttps(TcpListener listener, X509Certificate2 certificate, CancellationToken token)
     {
         using var socket = await listener.AcceptTcpClientAsync(token);
         await using var stream = new SslStream(socket.GetStream());
-        await stream.AuthenticateAsServerAsync(new SslServerAuthenticationOptions { ServerCertificate = certificate }, token);
-        using var reader = new StreamReader(stream, leaveOpen: true);
-        Require((await reader.ReadLineAsync(token))?.StartsWith("GET /fixture ") == true, "Unexpected fixture request.");
-        while (await reader.ReadLineAsync(token) is { Length: > 0 }) { }
-        await stream.WriteAsync("HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\ntun-ok"u8.ToArray(), token);
+        try
+        {
+            await stream.AuthenticateAsServerAsync(new SslServerAuthenticationOptions { ServerCertificate = certificate }, token);
+            Require(await stream.ReadAsync(new byte[1], token) == 0, "Client sent HTTP bytes after rejecting TLS.");
+        }
+        catch (Exception error) when (error is AuthenticationException or IOException) { }
     }
 
-    private static async Task AnswerUdp(UdpClient listener, Action echoed, CancellationToken token)
+    private static bool IsQuestion(byte[] packet, byte[] question) =>
+        packet.Length >= 12 && packet.AsSpan(2).SequenceEqual(question);
+
+    private static async Task AnswerDnsTcp(TcpListener listener, byte[] question, CancellationToken token)
     {
         while (!token.IsCancellationRequested)
         {
-            var packet = await listener.ReceiveAsync(token);
-            await listener.SendAsync(packet.Buffer, packet.RemoteEndPoint, token);
-            echoed();
+            using var socket = await listener.AcceptTcpClientAsync(token);
+            using var stream = socket.GetStream();
+            using var attempt = CancellationTokenSource.CreateLinkedTokenSource(token);
+            attempt.CancelAfter(TimeSpan.FromSeconds(2));
+            try
+            {
+                var length = new byte[2];
+                await stream.ReadExactlyAsync(length, attempt.Token);
+                var count = BinaryPrimitives.ReadUInt16BigEndian(length);
+                if (count is < 12 or > 512) continue;
+                var query = new byte[count];
+                await stream.ReadExactlyAsync(query, attempt.Token);
+                if (!IsQuestion(query, question)) continue;
+                var reply = DnsAnswer(query);
+                BinaryPrimitives.WriteUInt16BigEndian(length, (ushort)reply.Length);
+                await stream.WriteAsync(length, attempt.Token);
+                await stream.WriteAsync(reply, attempt.Token);
+                return;
+            }
+            catch (IOException) { }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested) { }
         }
+    }
+
+    private static async Task AnswerUdp(UdpClient listener, Func<byte[], bool> shouldReply, CancellationToken token)
+    {
+        while (!token.IsCancellationRequested)
+        {
+            UdpReceiveResult packet;
+            try { packet = await listener.ReceiveAsync(token); }
+            // WinSock may report ICMP port-unreachable after an earlier attempt closes its socket.
+            catch (SocketException error) when (error.SocketErrorCode == SocketError.ConnectionReset) { continue; }
+            if (!shouldReply(packet.Buffer)) continue;
+            var response = packet.Buffer.Length > 12 ? DnsAnswer(packet.Buffer) : packet.Buffer;
+            await listener.SendAsync(response, packet.RemoteEndPoint, token);
+        }
+    }
+
+    internal static byte[] DnsAnswer(byte[] query, byte code = 0)
+    {
+        byte[] address = [0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 20, 0, 4, 198, 51, 100, 10];
+        var reply = code == 0 ? query.Concat(address).ToArray() : query.ToArray();
+        reply[2] = 0x81;
+        reply[3] = (byte)(0x80 | code);
+        reply[7] = code == 0 ? (byte)1 : (byte)0;
+        return reply;
     }
 
     private static void Require(bool value, string message)

@@ -13,10 +13,15 @@ using Microsoft.Win32;
 
 namespace Pomogator.Vpn;
 
-internal sealed record TunBaseline(int Uplink, string UplinkId, string[] Addresses, string[] Dns, int InternetRoute);
+internal sealed record TunBaseline(int Uplink, string UplinkId, string[] Addresses, string[] Dns, int InternetRoute,
+    int? PublicRoute = null, string? SourceIpv4 = null)
+{
+    internal bool HasSource(IPAddress source) => source.AddressFamily == AddressFamily.InterNetwork &&
+        !source.Equals(IPAddress.Any) && !IPAddress.IsLoopback(source) && source.ToString() != TunConfig.Address &&
+        Addresses.Contains(source.ToString());
+}
 internal sealed record TunRecovery(Guid Id, string Peer, TunBaseline Before, string[]? InstalledRoutes = null,
     string InstalledDns = TunConfig.Resolver);
-internal sealed record TunObservation(bool Interface, bool Routes, bool Dns);
 
 internal static class TunWindows
 {
@@ -60,30 +65,65 @@ internal static class TunWindows
         var props = adapter.GetIPProperties();
         return new TunBaseline(upstream, adapter.Id, props.UnicastAddresses.Select(item => item.Address.ToString())
             .Order().ToArray(), props.DnsAddresses.Select(ip => ip.ToString()).Order().ToArray(),
-            Index(IPAddress.Parse(TunConfig.Resolver)));
+            Index(IPAddress.Parse(TunConfig.Resolver)), Index(IPAddress.Parse(TunConfig.InternetProbe)));
     }
 
     internal static bool Same(TunBaseline expected, TunBaseline actual) =>
         expected.Uplink == actual.Uplink && expected.UplinkId == actual.UplinkId &&
         expected.Addresses.SequenceEqual(actual.Addresses) && expected.Dns.SequenceEqual(actual.Dns);
 
+    internal static bool MatchesBaseline(TunBaseline expected, TunBaseline actual) =>
+        Same(expected, actual) && expected.InternetRoute == actual.InternetRoute &&
+        (expected.PublicRoute == null || expected.PublicRoute == actual.PublicRoute);
+
     internal static NetworkInterface? Find(Guid id) => NetworkInterface.GetAllNetworkInterfaces().FirstOrDefault(
         adapter => adapter.Name == TunConfig.Adapter(id) && Guid.TryParse(adapter.Id, out var guid) && guid == TunConfig.AdapterId(id));
 
-    internal static TunObservation Observe(TunRecovery record)
+    internal static TunObservation Observe(TunRecovery record, IPAddress? publicProbe = null)
     {
-        var adapter = Find(record.Id);
-        if (adapter == null || adapter.OperationalStatus != OperationalStatus.Up) return new(false, false, false);
-        var properties = adapter.GetIPProperties();
-        var index = Index(adapter);
-        var peer = IPAddress.Parse(record.Peer);
-        var routes = index != 0 && Index(peer) == record.Before.Uplink && Index(IPAddress.Parse(TunConfig.Resolver)) == index &&
-            Index(IPAddress.Parse("1.1.1.1")) == index;
-        return new TunObservation(properties.UnicastAddresses.Any(address => address.Address.ToString() == TunConfig.Address),
-            routes, properties.DnsAddresses.Any(address => address.ToString() == TunConfig.Resolver));
+        var observation = new TunObservation(TunConfig.AdapterId(record.Id), TunConfig.Adapter(record.Id),
+            Uplink: record.Before.Uplink, ExpectedDns: record.InstalledDns);
+        try
+        {
+            var adapter = Find(record.Id);
+            if (adapter == null) return observation;
+            observation = observation with { Status = adapter.OperationalStatus };
+            var properties = adapter.GetIPProperties();
+            var index = properties.GetIPv4Properties()?.Index ?? 0;
+            var addresses = properties.UnicastAddresses.Where(item => item.Address.AddressFamily == AddressFamily.InterNetwork).ToArray();
+            var address = addresses.FirstOrDefault(item => item.Address.ToString() == TunConfig.Address);
+            observation = observation with { Index = index,
+                Ipv4 = addresses.Select(item => item.Address + "/" + item.PrefixLength).ToArray(), AddressState = address == null ? null :
+                $"/{address.PrefixLength}, {address.DuplicateAddressDetectionState}",
+                AddressReady = address is { PrefixLength: TunConfig.PrefixLength, DuplicateAddressDetectionState: DuplicateAddressDetectionState.Preferred } };
+            observation = observation with { PeerRoute = Index(IPAddress.Parse(record.Peer)),
+                ResolverRoute = Index(IPAddress.Parse(record.InstalledDns)),
+                InternetRoute = Index(publicProbe ?? IPAddress.Parse(TunConfig.InternetProbe)) };
+            return observation with { Dns = properties.DnsAddresses.Select(ip => ip.ToString()).ToArray() };
+        }
+        catch (Exception error) when (error is NetworkInformationException or SocketException)
+        {
+            return observation with { ErrorCode = "0x" + error.HResult.ToString("X8") };
+        }
     }
 
-    internal static HttpClient Http(Guid id, RemoteCertificateValidationCallback? validation = null)
+    internal static Socket OpenSocket(int index, IPAddress target, SocketType type, ProtocolType protocol)
+    {
+        if (index <= 0 || Index(target) != index)
+            throw new SocketException((int)SocketError.NetworkUnreachable);
+        var socket = new Socket(AddressFamily.InterNetwork, type, protocol);
+        try
+        {
+            // IP_UNICAST_IF (31) takes a Windows IPv4 interface index in network byte order.
+            socket.SetSocketOption(SocketOptionLevel.IP, (SocketOptionName)31, IPAddress.HostToNetworkOrder(index));
+            socket.Bind(new IPEndPoint(IPAddress.Parse(TunConfig.Address), 0));
+            return socket;
+        }
+        catch { socket.Dispose(); throw; }
+    }
+
+    internal static HttpClient Http(Guid id, RemoteCertificateValidationCallback? validation = null,
+        string? requiredHost = null, IPAddress? pinnedAddress = null)
     {
         var adapter = Find(id) ?? throw new VpnError("Интерфейс TUN пропал.");
         var adapterIndex = Index(adapter);
@@ -91,22 +131,25 @@ internal static class TunWindows
         if (validation != null) handler.SslOptions.RemoteCertificateValidationCallback = validation;
         handler.ConnectCallback = async (context, token) =>
         {
-            var addresses = await Dns.GetHostAddressesAsync(context.DnsEndPoint.Host, AddressFamily.InterNetwork, token);
+            var addresses = pinnedAddress != null && string.Equals(requiredHost, context.DnsEndPoint.Host, StringComparison.OrdinalIgnoreCase)
+                ? new[] { pinnedAddress } : IPAddress.TryParse(context.DnsEndPoint.Host, out var literal) &&
+                literal.AddressFamily == AddressFamily.InterNetwork ? new[] { literal } :
+                await Dns.GetHostAddressesAsync(context.DnsEndPoint.Host, AddressFamily.InterNetwork, token);
+            SocketException? lastError = null;
             foreach (var ip in addresses)
             {
-                if (Index(ip) != adapterIndex) continue;
-                var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+                Socket? socket = null;
                 try
                 {
-                    // Bind to the TUN source address. Windows still performs TLS validation for the original host.
-                    socket.Bind(new IPEndPoint(IPAddress.Parse(TunConfig.Address), 0));
+                    // Windows still performs TLS validation for the original host.
+                    socket = OpenSocket(adapterIndex, ip, SocketType.Stream, ProtocolType.Tcp);
                     await socket.ConnectAsync(ip, context.DnsEndPoint.Port, token);
                     return new NetworkStream(socket, ownsSocket: true);
                 }
-                catch (SocketException) { socket.Dispose(); }
-                catch { socket.Dispose(); throw; }
+                catch (SocketException error) { socket?.Dispose(); lastError = error; }
+                catch { socket?.Dispose(); throw; }
             }
-            throw new HttpRequestException("No usable IPv4 route through TUN.");
+            throw new HttpRequestException("No usable IPv4 route through TUN.", lastError);
         };
         return new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(6) };
     }
@@ -118,15 +161,6 @@ internal static class TunWindows
             adapter.Name != TunConfig.Adapter(record.Id) &&
             !adapter.GetIPProperties().UnicastAddresses.Any(entry => entry.Address.AddressFamily == AddressFamily.InterNetwork
                 && prefix.Contains(entry.Address)));
-    }
-
-    internal static async Task<bool> CheckDns(CancellationToken token)
-    {
-        using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
-        limit.CancelAfter(TimeSpan.FromSeconds(3));
-        try { return (await Dns.GetHostAddressesAsync("www.cloudflare.com", AddressFamily.InterNetwork, limit.Token)).Length > 0; }
-        catch (SocketException) { return false; }
-        catch (OperationCanceledException) when (!token.IsCancellationRequested) { return false; }
     }
 
     internal static bool Clean(TunRecovery record)

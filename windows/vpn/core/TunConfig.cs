@@ -5,11 +5,20 @@ using System.Text.Json;
 
 namespace Pomogator.Vpn;
 
+public sealed record TunControlEndpoint(int Port, string User, string Password, string Destination, int DestinationPort);
+
 public static class TunConfig
 {
     public const string Address = "198.18.240.1";
+    public const int PrefixLength = 30;
+    public const string InternetProbe = "1.1.1.1";
+    public const string InternetProbeHost = "cloudflare-dns.com";
+    private const string DnsUpstream = "https://dns.quad9.net/dns-query";
+    private const string DnsIngress = "pmt-doh";
+    private const string DnsOutbound = "pmt-dns";
     public const string Resolver = "9.9.9.9";
     private const string TunTag = "pomogator-tun";
+    private const string ControlTag = "pmt-tun-control";
 
     public static string Adapter(Guid id) => "PmtVpn-" + id.ToString("N")[..16];
 
@@ -45,49 +54,102 @@ public static class TunConfig
 
     private static ulong Number(IPAddress ip) => BinaryPrimitives.ReadUInt32BigEndian(ip.GetAddressBytes());
 
-    public static string Bridge(Profile profile, IPAddress peer, int http, int socks, string password)
+    public static Profile Pinned(Profile profile, IPAddress peer)
     {
         var options = new Dictionary<string, string>(profile.Options);
         if (profile.Security == "tls" && profile.Option("sni") == "") options["sni"] = profile.Host;
-        var pinned = profile with { Host = peer.ToString(), Options = options, Full = null };
-        return JsonSerializer.Serialize(new {
-            log = new { loglevel = "none" },
-            inbounds = new object[] {
-                new { listen = "127.0.0.1", port = http, protocol = "http" },
-                new { listen = "127.0.0.1", port = socks, protocol = "socks", settings = new {
-                    auth = "password", accounts = new[] { new { user = "pomogator", pass = password } },
-                    udp = true, ip = "127.0.0.1"
-                } }
-            },
-            outbounds = new[] { XrayConfig.Outbound(pinned, "vpn") }
-        });
+        return profile with { Host = peer.ToString(), Options = options, Full = null };
     }
 
-    public static string Engine(Guid id, IPAddress peer, int socks, string password, int readiness) =>
-        CreateEngine(id, Routes(peer), new[] { "allexceptlan", "[::/0]:all", "misconfigtun" }, socks, password, readiness);
+    public static string Engine(Guid id, IPAddress peer, IPAddress source, Profile profile, int readiness,
+        int diagnosticsPort = 0, TunControlEndpoint? control = null) =>
+        CreateEngine(id, Routes(peer), new[] { "allexceptlan", "[::/0]:all", "misconfigtun" },
+            UplinkOutbound(peer, source, profile), readiness,
+            diagnosticsPort: diagnosticsPort > 0 ? diagnosticsPort : null, dnsOverHttps: DnsUpstream, control: control, peer: peer);
 
-    // CI runs a real TUN against documentation addresses only, without any other traffic affected.
-    internal static string CreateEngine(Guid id, string[] routes, string[] filters, int socks, string password, int readiness, string resolver = Resolver) =>
-        JsonSerializer.Serialize(new {
-            log = new { loglevel = "none" },
-            inbounds = new object[] {
-                new { protocol = "tun", tag = TunTag, port = 0, settings = new {
-                    name = Adapter(id), desc = "PomogatorVpn", mtu = 1400,
-                    gateway = new[] { Address + "/30" }, dns = new[] { resolver },
-                    autoSystemRoutingTable = routes, autoOutboundsInterface = "",
-                    autoSystemWfpBlockLeak = filters
-                } },
-                new { listen = "127.0.0.1", port = readiness, protocol = "http", tag = "readiness" }
+    public static string PreflightEngine(IPAddress peer, IPAddress source, Profile profile, int port) => JsonSerializer.Serialize(new {
+        log = new { loglevel = "none" },
+        inbounds = new[] { new { listen = "127.0.0.1", port, protocol = "http" } },
+        outbounds = new[] { UplinkOutbound(peer, source, profile) }
+    });
+
+    internal static Dictionary<string, object> UplinkOutbound(IPAddress peer, IPAddress source, Profile profile)
+    {
+        if (source.AddressFamily != AddressFamily.InterNetwork || source.Equals(IPAddress.Any) ||
+            IPAddress.IsLoopback(source) || source.Equals(IPAddress.Parse(Address)))
+            throw new ArgumentException("An IPv4 address of the uplink is required.", nameof(source));
+        var outbound = XrayConfig.Outbound(Pinned(profile, peer), "vpn");
+        outbound["sendThrough"] = source.ToString();
+        return outbound;
+    }
+
+    // Production and native CI use the same TUN, routing and optional StatsService.
+    internal static string CreateEngine(Guid id, string[] routes, string[] filters, object outbound, int readiness,
+        string resolver = Resolver, int? diagnosticsPort = null, string? dnsOverHttps = null, TunControlEndpoint? control = null,
+        IPAddress? peer = null)
+    {
+        var outbounds = new List<object> { outbound, new { tag = "block", protocol = "blackhole" } };
+        var rules = new List<object> {
+            new { type = "field", inboundTag = new[] { "readiness" }, outboundTag = "block" },
+            new { type = "field", ip = new[] { "::/0" }, outboundTag = "block" }
+        };
+        var inbounds = new List<object> {
+            new { protocol = "tun", tag = TunTag, port = 0, settings = new {
+                name = Adapter(id), desc = "PomogatorVpn", mtu = 1400,
+                gateway = new[] { Address + "/" + PrefixLength }, dns = new[] { resolver },
+                autoSystemRoutingTable = routes, autoOutboundsInterface = "",
+                autoSystemWfpBlockLeak = filters
+            } },
+            new { listen = "127.0.0.1", port = readiness, protocol = "http", tag = "readiness" }
+        };
+        if (peer != null)
+            rules.Add(new { type = "field", ruleTag = "pmt-peer-reentry", inboundTag = new[] { TunTag },
+                ip = new[] { peer + "/32" }, outboundTag = "block" });
+        if (control != null)
+        {
+            if (!IPAddress.TryParse(control.Destination, out var target) || target.AddressFamily != AddressFamily.InterNetwork ||
+                control.DestinationPort is < 1 or > 65535 || control.Port is < 1 or > 65535 ||
+                control.User.Length == 0 || control.Password.Length == 0)
+                throw new ArgumentException("A pinned IPv4 destination and proxy credentials are required.", nameof(control));
+            inbounds.Add(new { listen = "127.0.0.1", port = control.Port, protocol = "http",
+                tag = ControlTag, settings = new {
+                    accounts = new[] { new { user = control.User, pass = control.Password } }, allowTransparent = false
+                } });
+            rules.Add(new { type = "field", ruleTag = "pmt-control-vless", inboundTag = new[] { ControlTag },
+                ip = new[] { target + "/32" }, port = control.DestinationPort.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                network = "tcp", outboundTag = "vpn" });
+            rules.Add(new { type = "field", ruleTag = "pmt-control-block", inboundTag = new[] { ControlTag }, outboundTag = "block" });
+            rules.Add(new { type = "field", ruleTag = "pmt-wintun-probe", inboundTag = new[] { TunTag },
+                ip = new[] { target + "/32" }, port = control.DestinationPort.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                network = "tcp", outboundTag = "vpn" });
+        }
+        if (dnsOverHttps != null)
+        {
+            // A and AAAA use Xray's routed DoH client. Remaining record types keep the VLESS path too.
+            outbounds.Add(new { tag = DnsOutbound, protocol = "dns", settings = new {
+                rules = new object[] { new { action = "hijack", qType = "1,28" }, new { action = "direct" } }
+            }, streamSettings = new { sockopt = new { dialerProxy = "vpn" } } });
+            rules.Insert(0, new { type = "field", ruleTag = "pmt-doh-vless", inboundTag = new[] { DnsIngress }, outboundTag = "vpn" });
+            rules.Add(new { type = "field", inboundTag = new[] { TunTag }, ip = new[] { resolver },
+                port = "53", network = "tcp,udp", outboundTag = DnsOutbound });
+        }
+        rules.Add(new { type = "field", ruleTag = "pmt-tun-vless", inboundTag = new[] { TunTag }, outboundTag = "vpn" });
+        object? stats = diagnosticsPort.HasValue ? new { } : null;
+        object? policy = diagnosticsPort.HasValue ? new { system = new {
+            statsInboundUplink = true, statsInboundDownlink = true, statsOutboundUplink = true, statsOutboundDownlink = true
+        } } : null;
+        return JsonSerializer.Serialize(new {
+            log = new { loglevel = control != null ? "info" : "error", access = "none" },
+            dns = dnsOverHttps == null ? null : new {
+                tag = DnsIngress, servers = new[] { dnsOverHttps }, disableFallback = true
             },
-            outbounds = new object[] {
-                new { tag = "vpn", protocol = "socks", settings = new {
-                    servers = new[] { new { address = "127.0.0.1", port = socks, users = new[] { new { user = "pomogator", pass = password } } } }
-                } },
-                new { tag = "block", protocol = "blackhole" }
-            },
-            routing = new { domainStrategy = "AsIs", rules = new object[] {
-                new { type = "field", inboundTag = new[] { "readiness" }, outboundTag = "block" },
-                new { type = "field", ip = new[] { "::/0" }, outboundTag = "block" }
-            } }
-        });
+            stats,
+            policy,
+            api = diagnosticsPort.HasValue ? new { tag = "pmt-tun-stats", listen = "127.0.0.1:" + diagnosticsPort.Value,
+                services = new[] { "StatsService" } } : null,
+            inbounds,
+            outbounds,
+            routing = new { domainStrategy = "AsIs", rules }
+        }, new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull });
+    }
 }
