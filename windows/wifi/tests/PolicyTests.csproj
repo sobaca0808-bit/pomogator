@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <!-- Live COM is exercised only on the target Windows machine. -->
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../Ics.cs" Link="Ics.cs" />
+    <Compile Include="../IcsInterop.cs" Link="IcsInterop.cs" />
+    <Compile Include="../Policy.cs" Link="Policy.cs" />
+    <Compile Include="../Session.cs" Link="Session.cs" />
+    <Compile Include="../HostedNetwork.cs" Link="HostedNetwork.cs" />
+  </ItemGroup>
+</Project>

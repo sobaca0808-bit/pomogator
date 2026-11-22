@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <NoWarn>$(NoWarn);CA1416;SYSLIB0014</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../Report.cs" Link="Report.cs" />
+    <Compile Include="../Runner.cs" Link="Runner.cs" />
+    <Compile Include="../Internet.cs" Link="Internet.cs" />
+    <Compile Include="../Ics.cs" Link="Ics.cs" />
+  </ItemGroup>
+</Project>
