@@ -122,6 +122,9 @@ internal static class SmokeTests
             legacy.ExternalTarget = new HostedTarget { Adapter = Guid.NewGuid(), Bssid = "12-34-56-78-9A-BC", SsidBytes = "UE9NT0dBVE9S" };
             window.Present(legacy);
             Require(window.CanToggle, "manual OFF enabled for verified external Hosted Network");
+            legacy.Phase = WifiPhase.Unconfirmed;
+            window.Present(legacy);
+            Require(window.CanToggle, "manual OFF can verify WLAN independently of a previous helper");
             legacy.ExternalTarget = null;
             window.Present(legacy);
             Require(!window.CanToggle, "manual OFF disabled without Hosted Network identity");

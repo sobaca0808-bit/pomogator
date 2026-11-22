@@ -162,8 +162,8 @@ namespace PomogatorWifi
                     report.Phase == WifiPhase.External ? "Мобильный хот-спот / Wi-Fi Direct" :
                     hosted == HostedNetwork.State.Idle ? "Hosted Network доступна" :
                     report.HasWifi == false ? "Wi-Fi-адаптер не найден" : "Hosted Network недоступна";
-                if (report.Phase == WifiPhase.External && hosted == HostedNetwork.State.Active &&
-                    target?.Adapter == report.Adapter) report.ExternalTarget = target;
+                if ((report.Phase == WifiPhase.External || report.Phase == WifiPhase.Unconfirmed) &&
+                    hosted == HostedNetwork.State.Active && target?.Adapter == report.Adapter) report.ExternalTarget = target;
                 if (snapshot != null) ReadSharing(report, snapshot, wifiDirect);
             }
             return report;

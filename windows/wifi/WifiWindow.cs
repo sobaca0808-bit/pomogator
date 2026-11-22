@@ -284,7 +284,9 @@ namespace PomogatorWifi
                     "Точка работает. Общий доступ можно проверить в диагностике.";
                 case WifiPhase.External: return report.ExternalTarget == null ?
                     "Точка работает вне управления ПОМОГАТОРА." : "Для отключения Hosted Network нажмите кнопку питания.";
-                case WifiPhase.Unconfirmed: return "Ждём подтверждения сеанса. Настройки раздачи сохранены.";
+                case WifiPhase.Unconfirmed: return report.ExternalTarget == null ?
+                    "Ждём подтверждения сеанса. Настройки раздачи сохранены." :
+                    "Владение не подтверждено. Можно отключить проверенную Hosted Network вручную.";
                 case WifiPhase.Starting: return "Проверяем подключение и запускаем точку доступа.";
                 case WifiPhase.Stopping: return "Завершаем сеанс ПОМОГАТОРА.";
                 case WifiPhase.Unavailable: return report.HasWifi == false ? "Подключите USB Wi-Fi-адаптер и откройте диагностику." :
@@ -400,9 +402,9 @@ namespace PomogatorWifi
             {
                 var current = await Read();
                 Present(current);
-                if (requested.Phase == WifiPhase.External)
+                if (requested.ExternalTarget != null)
                 {
-                    if (current.Phase != WifiPhase.External || requested.ExternalTarget?.Matches(current.ExternalTarget) != true)
+                    if (!requested.ExternalTarget.Matches(current.ExternalTarget))
                         throw new WifiError("Точка изменилась. Для отключения подтвердите её заново.");
                     await StopExternal(current.ExternalTarget);
                     return;
