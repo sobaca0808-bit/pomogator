@@ -30,7 +30,7 @@ internal sealed class TrayIcon : IDisposable
         var next = Draw(state.Color, state.Glyph);
         icon.Icon = next;
         icon.Text = "ПОМОГАТОР VPN — " + state.Label;
-        disconnect.Enabled = phase == Phase.Connected;
+        disconnect.Enabled = phase is Phase.Connected or Phase.Unstable;
         artwork?.Dispose();
         artwork = next;
         Current = phase;
@@ -70,6 +70,7 @@ internal sealed record StatusPresentation(string Label, string Glyph, string Col
     {
         Phase.Connecting => new("Подключается", "…", "#F9CB72"),
         Phase.Connected => new("Подключён и проверен", "✓", "#78E5AC"),
+        Phase.Unstable => new("Связь нестабильна", "!", "#F9CB72"),
         Phase.Error => new("Ошибка подключения", "!", "#F58E9D"),
         Phase.Disconnecting => new("Отключается", "↘", "#76C9FF"),
         _ => new("Отключён", "–", "#A6B4C8")

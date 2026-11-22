@@ -34,6 +34,10 @@ internal static class Program
         CheckState(window, Phase.Connected, "Подключён и проверен", "✓");
         foreach (var (dpi, scale) in new[] { (96, 100), (120, 125), (144, 150) })
             Capture(window, directory, $"03-connected-{scale}", dpi);
+        window.Connection.ReportHealth(false);
+        CheckState(window, Phase.Unstable, "Связь нестабильна", "!");
+        Capture(window, directory, "09-unstable", 96);
+        window.Connection.ReportHealth(true);
         window.DiagnosticsPanel.IsExpanded = true;
         window.Height = 860;
         window.AddLog("Тестовое состояние интерфейса. HTTPS через VLESS проверен локальным стендом Windows CI.");
@@ -71,7 +75,7 @@ internal static class Program
         window.ContentScroll.ScrollToTop();
         Capture(window, directory, "08-settings", 96);
         window.Close();
-        Console.WriteLine("PASS WPF: all five status labels, glyphs and tray phases, minimize/restore, narrow layout, 100/125/150% captures.");
+        Console.WriteLine("PASS WPF: all six status labels, glyphs and tray phases, minimize/restore, narrow layout, 100/125/150% captures.");
     }
 
     private static int GridPosition(System.Windows.UIElement element) => System.Windows.Controls.Grid.GetRow(element);

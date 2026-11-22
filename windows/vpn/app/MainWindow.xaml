@@ -31,7 +31,7 @@
             </Border>
             <StackPanel VerticalAlignment="Center">
               <TextBlock FontSize="23" FontWeight="SemiBold" Text="ПОМОГАТОР VPN"/>
-              <TextBlock FontSize="12" Foreground="{StaticResource Muted}" Text="Версия 0.2.0"/>
+              <TextBlock FontSize="12" Foreground="{StaticResource Muted}" Text="Версия 0.3.0"/>
             </StackPanel>
           </StackPanel>
         </DockPanel>
@@ -41,7 +41,9 @@
             <WrapPanel x:Name="Modes">
               <RadioButton x:Name="LocalMode" Content="Локальный прокси" IsChecked="True" Checked="ModeChanged" Margin="0,0,20,10"/>
               <RadioButton x:Name="SystemMode" Content="Системный прокси Windows" Checked="ModeChanged" Margin="0,0,20,10"/>
+              <RadioButton x:Name="TunMode" Content="VPN-туннель TUN" Checked="ModeChanged" Margin="0,0,0,10"/>
             </WrapPanel>
+            <TextBlock x:Name="ModeHint" TextWrapping="Wrap" Foreground="{StaticResource Muted}" Margin="0,0,0,8"/>
             <CheckBox x:Name="LaunchWithWindows" Content="Запускать приложение в трее вместе с Windows" Click="StartupClick"/>
           </StackPanel>
         </Border>
@@ -123,6 +125,8 @@
                   <TextBlock x:Name="CoreCheck" Margin="0,0,14,4"/><TextBlock x:Name="ProxyCheck" Margin="0,0,14,4"/>
                   <TextBlock x:Name="TrafficCheck" Margin="0,0,14,4"/><TextBlock x:Name="SystemCheck" Margin="0,0,0,4"/>
                 </WrapPanel>
+                <TextBlock x:Name="TunCheck" TextWrapping="Wrap" Foreground="{StaticResource Muted}" Margin="0,0,0,5"/>
+                <TextBlock x:Name="ExternalCheck" TextWrapping="Wrap" Foreground="{StaticResource Muted}" Margin="0,0,0,5"/>
                 <TextBlock x:Name="CheckedAt" TextWrapping="Wrap" Foreground="{StaticResource Muted}" Margin="0,0,0,8"/>
                 <TextBox x:Name="LogBox" AutomationProperties.Name="Журнал событий" Padding="8" Height="108"
                          IsReadOnly="True" IsReadOnlyCaretVisible="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"

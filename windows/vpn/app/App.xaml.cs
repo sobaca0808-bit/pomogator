@@ -7,9 +7,16 @@ public partial class App : Application
 {
     private FileStream? instance;
 
-    protected override void OnStartup(StartupEventArgs e)
+    protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        if (e.Args.Length == 3 && e.Args[0] == "--tun-helper")
+        {
+            if (Guid.TryParseExact(e.Args[1], "N", out var id) && int.TryParse(e.Args[2], out var parent) && parent > 0)
+                Shutdown(await TunSession.RunWorker(id, parent));
+            else Shutdown(1);
+            return;
+        }
         try { instance = LocalData.Lock(); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
