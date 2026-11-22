@@ -31,7 +31,7 @@
             </Border>
             <StackPanel VerticalAlignment="Center">
               <TextBlock FontSize="23" FontWeight="SemiBold" Text="ПОМОГАТОР VPN"/>
-              <TextBlock FontSize="12" Foreground="{StaticResource Muted}" Text="Версия 0.3.6"/>
+              <TextBlock FontSize="12" Foreground="{StaticResource Muted}" Text="Версия 0.3.7"/>
             </StackPanel>
           </StackPanel>
         </DockPanel>

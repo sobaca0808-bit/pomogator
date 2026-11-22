@@ -17,6 +17,7 @@
     <Compile Include="../app/TunConnectivity.cs" Link="TunConnectivity.cs" />
     <Compile Include="../app/TunEngineDiagnostic.cs" Link="TunEngineDiagnostic.cs" />
     <Compile Include="../app/TunSocketDiagnostic.cs" Link="TunSocketDiagnostic.cs" />
+    <Compile Include="../app/TunWfpDiagnostic.cs" Link="TunWfpDiagnostic.cs" />
     <Compile Include="../app/TunReadiness.cs" Link="TunReadiness.cs" />
     <Compile Include="../app/TunWindows.cs" Link="TunWindows.cs" />
     <Compile Include="../app/TunConsole.cs" Link="TunConsole.cs" />

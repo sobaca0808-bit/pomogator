@@ -159,6 +159,7 @@ internal static class NativeTunTests
                 Require(seenIndex != beforeWeb && TunWindows.Index(web) == seenIndex &&
                     TunWindows.Index(dns) == seenIndex, "Windows did not pick the TUN routes.");
                 Require(adapter!.GetIPProperties().DnsAddresses.Contains(dns), "Wintun DNS did not have the fixture address.");
+                await CheckWfpBlock(uplinkAddress, timeLimit.Token);
 
                 // Distinct payloads exceed the MTU in both directions. Validate the actual forwarded
                 // HTTP request and response after proving TLS selected the expected certificate.
@@ -343,6 +344,45 @@ internal static class NativeTunTests
         Require(TunWindows.Index(web) == beforeWeb && TunWindows.Index(dns) == beforeDns &&
             TunWindows.MatchesBaseline(snapshot, TunWindows.Capture(peer)), "Initial routes or DNS differ after crash recovery.");
         Console.WriteLine("PASS Native Wintun: TLS VLESS with a verified non-Wintun source, duplex HTTPS and restricted same-engine control, DNS UDP/TCP and cleanup");
+    }
+
+    private static async Task CheckWfpBlock(IPAddress source, CancellationToken token)
+    {
+        // The fixture already blocks this documentation subnet outside Wintun. Only the two
+        // other /32 destinations in that subnet are routed into Wintun.
+        var target = IPAddress.Parse("198.51.100.70");
+        const int port = 58445;
+        using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        socket.Bind(new IPEndPoint(source, 0));
+        var local = (IPEndPoint)socket.LocalEndPoint!;
+        var start = DateTimeOffset.UtcNow;
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(3));
+        try
+        {
+            await socket.ConnectAsync(target, port, timeout.Token);
+            throw new InvalidOperationException("Vended WFP fixture did not block outbound TCP.");
+        }
+        catch (SocketException error) when (error.SocketErrorCode == SocketError.AccessDenied) { }
+        var denied = new TunDialDenial(1729, TunWfpDiagnostic.Address(source), (ushort)local.Port, start, DateTimeOffset.UtcNow);
+        string[] lines = [];
+        for (var i = 0; i < 5; i++)
+        {
+            lines = TunWfpDiagnostic.Read(Environment.ProcessPath!, target, port, source, [denied]);
+            if (lines.Any(line => line.Contains("сбор сетевых событий Windows выключен")))
+            {
+                Console.WriteLine("PASS Native WFP: real WinSock 10013, event capture disabled by Windows");
+                return;
+            }
+            if (lines.Any(line => line.Contains("ID потока Xray 1729") && line.Contains("ALE_AUTH_CONNECT_V4") &&
+                line.Contains("Xray TUN")))
+            {
+                Console.WriteLine("PASS Native WFP: real WinSock 10013 linked to the Xray TUN filter and ALE_AUTH_CONNECT_V4");
+                return;
+            }
+            await Task.Delay(100, token);
+        }
+        throw new InvalidOperationException("WFP fixture did not identify the blocking filter. " + string.Join(" | ", lines));
     }
 
     private static object Redirect(string tag, int port) => new { tag, protocol = "freedom", settings = new {

@@ -931,7 +931,7 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog(this) != true) return;
         try
         {
-            var header = new[] { "ПОМОГАТОР VPN 0.3.6", Status.Text, CoreCheck.Text, ProxyCheck.Text, TrafficCheck.Text,
+            var header = new[] { "ПОМОГАТОР VPN 0.3.7", Status.Text, CoreCheck.Text, ProxyCheck.Text, TrafficCheck.Text,
                 SystemCheck.Text, TunCheck.Text, CheckedAt.Text, "" };
             var observations = tunObservation?.Lines() ?? Enumerable.Empty<string>();
             var probes = tunChecks?.Lines() ?? Enumerable.Empty<string>();

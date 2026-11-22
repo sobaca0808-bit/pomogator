@@ -406,6 +406,27 @@ Test("Report Windows packets separately from Xray bytes and preserve unknown/res
     Assert(lines.Any(line => line.Contains("байты полезной нагрузки Xray TUN ↑/↓: 28/0")));
     Assert(lines.Any(line => line.Contains("возврат полезной нагрузки")));
 });
+Test("Link a WFP block only to an unambiguous ConnectEx tuple from the denied server flow", () => {
+    var peer = IPAddress.Parse("203.0.113.71");
+    var local = TunWfpDiagnostic.Address(IPAddress.Parse("192.0.2.31"));
+    var diagnostic = new TunSocketDiagnostic(peer, 443, rawTransport: true);
+    diagnostic.Read("[Info] [192] transport/internet/tcp: dialing TCP to tcp:203.0.113.71:443");
+    diagnostic.Read("[Info] [192] app/proxyman/outbound: failed to process outbound traffic > proxy/vless/outbound: failed to find an available destination > common/retry: [transport/internet/tcp: failed to dial to dest > dial tcp 192.0.2.31:38158->203.0.113.71:443: connectex: winapi error #10013 transport/internet/tcp: failed to dial to dest > dial tcp 192.0.2.31:38159->203.0.113.8:443: connectex: winapi error #10013]");
+    diagnostic.TakeEvents(out var denials);
+    Assert(denials.Length == 1 && denials[0].FlowId == 192 && denials[0].LocalPort == 38158 && denials[0].LocalAddress == local);
+    var attempt = denials[0];
+    var drop = new TunWfpDrop(attempt.Until, local, 38158, 512, 48, true, "TEST WFP");
+    var exact = TunWfpDiagnostic.Correlate(denials, [drop], local).Single();
+    Assert(exact.Contains("ID потока Xray 192") && exact.Contains("фильтр 512") && exact.Contains("ожидаемый IPv4") &&
+        !exact.Contains("192.0.2.") && !exact.Contains("203.0.113."));
+    Assert(TunWfpDiagnostic.Correlate([attempt with { LocalPort = 0 }], [drop]).Single().Contains("конкретный поток не установлен"));
+    Assert(TunWfpDiagnostic.Correlate(denials, [drop with { ConnectLayer = false }]).Single().Contains("конкретный поток не установлен"));
+    Assert(TunWfpDiagnostic.Correlate([attempt, attempt with { FlowId = 193 }], [drop]).Single().Contains("конкретный поток не установлен"));
+    Assert(TunWfpDiagnostic.Correlate(denials, [drop with { At = drop.At.AddMinutes(-1) }]).Single().Contains("не найдено"));
+    diagnostic.Read("[Info] [194] app/proxyman/outbound: failed to process outbound traffic > proxy/vless/outbound: failed to find an available destination > transport/internet/tcp: failed to dial to dest > dial tcp 192.0.2.31:0->203.0.113.71:443: connectex: winapi error #10013");
+    diagnostic.TakeEvents(out denials);
+    Assert(denials.Single().LocalPort == 0);
+});
 Test("TUN detects overlay and UBoost, while PPPoE is a valid uplink", () => {
     Assert(!TunWindows.Conflicts(new[] { ("PPPoE", true, System.Net.NetworkInformation.NetworkInterfaceType.Ppp) }));
     Assert(TunWindows.Conflicts(new[] { ("UBoost", true, System.Net.NetworkInformation.NetworkInterfaceType.Ethernet) }));

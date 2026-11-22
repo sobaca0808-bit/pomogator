@@ -203,7 +203,8 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
             // Start watching the parent before the first network change, including driver initialization.
             using var alive = CancellationTokenSource.CreateLinkedTokenSource(boot.Token);
             var runtime = Read<int>(channel, CancellationToken.None);
-            var start = Xray.StartAsync(Path.Combine(AppContext.BaseDirectory, "xray.exe"), config, port,
+            var image = Path.Combine(AppContext.BaseDirectory, "xray.exe");
+            var start = Xray.StartAsync(image, config, port,
                 alive.Token, WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback, inheritConsole: true, startupSeconds: 24,
                 diagnosticLine: diagnostic.Read, startupExit: diagnostic.Exited);
             if (await Task.WhenAny(start, runtime) == runtime) alive.Cancel();
@@ -226,12 +227,29 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
             }
             await Send(channel, new TunReply(true, "", observation, DiagnosticsPort: diagnosticsPort,
                 EnginePid: engine.ProcessId, Control: control), boot.Token);
+            Task<string[]>? wfp = null;
             while (engine.Running)
             {
                 if (await Task.WhenAny(runtime, Task.Delay(250)) != runtime) continue;
                 if (!runtime.IsCompletedSuccessfully || runtime.Result <= 0) return 0;
+                var events = diagnostic.TakeEvents(out var denials);
+                if (denials.Length > 0)
+                {
+                    var evidence = new[] { "WFP · предыдущее чтение ещё выполняется." };
+                    if (wfp == null || wfp.IsCompleted)
+                    {
+                        wfp = Task.Run(() =>
+                        {
+                            try { return TunWfpDiagnostic.Read(image, peer, profile.Port, source, denials); }
+                            catch (Exception error) { return [$"WFP · чтение не завершено · код 0x{error.HResult:X8}."]; }
+                        });
+                        evidence = await Task.WhenAny(wfp, Task.Delay(750)) == wfp ? await wfp :
+                            ["WFP · истекло время ожидания чтения."];
+                    }
+                    events = events.Concat(evidence).ToArray();
+                }
                 using var notice = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-                await Send(channel, new TunReply(true, "", Sequence: runtime.Result, Events: diagnostic.TakeEvents()), notice.Token);
+                await Send(channel, new TunReply(true, "", Sequence: runtime.Result, Events: events), notice.Token);
                 runtime = Read<int>(channel, CancellationToken.None);
             }
             if (!runtime.IsCompleted && engine.ExitCode is { } exit)

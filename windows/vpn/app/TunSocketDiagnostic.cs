@@ -14,7 +14,7 @@ internal sealed class TunSocketDiagnostic(IPAddress peer, int port, bool rawTran
         @"\[(?:Info|Warning|Error|Debug)\]\s+(?:\[(?<id>[1-9]\d{0,9})\]\s+)?(?<source>[\w/]+): (?<message>.*)", RegexOptions.CultureInvariant);
     private const string Endpoint = @"(?:\[[\da-f:%]+\]|(?:\d{1,3}\.){3}\d{1,3}):\d{1,5}";
     private static readonly Regex SocketTarget = new(
-        @"\b(?:dial|read|write) (?:tcp[46]?|udp[46]?) (?:(?:" + Endpoint + @")->)?(?<target>" + Endpoint + @")(?![\d.])",
+        @"\b(?<verb>dial|read|write) (?:tcp[46]?|udp[46]?) (?:(?<local>" + Endpoint + @")->)?(?<target>" + Endpoint + @")(?![\d.])",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     private static readonly Regex NativeCode = new(
         @"\b(?:errno|winsock|socket error|wsa(?:error)?|winapi error)\s*[:= #]\s*(?<code>100\d\d)\b",
@@ -28,6 +28,7 @@ internal sealed class TunSocketDiagnostic(IPAddress peer, int port, bool rawTran
 
     private readonly Dictionary<uint, Flow> flows = new();
     private readonly Dictionary<string, int> events = new();
+    private readonly HashSet<TunDialDenial> denials = new();
     private readonly object gate = new();
     private bool capped;
 
@@ -35,6 +36,7 @@ internal sealed class TunSocketDiagnostic(IPAddress peer, int port, bool rawTran
     {
         internal string Route = "поток без метки";
         internal string? Target;
+        internal DateTimeOffset? FirstDial;
     }
 
     internal void Read(string line)
@@ -66,7 +68,12 @@ internal sealed class TunSocketDiagnostic(IPAddress peer, int port, bool rawTran
 
             if (source == "transport/internet/tcp" && message.StartsWith(DialPrefix, StringComparison.Ordinal))
             {
-                if (id != 0) GetFlow(id).Target = Destination(message[DialPrefix.Length..]);
+                if (id != 0)
+                {
+                    var current = GetFlow(id);
+                    current.Target = Destination(message[DialPrefix.Length..]);
+                    current.FirstDial ??= DateTimeOffset.UtcNow;
+                }
                 return;
             }
 
@@ -90,14 +97,43 @@ internal sealed class TunSocketDiagnostic(IPAddress peer, int port, bool rawTran
             if (source != "app/proxyman/outbound" || !message.StartsWith("failed to process outbound traffic", StringComparison.Ordinal)) return;
             var stage = FailureStage(message, rawTransport);
             if (stage == null) return;
-            var targets = SocketTarget.Matches(message).Select(item => Destination(item.Groups["target"].Value)).Distinct().ToArray();
+            var sockets = SocketTarget.Matches(message);
+            var targets = sockets.Select(item => Destination(item.Groups["target"].Value)).Distinct().ToArray();
             var destination = targets.Length > 1 ? "несколько назначений" : targets.FirstOrDefault() ?? flow?.Target ?? "назначение не подтверждено";
             var errors = NativeCode.Matches(message).Select(item => int.Parse(item.Groups["code"].Value))
                 .Concat(Localized.Where(entry => message.Contains(entry.Message, StringComparison.OrdinalIgnoreCase)).Select(entry => entry.Code))
                 .Distinct().Order().ToArray();
             var result = errors.Length > 0 ? "WinSock " + string.Join(", ", errors) : "код WinSock не передан ядром";
             Add(context + " → " + destination + " · " + stage + " · " + result);
+            if (errors.Contains(10013) && stage is ("подключение TCP (ConnectEx)" or "повторы Xray содержат ошибки TCP и TLS/REALITY"))
+                ReadDenials(id, flow, message, sockets);
         }
+    }
+
+    private void ReadDenials(uint id, Flow? flow, string message, MatchCollection sockets)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var earliest = now.AddSeconds(-20);
+        var from = flow?.FirstDial is { } first && first > earliest ? first : earliest;
+        bool matched = false;
+        for (var i = 0; i < sockets.Count && denials.Count < 32; i++)
+        {
+            var socket = sockets[i];
+            if (socket.Groups["verb"].Value != "dial" || Destination(socket.Groups["target"].Value) != "IP:порт VPN-сервера") continue;
+            var length = (i + 1 < sockets.Count ? sockets[i + 1].Index : message.Length) - socket.Index;
+            var error = message.Substring(socket.Index, length);
+            if (!error.Contains(": connectex:", StringComparison.OrdinalIgnoreCase) ||
+                !(NativeCode.Matches(error).Any(code => code.Groups["code"].Value == "10013") ||
+                  Localized.Any(entry => entry.Code == 10013 && error.Contains(entry.Message, StringComparison.OrdinalIgnoreCase))))
+                continue;
+            var local = IPEndPoint.TryParse(socket.Groups["local"].Value, out var endpoint) &&
+                endpoint.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork ? endpoint : null;
+            denials.Add(new(id, local == null ? 0 : TunWfpDiagnostic.Address(local.Address), (ushort)(local?.Port ?? 0), from, now));
+            matched = true;
+        }
+        if (!matched && denials.Count < 32 && sockets.Count == 0 && flow?.Target == "IP:порт VPN-сервера" &&
+            message.Contains(": connectex:", StringComparison.OrdinalIgnoreCase))
+            denials.Add(new(id, 0, 0, from, now));
     }
 
     internal static string? FailureStage(string message, bool rawTransport)
@@ -124,13 +160,17 @@ internal sealed class TunSocketDiagnostic(IPAddress peer, int port, bool rawTran
         return null;
     }
 
-    internal string[] TakeEvents()
+    internal string[] TakeEvents() => TakeEvents(out _);
+
+    internal string[] TakeEvents(out TunDialDenial[] blocked)
     {
         lock (gate)
         {
             var result = events.Select(item => item.Key + " × " + item.Value).ToList();
             if (capped) result.Add("часть сочетаний событий опущена");
             events.Clear();
+            blocked = denials.ToArray();
+            denials.Clear();
             capped = false;
             return result.ToArray();
         }

@@ -18,7 +18,9 @@ internal sealed class TunEngineDiagnostic(IPAddress? peer = null, int port = 0, 
     private readonly int[] counters = new int[Labels.Length];
     private readonly TunSocketDiagnostic? sockets = peer == null ? null : new(peer, port, rawTransport);
 
-    internal string[] TakeEvents()
+    internal string[] TakeEvents() => TakeEvents(out _);
+
+    internal string[] TakeEvents(out TunDialDenial[] denials)
     {
         var result = new List<string>();
         for (var i = 0; i < counters.Length; i++)
@@ -26,7 +28,8 @@ internal sealed class TunEngineDiagnostic(IPAddress? peer = null, int port = 0, 
             var count = Interlocked.Exchange(ref counters[i], 0);
             if (count > 0) result.Add(Labels[i] + " × " + count);
         }
-        if (sockets != null) result.AddRange(sockets.TakeEvents());
+        denials = [];
+        if (sockets != null) result.AddRange(sockets.TakeEvents(out denials));
         return result.ToArray();
     }
 
