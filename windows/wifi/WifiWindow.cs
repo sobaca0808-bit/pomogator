@@ -1,5 +1,6 @@
 using System;
 using System.Drawing;
+using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
@@ -120,7 +121,7 @@ namespace PomogatorWifi
             diagnostics.Margin = new Padding(1, 7, 7, 11);
             row.Controls.Add(setup, 0, 0);
             row.Controls.Add(diagnostics, 1, 0);
-            var version = Theme.Label("v0.2.1", 9, Theme.Muted);
+            var version = Theme.Label("v0.2.2", 9, Theme.Muted);
             version.TextAlign = ContentAlignment.MiddleRight;
             row.Controls.Add(version, 2, 0);
             return row;
@@ -213,11 +214,12 @@ namespace PomogatorWifi
             clients.Text = value.Peers.HasValue ? value.Peers.Value.ToString() :
                 value.Phase == WifiPhase.Off ? "—" : "Недоступно";
             power.Phase = shown;
-            power.Enabled = !busy && (value.Phase == WifiPhase.Off || value.Phase == WifiPhase.Owned);
-            power.AccessibleName = value.Phase == WifiPhase.Owned ? "Выключить Wi-Fi" :
+            var canStop = value.Phase == WifiPhase.Owned || value.ExternalTarget != null;
+            power.Enabled = !busy && (value.Phase == WifiPhase.Off || canStop);
+            power.AccessibleName = canStop ? "Выключить Wi-Fi" :
                 value.Phase == WifiPhase.Off && value.Owner != Guid.Empty ? "Восстановить Wi-Fi" : "Включить Wi-Fi";
             trayState.Text = "Wi-Fi: " + state;
-            trayPower.Text = power.AccessibleName;
+            trayPower.Text = canStop ? "Отключить раздачу" : power.AccessibleName;
             trayPower.Enabled = power.Enabled;
             tray.Text = "ПОМОГАТОР Wi-Fi · " + state;
             if (!testing) UpdateTrayIcon(shown);
@@ -280,7 +282,8 @@ namespace PomogatorWifi
             {
                 case WifiPhase.Owned: return report.Sharing == SharingState.Verified ? "Точка под управлением ПОМОГАТОРА." :
                     "Точка работает. Общий доступ можно проверить в диагностике.";
-                case WifiPhase.External: return "Точка продолжает работать вне управления ПОМОГАТОРА.";
+                case WifiPhase.External: return report.ExternalTarget == null ?
+                    "Точка работает вне управления ПОМОГАТОРА." : "Для отключения Hosted Network нажмите кнопку питания.";
                 case WifiPhase.Unconfirmed: return "Ждём подтверждения сеанса. Настройки раздачи сохранены.";
                 case WifiPhase.Starting: return "Проверяем подключение и запускаем точку доступа.";
                 case WifiPhase.Stopping: return "Завершаем сеанс ПОМОГАТОРА.";
@@ -397,6 +400,13 @@ namespace PomogatorWifi
             {
                 var current = await Read();
                 Present(current);
+                if (requested.Phase == WifiPhase.External)
+                {
+                    if (current.Phase != WifiPhase.External || requested.ExternalTarget?.Matches(current.ExternalTarget) != true)
+                        throw new WifiError("Точка изменилась. Для отключения подтвердите её заново.");
+                    await StopExternal(current.ExternalTarget);
+                    return;
+                }
                 if (!WifiRules.SamePowerIntent(requested.Phase, requested.Owner, requested.Adapter,
                     current.Phase, current.Owner, current.Adapter))
                     throw new WifiError("Состояние точки изменилось. Проверьте его перед повторным нажатием.");
@@ -409,6 +419,24 @@ namespace PomogatorWifi
                     await Recover(current.Owner, origin, false);
                 }
             });
+        }
+
+        private async Task StopExternal(HostedTarget target)
+        {
+            using (var watcher = new HostedNetwork(monitor: true))
+            {
+                var generation = watcher.Interruptions;
+                HostedStop.RequireMatch(target, generation, watcher.ActiveTarget(), watcher.Interruptions);
+                var name = Encoding.UTF8.GetString(Convert.FromBase64String(target.SsidBytes))
+                    .Replace('\r', ' ').Replace('\n', ' ');
+                if (MessageBox.Show(this, $"Отключить Hosted Network «{name}»?\r\n" +
+                    $"Адаптер: {target.Adapter:D}\r\nBSSID: {target.Bssid}\r\n\r\n" +
+                    "Устройства потеряют связь с этой точкой. Windows может запросить права администратора.",
+                    "Отключить раздачу", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
+                    MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+                Present(report, WifiPhase.Stopping);
+                await HostedStopWorker.Run(watcher, target, generation);
+            }
         }
 
         private static async Task Recover(Guid owner, string origin, bool automatic)

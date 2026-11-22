@@ -81,16 +81,52 @@ namespace PomogatorWifi
 
         internal State Query(out Guid adapter, out uint peers)
         {
+            var status = ReadStatus();
+            adapter = status.Adapter;
+            peers = status.PeerCount;
+            return status.State;
+        }
+
+        private StatusHeader ReadStatus()
+        {
             IntPtr buffer;
             Check(WlanHostedNetworkQueryStatus(handle, out buffer, IntPtr.Zero), 0);
             try
             {
-                var status = (StatusHeader)Marshal.PtrToStructure(buffer, typeof(StatusHeader));
-                adapter = status.Adapter;
-                peers = status.PeerCount;
-                return status.State;
+                return Marshal.PtrToStructure<StatusHeader>(buffer);
             }
             finally { WlanFreeMemory(buffer); }
+        }
+
+        internal HostedTarget ActiveTarget()
+        {
+            var generation = Interruptions;
+            var first = ReadStatus();
+            if (first.State != State.Active || first.Adapter == Guid.Empty ||
+                Array.TrueForAll(first.Mac, value => value == 0)) return null;
+            var settings = ReadSettings();
+            var last = ReadStatus();
+            var bssid = BitConverter.ToString(first.Mac);
+            if (settings.SsidLength == 0 || settings.SsidLength > 32 || last.State != State.Active ||
+                last.Adapter != first.Adapter || BitConverter.ToString(last.Mac) != bssid || Interruptions != generation)
+                return null;
+            return new HostedTarget { Adapter = first.Adapter, Bssid = bssid,
+                SsidBytes = Convert.ToBase64String(settings.Ssid, 0, (int)settings.SsidLength) };
+        }
+
+        internal void ForceStop()
+        {
+            var result = WlanHostedNetworkForceStop(handle, out var reason, IntPtr.Zero);
+            if (result == 0) return;
+            LocalStopError(result, reason);
+        }
+
+        private static void LocalStopError(uint result, uint reason)
+        {
+            var text = result == 5 || reason == 5 || reason == 23 ? "Windows запретила отключение Hosted Network. Проверьте права администратора и политику WLAN." :
+                result == 1062 || reason == 24 ? "Служба «Автонастройка WLAN» недоступна." :
+                "Windows не смогла отключить Hosted Network. Возможно, изменилось состояние адаптера или точки.";
+            throw new WifiError($"{text} (WLAN {result}, причина {reason})");
         }
 
         internal void Start(byte[] ssid, string password)
@@ -211,6 +247,8 @@ namespace PomogatorWifi
             NotificationCallback callback, IntPtr context, IntPtr reserved, out uint previous);
         [DllImport("wlanapi.dll")]
         private static extern uint WlanHostedNetworkStartUsing(IntPtr client, out uint reason, IntPtr reserved);
+        [DllImport("wlanapi.dll")]
+        private static extern uint WlanHostedNetworkForceStop(IntPtr client, out uint reason, IntPtr reserved);
         [DllImport("wlanapi.dll")]
         private static extern uint WlanHostedNetworkStopUsing(IntPtr client, out uint reason, IntPtr reserved);
     }

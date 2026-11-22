@@ -19,6 +19,7 @@ namespace PomogatorWifi
         internal uint? Peers;
         internal SharingState Sharing;
         internal SharingLease Candidate, Lease;
+        internal HostedTarget ExternalTarget;
         internal string Mechanism, SharingNote;
         internal bool CanRepair;
 
@@ -93,6 +94,7 @@ namespace PomogatorWifi
             var report = new WifiReport { Mobile = MobileHotspot.Read() };
             var hosted = HostedNetwork.State.Unavailable;
             var wlanKnown = false;
+            HostedTarget target = null;
             try
             {
                 using (var wlan = new HostedNetwork())
@@ -104,6 +106,7 @@ namespace PomogatorWifi
                     {
                         report.Peers = peers;
                         report.Ssid = wlan.Ssid();
+                        target = wlan.ActiveTarget();
                     }
                 }
             }
@@ -159,6 +162,8 @@ namespace PomogatorWifi
                     report.Phase == WifiPhase.External ? "Мобильный хот-спот / Wi-Fi Direct" :
                     hosted == HostedNetwork.State.Idle ? "Hosted Network доступна" :
                     report.HasWifi == false ? "Wi-Fi-адаптер не найден" : "Hosted Network недоступна";
+                if (report.Phase == WifiPhase.External && hosted == HostedNetwork.State.Active &&
+                    target?.Adapter == report.Adapter) report.ExternalTarget = target;
                 if (snapshot != null) ReadSharing(report, snapshot, wifiDirect);
             }
             return report;

@@ -116,6 +116,16 @@ internal static class SmokeTests
                 Require(window.CanToggle == (phase == WifiPhase.Off || phase == WifiPhase.Owned), "power availability");
             }
         }
+        using (var window = new WifiWindow(testing: true))
+        {
+            var legacy = Demo(WifiPhase.External);
+            legacy.ExternalTarget = new HostedTarget { Adapter = Guid.NewGuid(), Bssid = "12-34-56-78-9A-BC", SsidBytes = "UE9NT0dBVE9S" };
+            window.Present(legacy);
+            Require(window.CanToggle, "manual OFF enabled for verified external Hosted Network");
+            legacy.ExternalTarget = null;
+            window.Present(legacy);
+            Require(!window.CanToggle, "manual OFF disabled without Hosted Network identity");
+        }
         var checks = DiagnosticsWindow.Summarize(Demo(WifiPhase.External), true);
         Require(checks.Contains("внешний сеанс") && checks.Contains("подтверждены Windows"), "external session diagnostics");
         Console.WriteLine("PASS Russian status presentation and power control for all eight states");

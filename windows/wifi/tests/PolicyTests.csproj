@@ -13,6 +13,7 @@
     <Compile Include="../IcsInterop.cs" Link="IcsInterop.cs" />
     <Compile Include="../Policy.cs" Link="Policy.cs" />
     <Compile Include="../Session.cs" Link="Session.cs" />
+    <Compile Include="../HostedTarget.cs" Link="HostedTarget.cs" />
     <Compile Include="../HostedNetwork.cs" Link="HostedNetwork.cs" />
   </ItemGroup>
 </Project>

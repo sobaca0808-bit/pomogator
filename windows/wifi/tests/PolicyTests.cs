@@ -332,6 +332,28 @@ var tests = new (string Name, Action Run)[] {
         Check(radio.Off(ours).Owner == Guid.Empty && radio.Stops == 1);
         Check(radio.Events.Any(item => item.Contains("hosted_status_restored")));
     }),
+    ("Manual external OFF verifies WLAN identity and generation before calling ForceStop", () => {
+        var target = new HostedTarget { Adapter = Guid.NewGuid(), Bssid = "12-34-56-78-9A-BC", SsidBytes = "UE9NT0dBVE9S" };
+        var active = new HostedTarget { Adapter = target.Adapter, Bssid = target.Bssid, SsidBytes = target.SsidBytes };
+        var called = 0;
+        void Stop() => called++;
+        HostedStop.Apply(target, 3, () => active, () => 3, Stop);
+        Reject(() => HostedStop.Apply(target, 3, () => active, () => 4, Stop));
+        Reject(() => HostedStop.Apply(target, 3, () => null, () => 3, Stop));
+        active.SsidBytes = "RGlmZmVyZW50";
+        Reject(() => HostedStop.Apply(target, 3, () => active, () => 3, Stop));
+        active.SsidBytes = target.SsidBytes;
+        active.Bssid = "12-34-56-78-9A-BD";
+        Reject(() => HostedStop.Apply(target, 3, () => active, () => 3, Stop));
+        active.Bssid = target.Bssid;
+        active.Adapter = Guid.NewGuid();
+        Reject(() => HostedStop.Apply(target, 3, () => active, () => 3, Stop));
+        Reject(() => HostedStop.Apply(target, 3, () => target, () => 3, () => throw new WifiError("Access denied")));
+        Check(called == 1);
+        var state = HostedNetwork.State.Active;
+        Check(HostedStop.WaitForOff(() => state, () => state = HostedNetwork.State.Idle));
+        Check(!HostedStop.WaitForOff(() => HostedNetwork.State.Active, () => { }));
+    }),
     ("Validate SSID in UTF-8 bytes and passphrase in printable ASCII", () => {
         Check(Policy.EncodeSsid(new string('Ж', 16)).Length == 32);
         Reject(() => Policy.EncodeSsid(new string('Ж', 17)));
