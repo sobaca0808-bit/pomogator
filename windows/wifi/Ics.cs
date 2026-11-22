@@ -9,14 +9,27 @@ namespace PomogatorWifi
     internal sealed class IcsFailure : Exception
     {
         internal string Operation { get; }
+        internal int? NativeCode { get; }
+        internal string Diagnostic => NativeCode is int code ? Operation + string.Format(" HRESULT=0x{0:X8}", code) :
+            Operation + (InnerException == null ? "=false" : " managed=" + InnerException.GetType().Name);
+
+        internal IcsFailure() : base("Windows сообщила, что ICS недоступен (SharingInstalled=false). " +
+            "Проверьте службу «Общий доступ к подключению к Интернету» (SharedAccess) и вкладку «Доступ» в ncpa.cpl.")
+        {
+            Operation = "SharingInstalled";
+        }
 
         internal IcsFailure(string operation, Exception cause)
-            : base("Не удалось проверить или настроить ICS: " + operation +
-                   string.Format(" (0x{0:X8}).", cause.HResult), cause)
+            : base("Не удалось проверить или настроить ICS. Операция " + operation +
+                   (NativeResult(cause) is int code ? string.Format(" (HRESULT 0x{0:X8}).", code) : "."), cause)
         {
             Operation = operation;
-            HResult = cause.HResult;
+            NativeCode = NativeResult(cause);
+            if (NativeCode.HasValue) HResult = NativeCode.Value;
         }
+
+        private static int? NativeResult(Exception cause) => cause is ExternalException || cause is InvalidCastException
+            ? (int?)cause.HResult : null;
     }
 
     internal sealed class IcsIssue
@@ -24,12 +37,15 @@ namespace PomogatorWifi
         internal readonly Guid Id;
         internal readonly bool Unsupported;
         internal readonly string Detail;
+        internal readonly bool ActiveWifiDirect;
 
         internal IcsIssue(IcsFailure error, Guid id, Connection connection, bool unsupported)
         {
             Id = id;
             Unsupported = unsupported;
-            Detail = error.Operation + string.Format(" GUID={0} HRESULT=0x{1:X8}", id == Guid.Empty ? "не прочитан" : id.ToString(), error.HResult);
+            ActiveWifiDirect = connection != null && connection.Connected &&
+                (connection.Flags & Characteristics.WifiDirect) != 0;
+            Detail = error.Diagnostic + " GUID=" + (id == Guid.Empty ? "не прочитан" : id.ToString());
             if (connection != null)
                 Detail += string.Format(" MediaType={0} Status={1} Characteristics=0x{2:X}",
                     (int)connection.Media, (int)connection.Status, (uint)connection.Flags);
@@ -58,7 +74,7 @@ namespace PomogatorWifi
                 }
                 step = "SharingInstalled";
                 if (!manager.GetSharingInstalled())
-                    throw new WifiError("Windows сообщает, что общий доступ ICS недоступен.");
+                    throw new IcsFailure();
 
                 step = "EnumEveryConnection";
                 var collection = Keep(manager.GetEveryConnection());
@@ -76,6 +92,11 @@ namespace PomogatorWifi
                     ReadConnection(manager, item[0], index, seen);
                 }
             }
+            catch (IcsFailure)
+            {
+                Dispose();
+                throw;
+            }
             catch (Exception cause)
             {
                 Dispose();
@@ -88,7 +109,6 @@ namespace PomogatorWifi
             var step = "QueryInterface(INetConnection)";
             var id = Guid.Empty;
             Connection connection = null;
-            var unsupported = false;
             try
             {
                 var raw = (INetConnection)Keep(item);
@@ -110,13 +130,7 @@ namespace PomogatorWifi
                 INetSharingConfiguration rawConfig;
                 var result = manager.GetConfiguration(raw, out rawConfig);
                 if (result != 0)
-                {
-                    // A disconnected object without a network medium or sharing flags is not a usable ICS interface.
-                    unsupported = result == NoInterface && media == MediaType.None && status == ConnectionStatus.Disconnected &&
-                        (flags & (Characteristics.Shared | Characteristics.SharedPrivate |
-                                  Characteristics.HomeNetCapable | Characteristics.HostedNetwork)) == 0;
                     throw new COMException("Windows не вернула конфигурацию ICS.", result);
-                }
                 var config = Keep(rawConfig);
                 step = "SharingEnabled";
                 if (config.GetSharingEnabled())
@@ -134,7 +148,13 @@ namespace PomogatorWifi
             }
             catch (Exception cause)
             {
-                Issues.Add(new IcsIssue(new IcsFailure(step + " #" + index, cause), id, connection, unsupported));
+                var failure = new IcsFailure(step + " #" + index, cause);
+                // The call or marshaling its returned interface can yield E_NOINTERFACE.
+                var unsupported = step == ReadConfiguration && failure.NativeCode == NoInterface &&
+                    connection != null && connection.Media == MediaType.None && connection.Status == ConnectionStatus.Disconnected &&
+                    (connection.Flags & (Characteristics.Shared | Characteristics.SharedPrivate | Characteristics.HomeNetCapable |
+                                         Characteristics.HostedNetwork | Characteristics.WifiDirect)) == 0;
+                Issues.Add(new IcsIssue(failure, id, connection, unsupported));
             }
         }
 

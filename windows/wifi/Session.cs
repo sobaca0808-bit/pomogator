@@ -55,22 +55,24 @@ namespace PomogatorWifi
             throw new WifiError("Windows не показала активный виртуальный адаптер Hosted Network. Проверьте диспетчер устройств и драйвер Ralink.");
         }
 
-        internal SharingResult ConfigureSharing(Func<string, bool> confirm)
+        internal SharingResult ConfigureSharing(Func<string, bool> confirm, Action beforeWrite = null, bool repair = false)
         {
             RequireActiveTarget();
             using (var snapshot = openSnapshot())
             {
-                if (!NeedsSharing(snapshot)) return SharingResult.Existing;
+                if (!NeedsSharing(snapshot, repair)) return SharingResult.Existing;
             }
 
             if (!confirm(Pair)) return SharingResult.Declined;
             RequireActiveTarget();
             using (var snapshot = openSnapshot())
             {
-                if (!NeedsSharing(snapshot)) return SharingResult.Existing;
+                if (!NeedsSharing(snapshot, repair)) return SharingResult.Existing;
+                beforeWrite?.Invoke();
                 publicAttempted = true;
                 privateAttempted = true; // Windows can assign the private role when public sharing starts.
-                snapshot.Enable(Source, SharingRole.Public);
+                if (!snapshot.Connections.Any(connection => connection.Id == Source && connection.Sharing == SharingRole.Public))
+                    snapshot.Enable(Source, SharingRole.Public);
             }
 
             for (int attempt = 0; attempt < 8; attempt++)
@@ -105,10 +107,36 @@ namespace PomogatorWifi
             throw new WifiError("Windows не подтвердила роли ICS для PPPoE и виртуального адаптера. Проверьте вкладку «Доступ» в ncpa.cpl.");
         }
 
-        private bool NeedsSharing(IcsSnapshot snapshot)
+        private bool NeedsSharing(IcsSnapshot snapshot, bool repair)
         {
             snapshot.RequireVerified(Source, Target);
-            return Policy.NeedsSharing(snapshot.Connections, Source, Target);
+            if (snapshot.IsSharing(Source, Target)) return false;
+            if (!repair) return Policy.NeedsSharing(snapshot.Connections, Source, Target);
+            var source = snapshot.Connections.SingleOrDefault(c => c.Id == Source && c.Connected && c.IsWanSharingMedia);
+            if (source == null || Policy.FindTarget(snapshot.Connections, Target) == null ||
+                !Policy.CanRestore(snapshot.Connections, Source, Target, true, true))
+                throw new WifiError("Исходная пара ICS изменилась. Проверьте подключения.");
+            return true;
+        }
+
+        internal static Session ForPair(QueryHosted query, Func<IcsSnapshot> open, Guid source, Guid target)
+        {
+            using (var snapshot = open())
+            {
+                snapshot.RequireVerified(source, target);
+                var a = snapshot.Connections.SingleOrDefault(c => c.Id == source);
+                var b = snapshot.Connections.SingleOrDefault(c => c.Id == target);
+                if (a == null || b == null || !a.IsWanSharingMedia || !b.IsLan)
+                    throw new WifiError("Windows не подтвердила прежнюю пару подключения.");
+                return new Session(query, open, () => Thread.Sleep(250), a, b);
+            }
+        }
+
+        internal void RestoreOwnedPair()
+        {
+            RequireActiveTarget();
+            publicAttempted = privateAttempted = true;
+            Restore();
         }
 
         private void RequireActiveTarget()

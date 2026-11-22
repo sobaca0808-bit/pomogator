@@ -6,10 +6,14 @@
     <NoWarn>$(NoWarn);CA1416</NoWarn>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="ui/**/*.cs" />
+    <Compile Include="../OwnerSession.cs" Link="OwnerSession.cs" />
+    <Compile Include="../WifiState.cs" Link="WifiState.cs" />
     <Compile Include="../Ics.cs" Link="Ics.cs" />
     <Compile Include="../IcsInterop.cs" Link="IcsInterop.cs" />
     <Compile Include="../Policy.cs" Link="Policy.cs" />
     <Compile Include="../Session.cs" Link="Session.cs" />
+    <Compile Include="../HostedTarget.cs" Link="HostedTarget.cs" />
     <Compile Include="../HostedNetwork.cs" Link="HostedNetwork.cs" />
   </ItemGroup>
 </Project>
