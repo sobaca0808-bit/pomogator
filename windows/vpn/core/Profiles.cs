@@ -5,13 +5,18 @@ using System.Text.RegularExpressions;
 
 namespace Pomogator.Vpn;
 
-public sealed class VpnError(string message) : Exception(message);
+public sealed class VpnError(string message, Check? failedCheck = null) : Exception(message)
+{
+    public Check? FailedCheck { get; } = failedCheck;
+}
 
 public sealed record Profile(string Name, string Host, int Port, Guid Id, string Security, string Transport,
     IReadOnlyDictionary<string, string> Options, FullRouting? Full = null)
 {
     [System.Text.Json.Serialization.JsonIgnore]
-    public string DisplayName => Profiles.SafeName(Name, Host + ":" + Port);
+    public string DisplayName => Option("sid") is { Length: > 0 } shortId &&
+        Name.Contains(shortId, StringComparison.OrdinalIgnoreCase)
+            ? Host + ":" + Port : Profiles.SafeName(Name, Host + ":" + Port);
 
     public string Option(string name, string fallback = "") => Options.TryGetValue(name, out var value) ? value : fallback;
 }

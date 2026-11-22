@@ -19,7 +19,7 @@
         <Ellipse.Effect><BlurEffect Radius="90"/></Ellipse.Effect>
       </Ellipse>
     </Grid>
-    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+    <ScrollViewer x:Name="ContentScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
       <StackPanel Margin="23,20" MaxWidth="1250">
         <DockPanel Margin="0,0,0,18">
           <Button DockPanel.Dock="Right" Content="⚙  Настройки" Click="SettingsClick" Margin="10,0,0,0" VerticalAlignment="Center"/>

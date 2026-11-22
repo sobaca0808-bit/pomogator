@@ -25,25 +25,32 @@ internal static class Program
         CheckState(window, Phase.Disconnected, "Отключён", "–");
         Capture(window, directory, "01-disconnected", 96);
         window.Connection.Begin();
+        window.Detail.Text = "Контрольный HTTPS-запрос через выбранный VLESS…";
         CheckState(window, Phase.Connecting, "Подключается", "…");
         Capture(window, directory, "02-connecting", 96);
         foreach (var check in Enum.GetValues<Check>()) window.Connection.Record(check, CheckResult.Passed);
         window.Connection.Confirm(DateTimeOffset.Now, false);
+        window.Detail.Text = "HTTP 127.0.0.1:31852";
         CheckState(window, Phase.Connected, "Подключён и проверен", "✓");
         foreach (var (dpi, scale) in new[] { (96, 100), (120, 125), (144, 150) })
             Capture(window, directory, $"03-connected-{scale}", dpi);
         window.DiagnosticsPanel.IsExpanded = true;
-        window.Height = 795;
+        window.Height = 860;
         window.AddLog("Тестовое состояние интерфейса. HTTPS через VLESS проверен локальным стендом Windows CI.");
+        Pump(window);
+        window.ContentScroll.ScrollToBottom();
         Capture(window, directory, "04-diagnostics", 96);
         window.DiagnosticsPanel.IsExpanded = false;
+        window.ContentScroll.ScrollToTop();
         window.Connection.BeginStop();
         CheckState(window, Phase.Disconnecting, "Отключается", "↘");
         Capture(window, directory, "05-disconnecting", 96);
         window.Connection.End(true);
+        window.Detail.Text = "Локальный прокси перестал отвечать. Повторите подключение.";
         CheckState(window, Phase.Error, "Ошибка подключения", "!");
         Capture(window, directory, "06-error", 96);
         window.Connection.End(false);
+        window.Detail.Text = "Нажмите круглую кнопку, чтобы подключиться.";
 
         window.WindowState = WindowState.Minimized;
         Pump(window);
@@ -58,6 +65,11 @@ internal static class Program
         Assert(GridPosition(window.ServersPanel) == 1, "Server pane did not reflow.");
         Capture(window, directory, "07-narrow", 144);
 
+        window.Width = 980;
+        window.Height = 750;
+        window.SettingsPanel.Visibility = Visibility.Visible;
+        window.ContentScroll.ScrollToTop();
+        Capture(window, directory, "08-settings", 96);
         window.Close();
         Console.WriteLine("PASS WPF: all five status labels, glyphs and tray phases, minimize/restore, narrow layout, 100/125/150% captures.");
     }

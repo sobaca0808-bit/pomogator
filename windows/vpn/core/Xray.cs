@@ -45,7 +45,7 @@ public sealed class Xray : IDisposable
         catch
         {
             process.Dispose();
-            throw new VpnError("Не удалось запустить ядро. Проверьте комплект приложения и разрешение Windows на запуск.");
+            throw new VpnError("Не удалось запустить ядро. Проверьте комплект приложения и разрешение Windows на запуск.", Check.Xray);
         }
 
         var result = new Xray(process, port, ownsPort);
@@ -64,7 +64,7 @@ public sealed class Xray : IDisposable
             while (true)
             {
                 if (!result.Running)
-                    throw new VpnError("Ядро отклонило профиль или завершило запуск. Проверьте параметры TLS, REALITY и транспорта.");
+                    throw new VpnError("Ядро отклонило профиль или завершило запуск. Проверьте параметры TLS, REALITY и транспорта.", Check.Xray);
                 if (await result.IsProxyReadyAsync(port, startup.Token)) return result;
                 await Task.Delay(100, startup.Token);
             }
@@ -72,12 +72,12 @@ public sealed class Xray : IDisposable
         catch (OperationCanceledException) when (!token.IsCancellationRequested)
         {
             result.Dispose();
-            throw new VpnError("За 6 секунд ядро не открыло локальный прокси.");
+            throw new VpnError("За 6 секунд ядро не открыло локальный прокси.", Check.Proxy);
         }
         catch (IOException)
         {
             result.Dispose();
-            throw new VpnError("Ядро завершилось до загрузки профиля.");
+            throw new VpnError("Ядро завершилось до загрузки профиля.", Check.Xray);
         }
         catch
         {
@@ -156,17 +156,21 @@ public sealed class Xray : IDisposable
     {
         if (disposed) return;
         disposed = true;
-        lifetime?.Dispose();
-        lifetime = null;
         try
         {
+            if (lifetime != null)
+            {
+                lifetime.Dispose();
+                lifetime = null;
+                if (process.WaitForExit(2000)) return;
+            }
             if (!process.HasExited)
             {
-                process.Kill(entireProcessTree: true);
-                process.WaitForExit(2000);
+                try { process.Kill(entireProcessTree: true); }
+                catch (InvalidOperationException) when (process.HasExited) { }
+                if (!process.WaitForExit(2000)) throw new VpnError("Windows не подтвердила завершение Xray.");
             }
         }
-        catch (InvalidOperationException) { }
         finally { process.Dispose(); }
     }
 }

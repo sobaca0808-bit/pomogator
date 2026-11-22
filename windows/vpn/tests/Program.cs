@@ -194,6 +194,12 @@ if (!string.IsNullOrWhiteSpace(executable))
     Console.WriteLine("PASS Pinned Xray validates transports and full EasyGo configuration");
     passed++;
 
+    await TestAsync("Classify a core startup failure separately from a proxy failure", async () => {
+        var port = Xray.FreePort();
+        var error = await Fails(() => Xray.StartAsync(executable, "{", port, CancellationToken.None));
+        Assert(error.FailedCheck == Check.Xray);
+    });
+
     using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(16));
     var destination = new TcpListener(IPAddress.Loopback, 0);
     destination.Start();
@@ -272,8 +278,12 @@ if (!string.IsNullOrWhiteSpace(executable))
         await running.WaitForExitAsync(deadline.Token);
         Assert(!clientCore.Running && !await clientCore.IsProxyReadyAsync(portLocal, deadline.Token));
         using var restarted = await Xray.StartAsync(executable, XrayConfig.Create(clientProfile with { Full = null }, portLocal),
-            portLocal, deadline.Token, protect, owns);
+            portLocal, deadline.Token, Track, owns);
         Assert(restarted.Running);
+        var pid = running!.Id;
+        using var tracked = Process.GetProcessById(pid);
+        restarted.Dispose();
+        Assert(tracked.HasExited);
     }
     finally { destination.Stop(); }
     Console.WriteLine("PASS Full profile routes probe through VLESS, rejects HTTP 503, detects process termination and restarts");

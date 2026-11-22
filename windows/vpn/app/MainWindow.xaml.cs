@@ -104,6 +104,8 @@ public partial class MainWindow : Window
     {
         if (!IsLoaded) return;
         LatencyText.Text = "Задержка измеряется по TCP до сервера.";
+        if (Connection.Phase == Phase.Disconnected && Servers.SelectedItem != null)
+            Detail.Text = "Нажмите круглую кнопку, чтобы подключиться.";
         Render();
     }
 
@@ -176,7 +178,7 @@ public partial class MainWindow : Window
         ProxyCheck.Text = CheckText("Локальный прокси", Check.Proxy);
         TrafficCheck.Text = CheckText("HTTPS через VLESS", Check.Https);
         SystemCheck.Text = "Системный прокси: " + (Connection.SystemProxy ? "включён" : proxy.Active ? "требует проверки" : "выключен");
-        CheckedAt.Text = lastCheck is { } stamp ? "Последняя проверка: " + stamp.ToLocalTime().ToString("HH:mm:ss") : "Проверок ещё не было.";
+        CheckedAt.Text = (lastCheck ?? Connection.ConnectedAt) is { } stamp ? "Последняя проверка: " + stamp.ToLocalTime().ToString("HH:mm:ss") : "Проверок ещё не было.";
     }
 
     private static string Uptime(TimeSpan span) => $"{(long)span.TotalHours:00}:{span.Minutes:00}:{span.Seconds:00}";
@@ -267,7 +269,7 @@ public partial class MainWindow : Window
         }
         catch (Exception error)
         {
-            if (stage is { } failed) Connection.Record(failed, CheckResult.Failed);
+            if (((error as VpnError)?.FailedCheck ?? stage) is { } failed) Connection.Record(failed, CheckResult.Failed);
             lastCheck = DateTimeOffset.Now;
             Stop(true, Explain(error));
         }
