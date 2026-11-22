@@ -8,6 +8,9 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="ui/**/*.cs" />
+    <Compile Include="../app/TunSession.cs" Link="TunSession.cs" />
+    <Compile Include="../app/LocalData.cs" Link="LocalData.cs" />
+    <Compile Include="../app/TunControlProbe.cs" Link="TunControlProbe.cs" />
     <Compile Include="../app/TunTraffic.cs" Link="TunTraffic.cs" />
     <Compile Include="../app/TunPacketCounters.cs" Link="TunPacketCounters.cs" />
     <Compile Include="../app/TunXrayCounters.cs" Link="TunXrayCounters.cs" />
@@ -17,6 +20,7 @@
     <Compile Include="../app/TunWindows.cs" Link="TunWindows.cs" />
     <Compile Include="../app/TunConsole.cs" Link="TunConsole.cs" />
     <ProjectReference Include="../core/Core.csproj" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
     <Compile Include="../app/RasProxyScope.cs" Link="RasProxyScope.cs" />
     <Compile Include="../app/WinInet.cs" Link="WinInet.cs" />
     <Compile Include="../app/WindowsLifetime.cs" Link="WindowsLifetime.cs" />

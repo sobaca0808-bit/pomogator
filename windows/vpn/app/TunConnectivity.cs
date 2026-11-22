@@ -16,7 +16,8 @@ internal sealed record TunProbe(bool Success, string Outcome, long Milliseconds)
     internal string Line(string label) => $"{label}: {Outcome} ({Milliseconds} мс)";
 }
 
-internal sealed record TunChecks(TunProbe Resolver, TunProbe Windows, TunProbe Https, string[]? Traffic = null)
+internal sealed record TunChecks(TunProbe Resolver, TunProbe Windows, TunProbe Https, string[]? Traffic = null,
+    TunProbe? DirectPinned = null, TunProbe? SameEngine = null)
 {
     internal bool Success => Resolver.Success && Windows.Success && Https.Success;
     internal string FailedStage => !Resolver.Success ? "запрос к DNS на Wintun" :
@@ -32,8 +33,18 @@ internal sealed record TunChecks(TunProbe Resolver, TunProbe Windows, TunProbe H
         yield return Resolver.Line("DNS-запрос к " + TunConfig.Resolver + " через Wintun");
         yield return Windows.Line("Системное разрешение имён Windows");
         yield return Https.Line("HTTPS через Wintun без системного прокси");
+        if (DirectPinned != null) yield return DirectPinned.Line("HTTPS напрямую через Wintun, закреплённая цель");
+        if (SameEngine != null) yield return SameEngine.Line("HTTPS через локальный вход того же Xray при активном TUN");
+        if (DirectPinned != null && SameEngine != null) yield return Compare(DirectPinned.Success, SameEngine.Success);
         foreach (var line in Traffic ?? Array.Empty<string>()) yield return line;
     }
+    private static string Compare(bool direct, bool control) => (direct, control) switch
+    {
+        (true, true) => "Сравнение HTTPS · обе проверки прошли на одной IPv4-цели.",
+        (false, true) => "Сравнение HTTPS · VLESS в том же Xray доступен. Сбой наблюдается на пути через Wintun.",
+        (true, false) => "Сравнение HTTPS · Wintun доступен. Не прошёл контроль через локальный вход Xray.",
+        _ => "Сравнение HTTPS · обе проверки не подтверждены. Проверьте коды и события исходящего соединения Xray."
+    };
 }
 
 internal static class TunConnectivity
@@ -41,23 +52,63 @@ internal static class TunConnectivity
     internal const string ControlName = "www.cloudflare.com";
     private const string AlternateName = "example.com";
 
-    internal static async Task<TunChecks> Run(TunRecovery record, CancellationToken token, int diagnosticsPort, int enginePid)
+    internal static async Task<TunChecks> Run(TunSession session, CancellationToken token)
     {
+        var record = session.Record;
         var adapter = TunWindows.Find(record.Id) ?? throw new VpnError("Интерфейс Wintun исчез перед проверкой трафика.");
         var index = TunWindows.Index(adapter);
         var resolver = IPAddress.Parse(record.InstalledDns);
-        var before = await TunTrafficSample.Capture(record.Id, diagnosticsPort, enginePid, token);
+        var lines = new List<string>();
+        _ = await session.SampleEvents(token); // Discard events before this diagnostic interval.
+        Task<TunTrafficSample> Capture() => TunTrafficSample.Capture(record.Id, session.DiagnosticsPort, session.EnginePid, token);
+
+        var before = await Capture();
         var direct = CheckResolver(resolver, index, token);
         var windows = CheckWindows(token);
         await Task.WhenAll(direct, windows);
-        var afterDns = await TunTrafficSample.Capture(record.Id, diagnosticsPort, enginePid, token);
-        var https = await CheckHttps(record.Id, token);
-        var afterHttps = await TunTrafficSample.Capture(record.Id, diagnosticsPort, enginePid, token);
         var directResult = await direct;
         var windowsResult = await windows;
-        return new TunChecks(directResult, windowsResult, https,
-            afterDns.Describe("DNS", before, !directResult.Success || !windowsResult.Success)
-                .Concat(afterHttps.Describe("HTTPS", afterDns, !https.Success)).ToArray());
+        var afterDns = await Capture();
+        lines.AddRange(afterDns.Describe("DNS", before, !directResult.Success || !windowsResult.Success));
+        await AddEngineEvents("DNS");
+
+        var pinned = await PinnedHttps(validation => TunWindows.Http(record.Id, validation,
+            TunConfig.InternetProbeHost, IPAddress.Parse(TunConfig.InternetProbe)), token);
+        var afterHttps = await Capture();
+        lines.AddRange(afterHttps.Describe("HTTPS Wintun", afterDns, !pinned.Success));
+        await AddEngineEvents("HTTPS Wintun");
+
+        TunProbe? control = null;
+        if (session.Control is { } endpoint)
+        {
+            control = await PinnedHttps(validation => TunControlProbe.Client(endpoint, session.EnginePid,
+                TunConfig.InternetProbeHost, validation), token);
+            var afterControl = await Capture();
+            lines.AddRange(afterControl.Describe("HTTPS локальный вход Xray", afterHttps, explainFailure: false));
+            await AddEngineEvents("HTTPS локальный вход Xray");
+        }
+        else lines.Add("HTTPS локальный вход Xray · помощник не подтвердил контрольный вход.");
+
+        var https = pinned;
+        if (!pinned.Success && TunWindows.Find(record.Id) != null)
+        {
+            try
+            {
+                using var fallback = TunWindows.Http(record.Id);
+                var alternative = await InternetHealth.ProbeAsync(fallback, token);
+                if (alternative is { } elapsed)
+                    https = new(true, "альтернативный контрольный адрес доступен через Wintun", (long)elapsed.TotalMilliseconds);
+            }
+            catch (VpnError) { lines.Add("Резервная HTTPS-проба · интерфейс Wintun больше недоступен."); }
+        }
+        return new TunChecks(directResult, windowsResult, https, lines.ToArray(), pinned, control);
+
+        async Task AddEngineEvents(string phase)
+        {
+            var events = await session.SampleEvents(token);
+            lines.Add($"{phase} · Xray: {(events == null ? "события недоступны" : events.Length == 0 ?
+                "распознанных событий нет" : string.Join(", ", events))}.");
+        }
     }
 
     internal static async Task<TunProbe> CheckResolver(IPAddress resolver, int index, CancellationToken token, int port = 53)
@@ -158,36 +209,46 @@ internal static class TunConnectivity
         return new(false, outcome, watch.ElapsedMilliseconds);
     }
 
-    private static async Task<TunProbe> CheckHttps(Guid id, CancellationToken token)
+    private static async Task<TunProbe> PinnedHttps(Func<RemoteCertificateValidationCallback, HttpClient> open,
+        CancellationToken token)
     {
         var watch = Stopwatch.StartNew();
         SslPolicyErrors certificate = SslPolicyErrors.None;
         string? chainStatus = null;
-        using var client = TunWindows.Http(id, (_, _, chain, errors) =>
-        {
-            certificate = errors;
-            if (errors != SslPolicyErrors.None && chain != null)
-                chainStatus = string.Join(", ", chain.ChainStatus.Select(status => status.Status));
-            return errors == SslPolicyErrors.None;
-        }, TunConfig.InternetProbeHost, IPAddress.Parse(TunConfig.InternetProbe));
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         deadline.CancelAfter(TimeSpan.FromSeconds(7));
         string outcome;
         try
         {
+            using var client = open((_, _, chain, errors) =>
+            {
+                certificate = errors;
+                if (errors != SslPolicyErrors.None && chain != null)
+                    chainStatus = string.Join(", ", chain.ChainStatus.Select(status => status.Status));
+                return errors == SslPolicyErrors.None;
+            });
             // Known IP keeps this probe independent of DNS. The URI supplies the real SNI and certificate name.
             using var request = new HttpRequestMessage(HttpMethod.Get,
                 "https://" + TunConfig.InternetProbeHost + "/dns-query?name=example.com&type=A");
             request.Headers.Accept.ParseAdd("application/dns-json");
             using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
             if (response.StatusCode == HttpStatusCode.OK)
-                return new(true, "TLS с проверенным именем и HTTP 200 по закреплённому IPv4", watch.ElapsedMilliseconds);
-            outcome = "контрольный IPv4 вернул HTTP " + (int)response.StatusCode;
+            {
+                await using var body = await response.Content.ReadAsStreamAsync(deadline.Token);
+                if (await body.ReadAsync(new byte[1], deadline.Token) == 1)
+                    return new(true, "TLS с проверенным именем, HTTP 200 и данные ответа", watch.ElapsedMilliseconds);
+                outcome = "HTTP 200 без данных ответа";
+            }
+            else outcome = "контрольный IPv4 вернул HTTP " + (int)response.StatusCode;
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested) { outcome = "истекло время HTTPS по контрольному IPv4"; }
+        catch (VpnError) { outcome = "Windows не подтвердила интерфейс для HTTPS-пробы"; }
+        catch (IOException error) { outcome = $"сбой чтения ответа HTTPS 0x{error.HResult:X8}"; }
         catch (HttpRequestException error)
         {
-            outcome = "HTTPS по контрольному IPv4: " + error.HttpRequestError;
+            outcome = error.StatusCode == HttpStatusCode.ProxyAuthenticationRequired ?
+                "локальный вход не подтвердил учётные данные контрольной пробы" :
+                "HTTPS по контрольному IPv4: " + error.HttpRequestError;
             if (certificate != SslPolicyErrors.None) outcome += "; сертификат: " + certificate;
             if (!string.IsNullOrEmpty(chainStatus)) outcome += "; цепочка: " + chainStatus;
             for (var cause = error.InnerException; cause != null; cause = cause.InnerException)
@@ -197,11 +258,7 @@ internal static class TunConnectivity
                     outcome += $"; {cause.GetType().Name} 0x{cause.HResult:X8}";
         }
 
-        // One provider can be unreachable even when the tunnel is healthy. Named checks still use the bound Wintun socket.
-        using var fallbackClient = TunWindows.Http(id);
-        var fallback = await InternetHealth.ProbeAsync(fallbackClient, token);
-        return fallback.HasValue ? new(true, "HTTPS по контрольному имени; " + outcome, watch.ElapsedMilliseconds) :
-            new(false, outcome + "; HTTPS по контрольным именам недоступен", watch.ElapsedMilliseconds);
+        return new(false, outcome, watch.ElapsedMilliseconds);
     }
 }
 

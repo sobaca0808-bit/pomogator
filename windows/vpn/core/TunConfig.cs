@@ -5,6 +5,8 @@ using System.Text.Json;
 
 namespace Pomogator.Vpn;
 
+public sealed record TunControlEndpoint(int Port, string User, string Password, string Destination, int DestinationPort);
+
 public static class TunConfig
 {
     public const string Address = "198.18.240.1";
@@ -16,6 +18,7 @@ public static class TunConfig
     private const string DnsOutbound = "pmt-dns";
     public const string Resolver = "9.9.9.9";
     private const string TunTag = "pomogator-tun";
+    private const string ControlTag = "pmt-tun-control";
 
     public static string Adapter(Guid id) => "PmtVpn-" + id.ToString("N")[..16];
 
@@ -58,20 +61,44 @@ public static class TunConfig
         return profile with { Host = peer.ToString(), Options = options, Full = null };
     }
 
-    public static string Engine(Guid id, IPAddress peer, Profile profile, int readiness, int diagnosticsPort = 0) =>
+    public static string Engine(Guid id, IPAddress peer, Profile profile, int readiness, int diagnosticsPort = 0, TunControlEndpoint? control = null) =>
         CreateEngine(id, Routes(peer), new[] { "allexceptlan", "[::/0]:all", "misconfigtun" },
             XrayConfig.Outbound(Pinned(profile, peer), "vpn"), readiness,
-            diagnosticsPort: diagnosticsPort > 0 ? diagnosticsPort : null, dnsOverHttps: DnsUpstream);
+            diagnosticsPort: diagnosticsPort > 0 ? diagnosticsPort : null, dnsOverHttps: DnsUpstream, control: control);
 
     // Production and native CI use the same TUN, routing and optional StatsService.
     internal static string CreateEngine(Guid id, string[] routes, string[] filters, object outbound, int readiness,
-        string resolver = Resolver, int? diagnosticsPort = null, string? dnsOverHttps = null)
+        string resolver = Resolver, int? diagnosticsPort = null, string? dnsOverHttps = null, TunControlEndpoint? control = null)
     {
         var outbounds = new List<object> { outbound, new { tag = "block", protocol = "blackhole" } };
         var rules = new List<object> {
             new { type = "field", inboundTag = new[] { "readiness" }, outboundTag = "block" },
             new { type = "field", ip = new[] { "::/0" }, outboundTag = "block" }
         };
+        var inbounds = new List<object> {
+            new { protocol = "tun", tag = TunTag, port = 0, settings = new {
+                name = Adapter(id), desc = "PomogatorVpn", mtu = 1400,
+                gateway = new[] { Address + "/" + PrefixLength }, dns = new[] { resolver },
+                autoSystemRoutingTable = routes, autoOutboundsInterface = "",
+                autoSystemWfpBlockLeak = filters
+            } },
+            new { listen = "127.0.0.1", port = readiness, protocol = "http", tag = "readiness" }
+        };
+        if (control != null)
+        {
+            if (!IPAddress.TryParse(control.Destination, out var target) || target.AddressFamily != AddressFamily.InterNetwork ||
+                control.DestinationPort is < 1 or > 65535 || control.Port is < 1 or > 65535 ||
+                control.User.Length == 0 || control.Password.Length == 0)
+                throw new ArgumentException("A pinned IPv4 destination and proxy credentials are required.", nameof(control));
+            inbounds.Add(new { listen = "127.0.0.1", port = control.Port, protocol = "http",
+                tag = ControlTag, settings = new {
+                    accounts = new[] { new { user = control.User, pass = control.Password } }, allowTransparent = false
+                } });
+            rules.Add(new { type = "field", ruleTag = "pmt-control-vless", inboundTag = new[] { ControlTag },
+                ip = new[] { target + "/32" }, port = control.DestinationPort.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                network = "tcp", outboundTag = "vpn" });
+            rules.Add(new { type = "field", ruleTag = "pmt-control-block", inboundTag = new[] { ControlTag }, outboundTag = "block" });
+        }
         if (dnsOverHttps != null)
         {
             // A and AAAA use Xray's routed DoH client. Remaining record types keep the VLESS path too.
@@ -88,7 +115,7 @@ public static class TunConfig
             statsInboundUplink = true, statsInboundDownlink = true, statsOutboundUplink = true, statsOutboundDownlink = true
         } } : null;
         return JsonSerializer.Serialize(new {
-            log = new { loglevel = "error" },
+            log = new { loglevel = control != null ? "info" : "error", access = "none" },
             dns = dnsOverHttps == null ? null : new {
                 tag = DnsIngress, servers = new[] { dnsOverHttps }, disableFallback = true
             },
@@ -96,15 +123,7 @@ public static class TunConfig
             policy,
             api = diagnosticsPort.HasValue ? new { tag = "pmt-tun-stats", listen = "127.0.0.1:" + diagnosticsPort.Value,
                 services = new[] { "StatsService" } } : null,
-            inbounds = new object[] {
-                new { protocol = "tun", tag = TunTag, port = 0, settings = new {
-                    name = Adapter(id), desc = "PomogatorVpn", mtu = 1400,
-                    gateway = new[] { Address + "/" + PrefixLength }, dns = new[] { resolver },
-                    autoSystemRoutingTable = routes, autoOutboundsInterface = "",
-                    autoSystemWfpBlockLeak = filters
-                } },
-                new { listen = "127.0.0.1", port = readiness, protocol = "http", tag = "readiness" }
-            },
+            inbounds,
             outbounds,
             routing = new { domainStrategy = "AsIs", rules }
         }, new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull });

@@ -4,6 +4,23 @@ internal sealed class TunEngineDiagnostic
 {
     private string? detail;
     private int? exitCode;
+    private readonly int[] counters = new int[7];
+    private static readonly string[] Labels = [
+        "маршрут контрольной пробы выбрал VLESS", "маршрут контрольной пробы отклонён",
+        "сбой исходящего подключения", "TLS или REALITY внешнего соединения",
+        "сбой DNS-over-HTTPS", "сбой чтения или передачи VLESS", "исходящий сбой без уточнённой стадии"
+    ];
+
+    internal string[] TakeEvents()
+    {
+        var result = new List<string>();
+        for (var i = 0; i < counters.Length; i++)
+        {
+            var count = Interlocked.Exchange(ref counters[i], 0);
+            if (count > 0) result.Add(Labels[i] + " × " + count);
+        }
+        return result.ToArray();
+    }
 
     internal void Read(string line)
     {
@@ -14,6 +31,21 @@ internal sealed class TunEngineDiagnostic
             line.Contains("unable to create", StringComparison.OrdinalIgnoreCase) &&
                 line.Contains("Wintun", StringComparison.OrdinalIgnoreCase) ? "создание адаптера Wintun" : null;
         if (known != null) Volatile.Write(ref detail, known);
+
+        bool Has(string fragment) => line.Contains(fragment, StringComparison.OrdinalIgnoreCase);
+        if (Has("Hit route rule: [pmt-control-vless]")) Interlocked.Increment(ref counters[0]);
+        if (Has("Hit route rule: [pmt-control-block]")) Interlocked.Increment(ref counters[1]);
+        if (Has("failed to dial to dest") || Has("network is unreachable") || Has("no route to host"))
+            Interlocked.Increment(ref counters[2]);
+        if (Has("REALITY:") || Has("x509:") || Has("tls:") || Has("found outer tls version"))
+            Interlocked.Increment(ref counters[3]);
+        if (Has("failed to retrieve response for") || Has("failed to handle DOH response") || Has("failed to lookup IP"))
+            Interlocked.Increment(ref counters[4]);
+        if (Has("failed to decode response header") || Has("failed to transfer request payload") ||
+            Has("failed to transfer response payload"))
+            Interlocked.Increment(ref counters[5]);
+        if (Has("failed to process outbound traffic") || Has("failed to find an available destination"))
+            Interlocked.Increment(ref counters[6]);
     }
 
     internal void Exited(int code) => exitCode = code;

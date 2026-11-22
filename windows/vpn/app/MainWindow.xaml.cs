@@ -343,8 +343,8 @@ public partial class MainWindow : Window
                 tunStatus = "TUN: параметры виртуального интерфейса подтверждены.";
                 AddLog(tunStatus);
                 tunStage = "проверка DNS и HTTPS";
-                Detail.Text = "Проверяем DNS Windows, DNS через Wintun и HTTPS через Wintun…";
-                tunChecks = await TunConnectivity.Run(recovery, source.Token, tun.DiagnosticsPort, tun.EnginePid);
+                Detail.Text = "Сравниваем HTTPS через Wintun и локальный вход того же Xray…";
+                tunChecks = await TunConnectivity.Run(tun, source.Token);
                 Connection.Record(Check.Https, tunChecks.Https.Success ? CheckResult.Passed : CheckResult.Failed);
                 foreach (var line in tunChecks.Lines()) AddLog(line);
                 if (!tunChecks.Success)
@@ -663,7 +663,7 @@ public partial class MainWindow : Window
             string? tunFailure = null;
             if (tun is { } session)
             {
-                var latest = await TunConnectivity.Run(session.Record, token, session.DiagnosticsPort, session.EnginePid);
+                var latest = await TunConnectivity.Run(session, token);
                 if (token.IsCancellationRequested || core != process) return;
                 tunChecks = latest;
                 tunHttps = latest.Https.Success;
@@ -918,7 +918,7 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog(this) != true) return;
         try
         {
-            var header = new[] { "ПОМОГАТОР VPN 0.3.3", Status.Text, CoreCheck.Text, ProxyCheck.Text, TrafficCheck.Text,
+            var header = new[] { "ПОМОГАТОР VPN 0.3.4", Status.Text, CoreCheck.Text, ProxyCheck.Text, TrafficCheck.Text,
                 SystemCheck.Text, TunCheck.Text, CheckedAt.Text, "" };
             var observations = tunObservation?.Lines() ?? Enumerable.Empty<string>();
             var probes = tunChecks?.Lines() ?? Enumerable.Empty<string>();

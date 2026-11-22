@@ -1,4 +1,6 @@
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
+using System.Security.Cryptography;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
@@ -13,17 +15,21 @@ namespace Pomogator.Vpn;
 
 internal sealed record TunRequest(string Peer, Profile? Profile, bool Recover, TunBaseline Before);
 internal sealed record TunReply(bool Success, string Message, TunObservation? Observation = null, string? EngineNote = null,
-    int DiagnosticsPort = 0, int EnginePid = 0);
+    int DiagnosticsPort = 0, int EnginePid = 0, TunControlEndpoint? Control = null,
+    int Sequence = 0, string[]? Events = null);
 
 internal sealed class TunSession(TunRecovery record) : IDisposable
 {
     private Process? helper;
     private NamedPipeServerStream? pipe;
     private Task<string?>? stopNotice;
+    private int sequence;
+    private readonly ConcurrentDictionary<int, TaskCompletionSource<string[]?>> pendingSamples = new();
     internal TunObservation? Observation { get; private set; }
     internal string? EngineNote { get; private set; }
     internal int DiagnosticsPort { get; private set; }
     internal int EnginePid { get; private set; }
+    internal TunControlEndpoint? Control { get; private set; }
     internal TunRecovery Record { get; } = record;
     internal bool Running => helper is { HasExited: false };
 
@@ -79,6 +85,7 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
             EngineNote = reply.EngineNote;
             DiagnosticsPort = reply.DiagnosticsPort;
             EnginePid = reply.EnginePid;
+            Control = reply.Control;
             if (!reply.Success) throw new VpnError(reply.Message);
             if (!request.Recover) stopNotice = ReadStop(pipe);
         }
@@ -86,11 +93,41 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
         { throw new VpnError("Помощник TUN не ответил за 44 секунды."); }
     }
 
-    private static async Task<string?> ReadStop(Stream channel)
+    internal async Task<string[]?> SampleEvents(CancellationToken token)
     {
-        try { return (await Read<TunReply>(channel, CancellationToken.None)).EngineNote; }
+        if (pipe is not { IsConnected: true } channel) return null;
+        var id = Interlocked.Increment(ref sequence);
+        var completion = new TaskCompletionSource<string[]?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        pendingSamples.TryAdd(id, completion);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(TimeSpan.FromSeconds(2));
+        try
+        {
+            await Send(channel, id, deadline.Token);
+            return await completion.Task.WaitAsync(deadline.Token);
+        }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested) { return null; }
+        catch (Exception error) when (error is IOException or ObjectDisposedException or InvalidOperationException) { return null; }
+        finally { pendingSamples.TryRemove(id, out _); }
+    }
+
+    private async Task<string?> ReadStop(Stream channel)
+    {
+        try
+        {
+            while (true)
+            {
+                var reply = await Read<TunReply>(channel, CancellationToken.None);
+                if (reply.Sequence == 0) return reply.EngineNote;
+                if (pendingSamples.TryRemove(reply.Sequence, out var sample)) sample.TrySetResult(reply.Events);
+            }
+        }
         catch (Exception error) when (error is IOException or ObjectDisposedException or OperationCanceledException or JsonException)
         { return null; }
+        finally
+        {
+            foreach (var sample in pendingSamples.Values) sample.TrySetResult(null);
+        }
     }
 
     internal async Task<string?> ReadEngineStop()
@@ -152,28 +189,40 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
             var port = Xray.FreePort();
             int diagnosticsPort;
             do { diagnosticsPort = Xray.FreePort(); } while (diagnosticsPort == port);
+            int controlPort;
+            do { controlPort = Xray.FreePort(); } while (controlPort == port || controlPort == diagnosticsPort);
+            var control = new TunControlEndpoint(controlPort, "pomogator",
+                Convert.ToHexString(RandomNumberGenerator.GetBytes(24)), TunConfig.InternetProbe, 443);
             launchingTun = true;
-            var config = TunConfig.Engine(id, peer, profile, port, diagnosticsPort);
+            var config = TunConfig.Engine(id, peer, profile, port, diagnosticsPort, control);
             // Start watching the parent before the first network change, including driver initialization.
             using var alive = CancellationTokenSource.CreateLinkedTokenSource(boot.Token);
-            var eof = channel.ReadAsync(new byte[1]).AsTask();
+            var runtime = Read<int>(channel, CancellationToken.None);
             var start = Xray.StartAsync(Path.Combine(AppContext.BaseDirectory, "xray.exe"), config, port,
                 alive.Token, WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback, inheritConsole: true, startupSeconds: 24,
                 diagnosticLine: diagnostic.Read, startupExit: diagnostic.Exited);
-            if (await Task.WhenAny(start, eof) == eof) alive.Cancel();
+            if (await Task.WhenAny(start, runtime) == runtime) alive.Cancel();
             engine = await start;
             var wait = TunReadiness.Wait(() => observation = TunWindows.Observe(record), () => engine.Running,
                 TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(300), alive.Token);
-            if (await Task.WhenAny(wait, eof) == eof) alive.Cancel();
+            if (await Task.WhenAny(wait, runtime) == runtime) alive.Cancel();
             observation = await wait;
             if (observation.Failure is { } failure)
             {
                 if (engine.ExitCode is { } code) diagnostic.Exited(code);
                 throw new VpnError(failure);
             }
-            await Send(channel, new TunReply(true, "", observation, DiagnosticsPort: diagnosticsPort, EnginePid: engine.ProcessId), boot.Token);
-            while (engine.Running && !eof.IsCompleted) await Task.WhenAny(eof, Task.Delay(250));
-            if (!eof.IsCompleted && engine.ExitCode is { } exit)
+            await Send(channel, new TunReply(true, "", observation, DiagnosticsPort: diagnosticsPort,
+                EnginePid: engine.ProcessId, Control: control), boot.Token);
+            while (engine.Running)
+            {
+                if (await Task.WhenAny(runtime, Task.Delay(250)) != runtime) continue;
+                if (!runtime.IsCompletedSuccessfully || runtime.Result <= 0) return 0;
+                using var notice = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                await Send(channel, new TunReply(true, "", Sequence: runtime.Result, Events: diagnostic.TakeEvents()), notice.Token);
+                runtime = Read<int>(channel, CancellationToken.None);
+            }
+            if (!runtime.IsCompleted && engine.ExitCode is { } exit)
             {
                 diagnostic.Exited(exit);
                 using var notice = new CancellationTokenSource(TimeSpan.FromSeconds(2));

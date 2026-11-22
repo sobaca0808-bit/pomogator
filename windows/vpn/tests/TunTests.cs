@@ -69,7 +69,7 @@ internal static class NativeTunTests
         var dnsPort = ((IPEndPoint)udpDestination.Client.LocalEndPoint!).Port;
         using var tcpDnsDestination = new TcpListener(IPAddress.Loopback, dnsPort);
         tcpDnsDestination.Start();
-        using var timeLimit = new CancellationTokenSource(TimeSpan.FromSeconds(65));
+        using var timeLimit = new CancellationTokenSource(TimeSpan.FromSeconds(75));
 
         var upstreamPort = Xray.FreePort();
         var upstreamConfig = JsonSerializer.Serialize(new {
@@ -86,11 +86,16 @@ internal static class NativeTunTests
         var readiness = Xray.FreePort();
         var diagnosticsPort = Xray.FreePort();
         while (diagnosticsPort == readiness || diagnosticsPort == upstreamPort) diagnosticsPort = Xray.FreePort();
+        var controlPort = Xray.FreePort();
+        while (controlPort == readiness || controlPort == diagnosticsPort || controlPort == upstreamPort)
+            controlPort = Xray.FreePort();
+        var control = new TunControlEndpoint(controlPort, "tun-fixture", Convert.ToHexString(RandomNumberGenerator.GetBytes(24)),
+            webTarget, httpPort);
         var client = Profiles.Parse($"vless://{id}@127.0.0.1:{upstreamPort}");
         // Exercise the production shape: Wintun forwards directly to the selected VLESS.
         using var console = new TunConsole();
         var fixture = TunConfig.CreateEngine(fixtureId, fixtureRoutes, new[] { "198.51.100.0/24:all", "[2001:db8:9::/48]:all" },
-            XrayConfig.Outbound(client, "vpn"), readiness, dnsTarget, diagnosticsPort: diagnosticsPort);
+            XrayConfig.Outbound(client, "vpn"), readiness, dnsTarget, diagnosticsPort: diagnosticsPort, control: control);
         var seenIndex = 0;
         Process? child = null;
         IDisposable Track(Process process) { child = process; return WindowsLifetime.Attach(process); }
@@ -239,6 +244,25 @@ internal static class NativeTunTests
                     try { await answer; }
                     catch (OperationCanceledException) when (dnsFixture.IsCancellationRequested) { }
                 }
+
+                // The same elevated Xray and VLESS serve this request with Wintun and WFP active.
+                // It enters through the authenticated loopback control inlet and validates the same certificate.
+                await RequireControlAuthentication(control, timeLimit.Token);
+                var controlResponse = AnswerHttps(httpDestination, certificate, tlsHost, requestBody, responseBody, timeLimit.Token);
+                using (var http = TunControlProbe.Client(control, child!.Id, tlsHost, (_, candidate, _, errors) =>
+                    candidate?.GetCertHashString() == certificate.Thumbprint &&
+                    (errors & SslPolicyErrors.RemoteCertificateNameMismatch) == 0))
+                using (var body = new ByteArrayContent(requestBody))
+                using (var reply = await http.PostAsync(endpoint, body, timeLimit.Token))
+                {
+                    reply.EnsureSuccessStatusCode();
+                    Require((await reply.Content.ReadAsByteArrayAsync(timeLimit.Token)).SequenceEqual(responseBody),
+                        "The running TUN engine's authenticated control path did not return the VLESS response.");
+                }
+                await controlResponse;
+                await RejectControlDestination(control, "198.51.100.11", control.DestinationPort, httpDestination, timeLimit.Token);
+                var otherPort = control.DestinationPort == 65535 ? 65534 : control.DestinationPort + 1;
+                await RejectControlDestination(control, control.Destination, otherPort, httpDestination, timeLimit.Token);
             }
             finally { tunnel.RequestGracefulStop(console.Signal); }
         }
@@ -265,7 +289,7 @@ internal static class NativeTunTests
         }
         Require(TunWindows.Index(web) == beforeWeb && TunWindows.Index(dns) == beforeDns &&
             TunWindows.MatchesBaseline(snapshot, TunWindows.Capture(peer)), "Initial routes or DNS differ after crash recovery.");
-        Console.WriteLine("PASS Native Wintun: TLS upload/download, invalid certificate, UDP echo, DNS UDP and TCP fallback through VLESS, route isolation and cleanup");
+        Console.WriteLine("PASS Native Wintun: TLS upload/download, authenticated and restricted same-engine VLESS control, invalid certificate, DNS UDP/TCP, route isolation and cleanup");
     }
 
     private static object Redirect(string tag, int port) => new { tag, protocol = "freedom", settings = new {
@@ -320,6 +344,48 @@ internal static class NativeTunTests
         var responseHeader = Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Length: {response.Length}\r\nConnection: close\r\n\r\n");
         await stream.WriteAsync(responseHeader, token);
         await stream.WriteAsync(response, token);
+    }
+
+    private static async Task RequireControlAuthentication(TunControlEndpoint control, CancellationToken token)
+    {
+        using var client = new TcpClient(AddressFamily.InterNetwork);
+        await client.ConnectAsync(IPAddress.Loopback, control.Port, token);
+        using var stream = client.GetStream();
+        var authority = $"{control.Destination}:{control.DestinationPort}";
+        await stream.WriteAsync(Encoding.ASCII.GetBytes($"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n"), token);
+        using var reader = new StreamReader(stream, Encoding.ASCII, leaveOpen: true);
+        Require((await reader.ReadLineAsync(token))?.StartsWith("HTTP/1.1 407 ", StringComparison.Ordinal) == true,
+            "The running TUN engine's control inlet accepted a request without authentication.");
+    }
+
+    private static async Task RejectControlDestination(TunControlEndpoint control, string destination, int port,
+        TcpListener upstream, CancellationToken token)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(TimeSpan.FromSeconds(3));
+        using var client = new TcpClient(AddressFamily.InterNetwork);
+        var authority = $"{destination}:{port}";
+        var credentials = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{control.User}:{control.Password}"));
+        try
+        {
+            await client.ConnectAsync(IPAddress.Loopback, control.Port, deadline.Token);
+            using var stream = client.GetStream();
+            var connect = $"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nProxy-Authorization: Basic {credentials}\r\n\r\n";
+            await stream.WriteAsync(Encoding.ASCII.GetBytes(connect), deadline.Token);
+            using var reader = new StreamReader(stream, Encoding.ASCII, leaveOpen: true);
+            // Xray acknowledges valid credentials before dispatch. The blocked route must then end
+            // without relaying any application bytes or opening a connection to the VLESS destination.
+            Require((await reader.ReadLineAsync(deadline.Token))?.StartsWith("HTTP/1.1 200 ", StringComparison.Ordinal) == true,
+                "The routing test did not complete the authenticated CONNECT handshake.");
+            string? header;
+            do { header = await reader.ReadLineAsync(deadline.Token); } while (header is { Length: > 0 });
+            Require(header != null && await reader.ReadAsync(new char[1], deadline.Token) == 0 &&
+                !upstream.Pending(), "The control inlet relayed an authenticated request to a disallowed destination.");
+        }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested)
+        {
+            throw new InvalidOperationException("An authenticated request to a disallowed destination did not close.");
+        }
     }
 
     private static async Task RejectHttps(TcpListener listener, X509Certificate2 certificate, CancellationToken token)
