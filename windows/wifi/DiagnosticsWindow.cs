@@ -2,6 +2,7 @@ using System;
 using System.Drawing;
 using System.IO;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -12,9 +13,14 @@ namespace PomogatorWifi
         private readonly TextBox checks = Box();
         private readonly TextBox log = Box();
         private readonly Button share;
+        private readonly Button record;
+        private readonly Button refresh;
+        private readonly Label recordStatus;
         private readonly Func<Task<Tuple<WifiReport, bool?>>> run;
         private WifiReport report;
         private bool? internet;
+        private CancellationTokenSource recording;
+        private string clientReport;
 
         internal DiagnosticsWindow(WifiReport report, bool? internet, Func<Task<Tuple<WifiReport, bool?>>> run)
             : base("Диагностика · ПОМОГАТОР Wi-Fi", new Size(538, 622))
@@ -22,22 +28,30 @@ namespace PomogatorWifi
             this.run = run;
             StartPosition = FormStartPosition.CenterParent;
             MinimizeBox = false;
-            var root = WifiWindow.Rows(50, 198, 37, 0, 53);
+            var root = WifiWindow.Rows(50, 198, 45, 37, 0, 53);
             root.Padding = new Padding(20, 9, 20, 7);
             root.Controls.Add(Theme.Label("Диагностика", 19, bold: true), 0, 0);
             root.Controls.Add(checks, 0, 1);
-            root.Controls.Add(Theme.Label("Технический журнал", 12, bold: true), 0, 2);
-            root.Controls.Add(log, 0, 3);
+            var capture = WifiWindow.Columns(213, 0);
+            record = Theme.Button("Записать попытку · 30 с", async (_, __) => await RecordClient());
+            record.Margin = new Padding(0, 4, 6, 4);
+            recordStatus = Theme.Label("Подготовьте телефон", 9, Theme.Muted);
+            capture.Controls.Add(record, 0, 0);
+            capture.Controls.Add(recordStatus, 1, 0);
+            root.Controls.Add(capture, 0, 2);
+            root.Controls.Add(Theme.Label("Технический журнал", 12, bold: true), 0, 3);
+            root.Controls.Add(log, 0, 4);
             var row = WifiWindow.Columns(117, 130, 0);
-            var refresh = Theme.Button("Обновить", async (_, __) => await RefreshReport());
+            refresh = Theme.Button("Обновить", async (_, __) => await RefreshReport());
             var save = Theme.Button("Экспорт TXT", (_, __) => Export());
             share = Theme.Button("Настроить общий доступ", (_, __) => DialogResult = DialogResult.Retry);
             foreach (var button in new[] { refresh, save, share }) button.Margin = new Padding(0, 8, 6, 5);
             row.Controls.Add(refresh, 0, 0);
             row.Controls.Add(save, 1, 0);
             row.Controls.Add(share, 2, 0);
-            root.Controls.Add(row, 0, 4);
+            root.Controls.Add(row, 0, 5);
             Controls.Add(root);
+            FormClosed += (_, __) => recording?.Cancel();
             LoadReport(report, internet);
             ActiveControl = refresh;
         }
@@ -77,26 +91,60 @@ namespace PomogatorWifi
             report = state;
             internet = online;
             checks.Text = Summarize(report, internet);
-            share.Enabled = report.Candidate != null || report.CanRepair;
+            share.Enabled = recording == null && (report.Candidate != null || report.CanRepair);
+            string journal;
             try
             {
-                if (!File.Exists(Local.LogPath)) { log.Text = "Пока нет записей."; return; }
+                journal = "Пока нет записей.";
+                if (File.Exists(Local.LogPath))
                 using (var stream = new FileStream(Local.LogPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
                 {
                     stream.Seek(Math.Max(0, stream.Length - 96 * 1024), SeekOrigin.Begin);
-                    using (var reader = new StreamReader(stream, Encoding.UTF8)) log.Text = reader.ReadToEnd();
+                    using (var reader = new StreamReader(stream, Encoding.UTF8)) journal = reader.ReadToEnd();
                 }
-                log.Select(log.TextLength, 0);
-                log.ScrollToCaret();
             }
-            catch (IOException) { log.Text = "Журнал сейчас недоступен. Попробуйте обновить."; }
-            catch (UnauthorizedAccessException) { log.Text = "Windows запретила доступ к журналу."; }
+            catch (IOException) { journal = "Журнал сейчас недоступен. Попробуйте обновить."; }
+            catch (UnauthorizedAccessException) { journal = "Windows запретила доступ к журналу."; }
+            log.Text = (clientReport == null ? "" : clientReport + Environment.NewLine + Environment.NewLine) + journal;
+            log.Select(clientReport == null ? log.TextLength : 0, 0);
+            log.ScrollToCaret();
+        }
+
+        private async Task RecordClient()
+        {
+            if (refreshing || recording != null) return;
+            using (var source = new CancellationTokenSource())
+            {
+                recording = source;
+                record.Enabled = refresh.Enabled = share.Enabled = false;
+                recordStatus.Text = "Подключите телефон сейчас";
+                try
+                {
+                    clientReport = await Task.Run(() => ClientDiagnostics.Capture(TimeSpan.FromSeconds(30), source.Token));
+                    if (!IsDisposed) recordStatus.Text = "Попытка записана";
+                }
+                catch (OperationCanceledException) when (source.IsCancellationRequested) { }
+                catch (Exception error)
+                {
+                    Local.LogError("client_observation_failed", error);
+                    if (!IsDisposed) recordStatus.Text = "Запись прервана";
+                }
+                finally
+                {
+                    recording = null;
+                    if (!IsDisposed)
+                    {
+                        record.Enabled = refresh.Enabled = true;
+                        LoadReport(report, internet);
+                    }
+                }
+            }
         }
 
         private bool refreshing;
         private async Task RefreshReport()
         {
-            if (refreshing) return;
+            if (refreshing || recording != null) return;
             refreshing = true;
             try
             {
@@ -120,7 +168,7 @@ namespace PomogatorWifi
                 if (picker.ShowDialog(this) != DialogResult.OK) return;
                 try
                 {
-                    File.WriteAllText(picker.FileName, "ПОМОГАТОР Wi-Fi 0.2.3 · " + DateTimeOffset.Now.ToString("O") +
+                    File.WriteAllText(picker.FileName, "ПОМОГАТОР Wi-Fi 0.2.4 · " + DateTimeOffset.Now.ToString("O") +
                         Environment.NewLine + checks.Text + Environment.NewLine + Environment.NewLine + log.Text, Encoding.UTF8);
                 }
                 catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)

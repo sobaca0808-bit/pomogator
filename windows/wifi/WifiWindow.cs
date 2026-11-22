@@ -121,7 +121,7 @@ namespace PomogatorWifi
             diagnostics.Margin = new Padding(1, 7, 7, 11);
             row.Controls.Add(setup, 0, 0);
             row.Controls.Add(diagnostics, 1, 0);
-            var version = Theme.Label("v0.2.3", 9, Theme.Muted);
+            var version = Theme.Label("v0.2.4", 9, Theme.Muted);
             version.TextAlign = ContentAlignment.MiddleRight;
             row.Controls.Add(version, 2, 0);
             return row;

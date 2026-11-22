@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -11,6 +12,7 @@ namespace PomogatorWifi
         private IntPtr handle;
         private bool started;
         private readonly NotificationCallback notification;
+        private readonly Action<HostedTraceEvent> trace;
         private long interrupted;
         private int lastReason;
         internal long Interruptions => Interlocked.Read(ref interrupted);
@@ -50,9 +52,10 @@ namespace PomogatorWifi
             internal uint MaxPeers;
         }
 
-        internal HostedNetwork(bool monitor = false)
+        internal HostedNetwork(bool monitor = false, Action<HostedTraceEvent> trace = null)
         {
             Check(WlanOpenHandle(2, IntPtr.Zero, out _, out handle), 0, "WlanOpenHandle");
+            this.trace = trace;
             if (!monitor) return;
             notification = OnNotification;
             try
@@ -69,6 +72,11 @@ namespace PomogatorWifi
 
         private void OnNotification(ref NotificationData data, IntPtr context)
         {
+            if (data.Source == HostedNotifications && trace != null)
+            {
+                var activity = HostedTraceEvent.Read(data.Interface, data.Code, data.Size, data.Data);
+                if (activity != null) trace(activity);
+            }
             if (data.Source != HostedNotifications || data.Code != HostedStateChange || data.Size < 12 ||
                 data.Data == IntPtr.Zero) return;
             if (Marshal.ReadInt32(data.Data) != (int)State.Active ||
@@ -76,6 +84,29 @@ namespace PomogatorWifi
             Volatile.Write(ref lastReason, Marshal.ReadInt32(data.Data, 8));
             Interlocked.Increment(ref interrupted);
         }
+
+        internal State ReadPeers(out Guid adapter, out ulong[] clients)
+        {
+            Check(WlanHostedNetworkQueryStatus(handle, out var buffer, IntPtr.Zero), 0, "WlanHostedNetworkQueryStatus");
+            try
+            {
+                var status = Marshal.PtrToStructure<StatusHeader>(buffer);
+                adapter = status.Adapter;
+                var authenticated = new List<ulong>();
+                if (status.State == State.Active && status.PeerCount <= 100)
+                    for (var i = 0; i < status.PeerCount; i++)
+                    {
+                        var peer = IntPtr.Add(buffer, Marshal.SizeOf(typeof(StatusHeader)) + i * 12);
+                        if (Marshal.ReadInt32(peer, 8) == 1) authenticated.Add(ReadMac(peer));
+                    }
+                clients = authenticated.ToArray();
+                return status.State;
+            }
+            finally { WlanFreeMemory(buffer); }
+        }
+
+        internal static ulong ReadMac(IntPtr address) =>
+            unchecked((uint)Marshal.ReadInt32(address)) | ((ulong)unchecked((ushort)Marshal.ReadInt16(address, 4)) << 32);
 
         internal State Query(out Guid adapter) => Query(out adapter, out _);
 
@@ -171,6 +202,47 @@ namespace PomogatorWifi
             finally { WlanFreeMemory(buffer); }
         }
 
+        internal string ReadRadio()
+        {
+            Check(WlanEnumInterfaces(handle, IntPtr.Zero, out var list), 0, "WlanEnumInterfaces");
+            var enabled = 0;
+            var softwareOff = 0;
+            var hardwareOff = 0;
+            var unknown = 0;
+            try
+            {
+                // WLAN_INTERFACE_INFO_LIST has two DWORDs then entries (GUID, WCHAR[256], state).
+                var count = Math.Min(32, Marshal.ReadInt32(list));
+                for (var i = 0; i < count; i++)
+                {
+                    var id = Marshal.PtrToStructure<Guid>(IntPtr.Add(list, 8 + i * 532));
+                    if (WlanQueryInterface(handle, ref id, 4, IntPtr.Zero, out var size, out var radio, out _) != 0)
+                    {
+                        unknown++;
+                        continue;
+                    }
+                    try
+                    {
+                        if (size < 4) { unknown++; continue; }
+                        var phys = Math.Min(Marshal.ReadInt32(radio), (int)Math.Min(64, (size - 4) / 12));
+                        for (var j = 0; j < phys; j++)
+                        {
+                            var software = Marshal.ReadInt32(radio, 8 + j * 12);
+                            var hardware = Marshal.ReadInt32(radio, 12 + j * 12);
+                            if (software == 1 && hardware == 1) enabled++;
+                            if (software == 2) softwareOff++;
+                            if (hardware == 2) hardwareOff++;
+                            if (software == 0 || hardware == 0) unknown++;
+                        }
+                    }
+                    finally { WlanFreeMemory(radio); }
+                }
+            }
+            finally { WlanFreeMemory(list); }
+            return $"Радио WLAN по данным Windows (PHY) — включено {enabled}, программно выключено {softwareOff}, " +
+                $"аппаратно выключено {hardwareOff}, состояние не подтверждено {unknown}.";
+        }
+
         private Settings ReadSettings()
         {
             uint size, valueType;
@@ -234,6 +306,9 @@ namespace PomogatorWifi
         private static extern uint WlanOpenHandle(uint version, IntPtr reserved, out uint negotiated, out IntPtr client);
         [DllImport("wlanapi.dll")]
         private static extern uint WlanEnumInterfaces(IntPtr client, IntPtr reserved, out IntPtr interfaces);
+        [DllImport("wlanapi.dll")]
+        private static extern uint WlanQueryInterface(IntPtr client, ref Guid adapter, uint opcode, IntPtr reserved,
+            out uint size, out IntPtr data, out uint valueType);
         [DllImport("wlanapi.dll")]
         private static extern uint WlanCloseHandle(IntPtr client, IntPtr reserved);
         [DllImport("wlanapi.dll")]

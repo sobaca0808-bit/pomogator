@@ -25,6 +25,7 @@ internal static class SmokeTests
         CheckStartupRegistry();
         CheckTray();
         CheckWindowStates();
+        CheckClientDiagnostic();
         CheckOwnerTransport();
         RenderScreens(results);
         return 0;
@@ -216,6 +217,14 @@ internal static class SmokeTests
         Require(stopped != null && stopped.Owner == Guid.Empty && !stopped.Active && stops == 1, "explicit OFF from tray");
         Require(process.Wait(4000), "helper transport completed after OFF");
         Console.WriteLine("PASS live Windows named pipe: start, tray/close, 61 seconds idle, reopen, simulated WLAN failure and recovery, OFF");
+    }
+
+    private static void CheckClientDiagnostic()
+    {
+        var report = ClientDiagnostics.Capture(TimeSpan.FromMilliseconds(50), CancellationToken.None);
+        Require(report.Contains("Запуск точки") && report.Contains("WPA2") && report.Contains("IPv4") &&
+            report.Contains("ICS") && report.Contains("WLAN AutoConfig") && report.Contains("System"), "client observation stages and Windows channels");
+        Console.WriteLine("PASS bounded read-only client diagnostic on Windows and separate observations for WPA2, IPv4 and ICS");
     }
 
     private static void RenderScreens(string output)
