@@ -36,10 +36,20 @@ namespace PomogatorWifiLite
                 else if (lastPeer >= 0) detail = (Volatile.Read(ref peerState) == 1 ?
                     "Последнее событие станции: аутентификация подтверждена." : "Последнее событие станции: аутентификация не подтверждена.") +
                     $" Код причины WLAN {lastPeer}.";
-                return new PointStatus { State = info.State, Adapter = info.Adapter, Clients = info.State == PointState.Active ? info.Peers : 0,
-                    Detail = detail };
+                var clients = info.State == PointState.Active ?
+                    CountAuthenticated(IntPtr.Add(memory, Marshal.SizeOf<Status>()), info.Peers) : 0;
+                return new PointStatus { State = info.State, Adapter = info.Adapter, Clients = clients, Detail = detail };
             }
             finally { WlanFreeMemory(memory); }
+        }
+
+        internal static uint CountAuthenticated(IntPtr peers, uint total)
+        {
+            uint count = 0;
+            // WLAN_HOSTED_NETWORK_PEER_STATE has a 6-byte MAC, padding and a 4-byte auth state.
+            for (var index = 0; index < total; index++)
+                if (Marshal.ReadInt32(peers, checked(index * 12 + 8)) == 1) count++;
+            return count;
         }
 
         public void StartUsing(byte[] ssid, string password)

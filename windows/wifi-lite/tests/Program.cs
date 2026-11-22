@@ -98,6 +98,16 @@ Test("Match Windows SDK WLAN and read-only COM ABI", () => {
     Check(method.MethodImplementationFlags.HasFlag(MethodImplAttributes.PreserveSig) && method.GetParameters()[1].IsOut);
     Check(typeof(IShareConfiguration).GetMethods().Select(item => item.Name).SequenceEqual(new[] { "Enabled", "Role" }));
 });
+Test("Count only peers authenticated by Windows", () => {
+    var peers = Marshal.AllocHGlobal(48);
+    try
+    {
+        for (var index = 0; index < 48; index++) Marshal.WriteByte(peers, index, 0);
+        for (var index = 0; index < 3; index++) Marshal.WriteInt32(peers, index * 12 + 8, 1);
+        Check(Wlan.CountAuthenticated(peers, 4) == 3 && Wlan.CountAuthenticated(IntPtr.Zero, 0) == 0);
+    }
+    finally { Marshal.FreeHGlobal(peers); }
+});
 
 Console.WriteLine($"{passed} checks passed.");
 
