@@ -52,13 +52,13 @@ namespace PomogatorWifi
 
         internal HostedNetwork(bool monitor = false)
         {
-            Check(WlanOpenHandle(2, IntPtr.Zero, out _, out handle), 0);
+            Check(WlanOpenHandle(2, IntPtr.Zero, out _, out handle), 0, "WlanOpenHandle");
             if (!monitor) return;
             notification = OnNotification;
             try
             {
                 Check(WlanRegisterNotification(handle, HostedNotifications, false, notification, IntPtr.Zero,
-                    IntPtr.Zero, out _), 0);
+                    IntPtr.Zero, out _), 0, "WlanRegisterNotification");
             }
             catch
             {
@@ -90,7 +90,7 @@ namespace PomogatorWifi
         private StatusHeader ReadStatus()
         {
             IntPtr buffer;
-            Check(WlanHostedNetworkQueryStatus(handle, out buffer, IntPtr.Zero), 0);
+            Check(WlanHostedNetworkQueryStatus(handle, out buffer, IntPtr.Zero), 0, "WlanHostedNetworkQueryStatus");
             try
             {
                 return Marshal.PtrToStructure<StatusHeader>(buffer);
@@ -144,16 +144,16 @@ namespace PomogatorWifi
             Array.Copy(ssid, settings.Ssid, ssid.Length);
             uint reason;
             Check(WlanHostedNetworkSetProperty(handle, 0, (uint)Marshal.SizeOf(typeof(Settings)),
-                ref settings, out reason, IntPtr.Zero), reason);
+                ref settings, out reason, IntPtr.Zero), reason, "WlanHostedNetworkSetProperty");
             var key = new byte[password.Length + 1];
             try
             {
                 Encoding.ASCII.GetBytes(password, 0, password.Length, key, 0);
                 Check(WlanHostedNetworkSetSecondaryKey(handle, (uint)key.Length, key, true, false,
-                    out reason, IntPtr.Zero), reason);
+                    out reason, IntPtr.Zero), reason, "WlanHostedNetworkSetSecondaryKey");
             }
             finally { Array.Clear(key, 0, key.Length); }
-            Check(WlanHostedNetworkStartUsing(handle, out reason, IntPtr.Zero), reason);
+            Check(WlanHostedNetworkStartUsing(handle, out reason, IntPtr.Zero), reason, "WlanHostedNetworkStartUsing");
             started = true;
         }
 
@@ -166,7 +166,7 @@ namespace PomogatorWifi
         internal bool HasWifi()
         {
             IntPtr buffer;
-            Check(WlanEnumInterfaces(handle, IntPtr.Zero, out buffer), 0);
+            Check(WlanEnumInterfaces(handle, IntPtr.Zero, out buffer), 0, "WlanEnumInterfaces");
             try { return Marshal.ReadInt32(buffer) > 0; }
             finally { WlanFreeMemory(buffer); }
         }
@@ -175,7 +175,8 @@ namespace PomogatorWifi
         {
             uint size, valueType;
             IntPtr buffer;
-            Check(WlanHostedNetworkQueryProperty(handle, 0, out size, out buffer, out valueType, IntPtr.Zero), 0);
+            Check(WlanHostedNetworkQueryProperty(handle, 0, out size, out buffer, out valueType, IntPtr.Zero),
+                0, "WlanHostedNetworkQueryProperty");
             try
             {
                 if (size < Marshal.SizeOf(typeof(Settings)))
@@ -191,7 +192,7 @@ namespace PomogatorWifi
             uint reason;
             var result = WlanHostedNetworkStopUsing(handle, out reason, IntPtr.Zero);
             // Windows can end the session first, for example after unplugging the adapter.
-            if (result != 0 && reason != 10) Check(result, reason);
+            if (result != 0 && reason != 10) Check(result, reason, "WlanHostedNetworkStopUsing");
             started = false;
             return new HostedRelease(result, reason);
         }
@@ -199,18 +200,25 @@ namespace PomogatorWifi
         internal static string Explain(uint code, uint reason)
         {
             if (code == 1062 || reason == 24)
-                return "Служба «Автонастройка WLAN» недоступна. Проверьте её в services.msc.";
+                return "Служба «Автонастройка WLAN» (WlanSvc) недоступна. Проверьте, запущена ли она, в services.msc.";
             if (code == 5 || reason == 5 || reason == 23)
                 return "Windows запретила операцию WLAN. Проверьте права администратора и политику Hosted Network.";
-            if (code == 50 || reason == 12 || reason == 13 || reason == 19 || reason == 27)
-                return "Адаптер не смог запустить Hosted Network. Проверьте подключение Ralink и поддержку драйвера командой netsh wlan show drivers.";
+            if (reason == 19)
+                return "Драйвер или Windows отказались запустить виртуальную точку. Проверьте Hosted Network командой netsh wlan show drivers. " +
+                    "Если поддержка есть, выключите конкурирующий хот-спот вручную и проверьте Ralink.";
+            if (code == 5023)
+                return "Текущее состояние WLAN не допускает операцию. Дождитесь появления адаптера и обновите диагностику.";
+            if (reason == 13) return "Windows остановила минипорт виртуального Wi-Fi.";
+            if (reason == 12) return "Интерфейс Wi-Fi стал недоступен для Hosted Network.";
+            if (code == 50 || reason == 27)
+                return "Hosted Network недоступна. Проверьте поддержку драйвера командой netsh wlan show drivers.";
             return "Ошибка Hosted Network. Проверьте адаптер Ralink и службу «Автонастройка WLAN».";
         }
 
-        private static void Check(uint code, uint reason)
+        private static void Check(uint code, uint reason, string operation)
         {
             if (code != 0)
-                throw new WlanFailure(code, reason);
+                throw new WlanFailure(code, reason, operation);
         }
 
         public void Dispose()
@@ -255,7 +263,17 @@ namespace PomogatorWifi
 
     internal sealed class WlanFailure : WifiError
     {
-        internal WlanFailure(uint code, uint reason)
-            : base(string.Format("{0} (WLAN {1}, причина {2})", HostedNetwork.Explain(code, reason), code, reason)) { }
+        internal readonly uint Code;
+        internal readonly uint Reason;
+        internal readonly string Operation;
+        internal bool CanReadFresh => Code == 6 || Code == 31 || Code == 1062 || Code == 5023 || Reason == 24;
+
+        internal WlanFailure(uint code, uint reason, string operation = "Hosted Network")
+            : base(string.Format("{0} ({1}, WLAN {2}, причина {3})", HostedNetwork.Explain(code, reason), operation, code, reason))
+        {
+            Code = code;
+            Reason = reason;
+            Operation = operation;
+        }
     }
 }

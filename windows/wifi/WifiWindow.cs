@@ -121,7 +121,7 @@ namespace PomogatorWifi
             diagnostics.Margin = new Padding(1, 7, 7, 11);
             row.Controls.Add(setup, 0, 0);
             row.Controls.Add(diagnostics, 1, 0);
-            var version = Theme.Label("v0.2.2", 9, Theme.Muted);
+            var version = Theme.Label("v0.2.3", 9, Theme.Muted);
             version.TextAlign = ContentAlignment.MiddleRight;
             row.Controls.Add(version, 2, 0);
             return row;
@@ -285,12 +285,13 @@ namespace PomogatorWifi
                 case WifiPhase.External: return report.ExternalTarget == null ?
                     "Точка работает вне управления ПОМОГАТОРА." : "Для отключения Hosted Network нажмите кнопку питания.";
                 case WifiPhase.Unconfirmed: return report.ExternalTarget == null ?
-                    "Ждём подтверждения сеанса. Настройки раздачи сохранены." :
+                    report.WlanNote ?? "Ждём подтверждения сеанса. Настройки раздачи сохранены." :
                     "Владение не подтверждено. Можно отключить проверенную Hosted Network вручную.";
                 case WifiPhase.Starting: return "Проверяем подключение и запускаем точку доступа.";
                 case WifiPhase.Stopping: return "Завершаем сеанс ПОМОГАТОРА.";
-                case WifiPhase.Unavailable: return report.HasWifi == false ? "Подключите USB Wi-Fi-адаптер и откройте диагностику." :
-                    "Проверьте поддержку Hosted Network и службу WLAN в диагностике.";
+                case WifiPhase.Unavailable: return report.WlanNote ?? (report.HasWifi == false ?
+                    "Подключите USB Wi-Fi-адаптер и откройте диагностику." :
+                    "Проверьте поддержку Hosted Network и службу WLAN в диагностике.");
                 default: return report.Owner == Guid.Empty ? "Нажмите кнопку, чтобы запустить точку доступа." :
                     "Сеанс приостановлен. Нажмите кнопку, чтобы восстановить точку.";
             }

@@ -166,15 +166,29 @@ namespace PomogatorWifi
             using (var guard = new Mutex(true, GuardName, out var first))
             {
                 if (!first) return 0;
-                using (var wlan = new HostedNetwork(monitor: true))
+                HostedNetwork wlan = null;
+                HostedNetwork Current() => wlan ?? (wlan = new HostedNetwork(monitor: true));
+                HostedNetwork.State Read(out Guid adapter) => Current().Query(out adapter);
+                HostedNetwork.State Fresh(out Guid adapter)
                 {
-                    var session = new OwnerSession(wlan.Query, () => wlan.Interruptions, () => wlan.InterruptionReason,
-                        (ssid, password, automatic) => StartChecked(wlan, ssid, password, automatic), wlan.Stop, Local.Log);
-                    try { ServeTransport(Name, session, pipe => Wire.ValidatePeer(pipe, false), Local.Log); }
-                    finally
-                    {
-                        if (session.Retained) Local.Log("hosted_handle_closing", "source=helper_exit");
-                    }
+                    using (var client = new HostedNetwork()) return client.Query(out adapter);
+                }
+                void Renew()
+                {
+                    var replacement = new HostedNetwork(monitor: true);
+                    var previous = wlan;
+                    wlan = replacement;
+                    previous?.Dispose();
+                    Local.Log("hosted_client_reopened");
+                }
+                var session = new OwnerSession(Read, () => wlan?.Interruptions ?? 0, () => wlan?.InterruptionReason ?? 0,
+                    (ssid, password, automatic) => StartChecked(Current(), ssid, password, automatic), () => Current().Stop(),
+                    Local.Log, Fresh, Renew);
+                try { ServeTransport(Name, session, pipe => Wire.ValidatePeer(pipe, false), Local.Log); }
+                finally
+                {
+                    if (session.Retained) Local.Log("hosted_handle_closing", "source=helper_exit");
+                    wlan?.Dispose();
                 }
             }
             return 0;
@@ -216,7 +230,7 @@ namespace PomogatorWifi
                                     {
                                         log("wlan_operation_failed", error is WifiError ? error.Message : error.GetType().Name);
                                         reply = session.Observe();
-                                        reply.Error = error is WifiError && !(error is WlanFailure) ? error.Message :
+                                        reply.Error = error is WifiError ? error.Message :
                                             "Windows не завершила операцию Wi-Fi. Подробности в диагностике.";
                                     }
                                     Wire.Write(pipe, reply, limit.Token).GetAwaiter().GetResult();
@@ -248,20 +262,15 @@ namespace PomogatorWifi
             var mobile = MobileHotspot.Read();
             if (mobile == MobilePhase.On || mobile == MobilePhase.Transition)
                 throw new WifiError("Мобильный хот-спот Windows уже работает.");
-            using (var snapshot = NetworkReading.TryIcs())
-            {
-                var direct = snapshot != null && (NetworkReading.WifiDirect(snapshot) ||
-                    snapshot.Connections.Exists(connection => connection.Connected &&
-                        (connection.Flags & Characteristics.WifiDirect) != 0) ||
-                    snapshot.Issues.Exists(issue => issue.ActiveWifiDirect));
-                if (direct)
-                    throw new WifiError("Обнаружена действующая точка доступа Wi-Fi Direct.");
-                if (automatic && mobile == MobilePhase.Unknown &&
-                    (snapshot == null || snapshot.Issues.Exists(issue => !issue.Unsupported) ||
-                     snapshot.Connections.Exists(connection => connection.Sharing.HasValue || connection.Connected &&
-                         (connection.Flags & Characteristics.WifiDirect) != 0)))
-                    throw new WifiError("Автозапуск остановлен: не удалось надёжно исключить действующую точку доступа.");
-            }
+            var snapshot = NetworkReading.InspectIcs();
+            var direct = snapshot.Connections != null && (Array.Exists(snapshot.Connections, connection => connection.Connected &&
+                (connection.Flags & Characteristics.WifiDirect) != 0) || Array.Exists(snapshot.Issues, issue => issue.ActiveWifiDirect));
+            if (direct)
+                throw new WifiError("Обнаружена действующая точка доступа Wi-Fi Direct.");
+            if (automatic && mobile == MobilePhase.Unknown &&
+                (snapshot.Connections == null || Array.Exists(snapshot.Issues, issue => !issue.Unsupported) ||
+                 Array.Exists(snapshot.Connections, connection => connection.Sharing.HasValue)))
+                throw new WifiError("Автозапуск остановлен. Не удалось надёжно исключить действующую точку доступа.");
             if (ssid == null || password == null) throw new WifiError("Сохраните параметры сети.");
             var name = Policy.EncodeSsid(ssid);
             Policy.CheckPassword(password);

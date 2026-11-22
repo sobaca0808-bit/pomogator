@@ -139,12 +139,27 @@ internal static class SmokeTests
         var adapter = Guid.NewGuid();
         var running = HostedNetwork.State.Idle;
         var stops = 0;
+        var generation = 0L;
+        var statusFailure = 0;
+        var startFailure = 0;
+        var renewed = 0;
+        var now = DateTime.UtcNow;
         var name = "PomogatorWifi.Test." + Guid.NewGuid().ToString("N");
-        HostedNetwork.State Query(out Guid id) { id = adapter; return running; }
-        var session = new OwnerSession(Query, () => 0L, () => 0,
-            (ssid, key, automatic) => { running = HostedNetwork.State.Active; },
+        HostedNetwork.State Fresh(out Guid id) { id = adapter; return running; }
+        HostedNetwork.State Query(out Guid id)
+        {
+            var code = Volatile.Read(ref statusFailure);
+            if (code != 0) throw new WlanFailure((uint)code, 0, "WlanHostedNetworkQueryStatus");
+            return Fresh(out id);
+        }
+        var session = new OwnerSession(Query, () => Interlocked.Read(ref generation), () => 13,
+            (ssid, key, automatic) =>
+            {
+                if (Volatile.Read(ref startFailure) != 0) throw new WlanFailure(31, 19, "WlanHostedNetworkStartUsing");
+                running = HostedNetwork.State.Active;
+            },
             () => { stops++; running = HostedNetwork.State.Idle; return new HostedRelease(0, 0); },
-            (code, details) => { });
+            (code, details) => { }, Fresh, () => { renewed++; Volatile.Write(ref statusFailure, 0); }, () => now);
         var process = Task.Run(() => Owner.ServeTransport(name, session, pipe => true, (code, details) => { }));
         OwnerReply Send(OwnerRequest command) => Owner.Exchange(name, command, 4000, pipe => true);
 
@@ -181,10 +196,26 @@ internal static class SmokeTests
             abandoned.Connect(4000);
         refreshed = Send(new OwnerRequest { Command = "status" });
         Require(refreshed != null && refreshed.Active && refreshed.Owner == start.Owner, "pipe survives disconnected client");
+
+        running = HostedNetwork.State.Idle;
+        Interlocked.Increment(ref generation);
+        Volatile.Write(ref statusFailure, 5023);
+        Volatile.Write(ref startFailure, 31);
+        var recover = new OwnerRequest { Command = "recover", Owner = start.Owner, Origin = "window" };
+        var failed = Send(recover);
+        Require(failed?.Error != null && failed.Error.Contains("WLAN 31, причина 19") && renewed == 2 && stops == 0,
+            "native start failure returned across the actual pipe");
+        var repeated = Send(recover);
+        Require(repeated?.Error != null && repeated.Error.Contains("Подождите") && renewed == 2, "cooldown prevents retry");
+        now = now.AddSeconds(5);
+        Volatile.Write(ref startFailure, 0);
+        var restored = Send(recover);
+        Require(restored != null && restored.Active && restored.Owner == start.Owner && renewed == 3, "fresh WLAN recovered");
+
         var stopped = Send(new OwnerRequest { Command = "stop", Owner = start.Owner, Adapter = adapter, Origin = "tray" });
         Require(stopped != null && stopped.Owner == Guid.Empty && !stopped.Active && stops == 1, "explicit OFF from tray");
         Require(process.Wait(4000), "helper transport completed after OFF");
-        Console.WriteLine("PASS live Windows named pipe: start, tray/close, 61 seconds idle, reopen, refresh, disconnected client, OFF");
+        Console.WriteLine("PASS live Windows named pipe: start, tray/close, 61 seconds idle, reopen, simulated WLAN failure and recovery, OFF");
     }
 
     private static void RenderScreens(string output)

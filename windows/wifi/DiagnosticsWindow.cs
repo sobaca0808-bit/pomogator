@@ -66,6 +66,9 @@ namespace PomogatorWifi
                 "HTTPS с компьютера — " + Verdict(online) + Environment.NewLine +
                 "Управление — " + (state.Phase == WifiPhase.Owned ? "Сеанс ПОМОГАТОРА" : state.Phase == WifiPhase.External ?
                     "Недоступно · внешний сеанс" : state.Phase == WifiPhase.Off ? "Доступен запуск" : "Не удалось подтвердить") +
+                Environment.NewLine + "Автонастройка WLAN (WlanSvc) — " + (state.WlanService ?? "не проверена") +
+                Environment.NewLine + "Служба ICS (SharedAccess) — " + (state.IcsService ?? "не проверена") +
+                (state.WlanNote == null ? "" : Environment.NewLine + state.WlanNote) +
                 (state.SharingNote == null ? "" : Environment.NewLine + state.SharingNote);
         }
 
@@ -117,7 +120,7 @@ namespace PomogatorWifi
                 if (picker.ShowDialog(this) != DialogResult.OK) return;
                 try
                 {
-                    File.WriteAllText(picker.FileName, "ПОМОГАТОР Wi-Fi 0.2.2 · " + DateTimeOffset.Now.ToString("O") +
+                    File.WriteAllText(picker.FileName, "ПОМОГАТОР Wi-Fi 0.2.3 · " + DateTimeOffset.Now.ToString("O") +
                         Environment.NewLine + checks.Text + Environment.NewLine + Environment.NewLine + log.Text, Encoding.UTF8);
                 }
                 catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)

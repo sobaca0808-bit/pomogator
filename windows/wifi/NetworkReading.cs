@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
+using System.ServiceProcess;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -20,7 +21,7 @@ namespace PomogatorWifi
         internal SharingState Sharing;
         internal SharingLease Candidate, Lease;
         internal HostedTarget ExternalTarget;
-        internal string Mechanism, SharingNote;
+        internal string Mechanism, SharingNote, WlanNote, WlanService, IcsService;
         internal bool CanRepair;
 
         internal SharingLease OwnedLease => Lease != null && Owner != Guid.Empty && Lease.Owner == Owner ? Lease : null;
@@ -29,6 +30,8 @@ namespace PomogatorWifi
     internal static class NetworkReading
     {
         private static readonly HashSet<string> Reported = new HashSet<string>();
+        private static readonly object IcsGate = new object();
+        private static Task<IcsReading> pendingIcs;
         private static readonly HttpClient Web = new HttpClient(new HttpClientHandler
         {
             UseProxy = false, AllowAutoRedirect = false
@@ -75,23 +78,67 @@ namespace PomogatorWifi
             return snapshot;
         }
 
-        internal static IcsSnapshot TryIcs()
+        internal sealed class IcsReading
         {
-            try { return OpenIcs(); }
+            internal Connection[] Connections;
+            internal IcsIssue[] Issues;
+            internal string Note;
+        }
+
+        internal static IcsReading InspectIcs()
+        {
+            Task<IcsReading> pending;
+            lock (IcsGate)
+            {
+                if (pendingIcs == null || pendingIcs.IsCompleted) pendingIcs = OnSta(ReadIcs);
+                pending = pendingIcs;
+            }
+            if (pending.Wait(1800)) return pending.GetAwaiter().GetResult();
+            Once("ics_read_timeout", "No complete COM snapshot");
+            return new IcsReading { Note = "Истекло время проверки ICS. Изменения общего доступа недоступны." };
+        }
+
+        private static IcsReading ReadIcs()
+        {
+            try
+            {
+                using (var snapshot = OpenIcs())
+                    return new IcsReading { Connections = snapshot.Connections.ToArray(), Issues = snapshot.Issues.ToArray() };
+            }
             catch (IcsFailure error)
             {
-                Once("ics_read_failed", error.Operation + string.Format(" HRESULT=0x{0:X8}", error.HResult));
-                return null;
+                Once("ics_read_failed", error.Diagnostic);
+                return new IcsReading { Note = error.Message };
             }
         }
 
-        internal static bool WifiDirect(IcsSnapshot snapshot) =>
-            snapshot.Connections.Any(connection => connection.Connected && (connection.Flags & Characteristics.WifiDirect) != 0 &&
+        private static string ServiceState(string name)
+        {
+            try
+            {
+                using (var service = new ServiceController(name))
+                    switch (service.Status)
+                    {
+                        case ServiceControllerStatus.Running: return "запущена";
+                        case ServiceControllerStatus.Stopped: return "остановлена";
+                        case ServiceControllerStatus.Paused: return "приостановлена";
+                        default: return "переходное состояние";
+                    }
+            }
+            catch (Exception error) when (error is InvalidOperationException || error is System.ComponentModel.Win32Exception)
+            {
+                return "не удалось проверить";
+            }
+        }
+
+        internal static bool WifiDirect(IEnumerable<Connection> connections) =>
+            connections.Any(connection => connection.Connected && (connection.Flags & Characteristics.WifiDirect) != 0 &&
                 connection.Sharing == SharingRole.Private);
 
         internal static WifiReport Read()
         {
-            var report = new WifiReport { Mobile = MobileHotspot.Read() };
+            var report = new WifiReport { Mobile = MobileHotspot.Read(),
+                WlanService = ServiceState("WlanSvc"), IcsService = ServiceState("SharedAccess") };
             var hosted = HostedNetwork.State.Unavailable;
             var wlanKnown = false;
             HostedTarget target = null;
@@ -110,7 +157,11 @@ namespace PomogatorWifi
                     }
                 }
             }
-            catch (Exception error) { Once("wlan_read_failed", error is WifiError ? error.Message : error.GetType().Name); }
+            catch (Exception error)
+            {
+                report.WlanNote = (error as WifiError)?.Message;
+                Once("wlan_read_failed", report.WlanNote ?? error.GetType().Name);
+            }
 
             var ownsActive = false;
             var ownerKnown = true;
@@ -122,6 +173,7 @@ namespace PomogatorWifi
                     if (owner == null || owner.Error != null || !owner.WindowsState.HasValue)
                     {
                         ownerKnown = false;
+                        if (owner?.Error != null) report.WlanNote = owner.Error;
                         Once("owner_status_unconfirmed", owner == null ? "no_response" : "no_verified_state");
                     }
                     else
@@ -136,6 +188,7 @@ namespace PomogatorWifi
                         hosted = ownerState;
                         wlanKnown = true;
                         report.Adapter = owner.Adapter;
+                        report.WlanNote = owner.WlanNote;
                         ownsActive = owner.Owner != Guid.Empty && owner.Active;
                         if (ownsActive || hosted != HostedNetwork.State.Active)
                             report.Owner = owner.Owner;
@@ -154,25 +207,24 @@ namespace PomogatorWifi
                 report.SharingNote = "Не удалось открыть сохранённое разрешение ICS. Изменение недоступно.";
             }
 
-            using (var snapshot = TryIcs())
-            {
-                bool wifiDirect = snapshot != null && WifiDirect(snapshot);
-                report.Phase = WifiRules.Phase(wlanKnown, hosted, ownsActive, report.Mobile, wifiDirect, ownerKnown);
-                report.Mechanism = hosted == HostedNetwork.State.Active ? "Hosted Network" :
-                    report.Phase == WifiPhase.External ? "Мобильный хот-спот / Wi-Fi Direct" :
-                    hosted == HostedNetwork.State.Idle ? "Hosted Network доступна" :
-                    report.HasWifi == false ? "Wi-Fi-адаптер не найден" : "Hosted Network недоступна";
-                if ((report.Phase == WifiPhase.External || report.Phase == WifiPhase.Unconfirmed) &&
-                    hosted == HostedNetwork.State.Active && target?.Adapter == report.Adapter) report.ExternalTarget = target;
-                if (snapshot != null) ReadSharing(report, snapshot, wifiDirect);
-            }
+            var snapshot = InspectIcs();
+            bool wifiDirect = snapshot.Connections != null && WifiDirect(snapshot.Connections);
+            report.Phase = WifiRules.Phase(wlanKnown, hosted, ownsActive, report.Mobile, wifiDirect, ownerKnown);
+            report.Mechanism = hosted == HostedNetwork.State.Active ? "Hosted Network" :
+                report.Phase == WifiPhase.External ? "Мобильный хот-спот / Wi-Fi Direct" :
+                hosted == HostedNetwork.State.Idle ? "Hosted Network доступна" :
+                report.HasWifi == false ? "Wi-Fi-адаптер не найден" : "Hosted Network недоступна";
+            if ((report.Phase == WifiPhase.External || report.Phase == WifiPhase.Unconfirmed) &&
+                hosted == HostedNetwork.State.Active && target?.Adapter == report.Adapter) report.ExternalTarget = target;
+            if (snapshot.Connections != null) ReadSharing(report, snapshot, wifiDirect);
+            else report.SharingNote = report.SharingNote ?? snapshot.Note;
             return report;
         }
 
-        private static void ReadSharing(WifiReport report, IcsSnapshot snapshot, bool wifiDirect)
+        private static void ReadSharing(WifiReport report, IcsReading snapshot, bool wifiDirect)
         {
             var connections = snapshot.Connections;
-            var complete = !snapshot.Issues.Exists(issue => !issue.Unsupported || issue.Id == report.Adapter);
+            var complete = !snapshot.Issues.Any(issue => !issue.Unsupported || issue.Id == report.Adapter);
             var tracked = report.OwnedLease;
             var source = tracked == null ? null : connections.SingleOrDefault(c => c.Id == tracked.Source && c.IsWanSharingMedia);
             var pppoe = connections.Where(c => c.Connected && (c.IsPppoe || c == source ||

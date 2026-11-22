@@ -20,6 +20,7 @@ namespace PomogatorWifi
         public int? WindowsState { get; set; }
         public bool Active { get; set; }
         public string Error { get; set; }
+        public string WlanNote { get; set; }
     }
 
     internal sealed class OwnerSession
@@ -30,15 +31,21 @@ namespace PomogatorWifi
         private readonly Func<HostedRelease> stop;
         private readonly Action<string, string> log;
         private readonly Func<int> interruptionReason;
+        private readonly QueryHosted fresh;
+        private readonly Action renew;
+        private readonly Func<DateTime> clock;
         private Guid token, adapter;
         private string ssid, password;
         private long acquiredAt;
         private bool acquired, readFailed, stopping;
+        private DateTime nextStart;
+        private string lastStartFailure, interruptionNote;
         internal bool Retained => token != Guid.Empty;
         internal bool Stopping => stopping;
 
         internal OwnerSession(QueryHosted query, Func<long> interruptions, Func<int> interruptionReason,
-            Action<string, string, bool> start, Func<HostedRelease> stop, Action<string, string> log)
+            Action<string, string, bool> start, Func<HostedRelease> stop, Action<string, string> log,
+            QueryHosted fresh, Action renew, Func<DateTime> clock = null)
         {
             this.query = query;
             this.interruptions = interruptions;
@@ -46,6 +53,9 @@ namespace PomogatorWifi
             this.start = start;
             this.stop = stop;
             this.log = log;
+            this.fresh = fresh;
+            this.renew = renew;
+            this.clock = clock ?? (() => DateTime.UtcNow);
         }
 
         internal OwnerReply Handle(OwnerRequest request)
@@ -56,6 +66,7 @@ namespace PomogatorWifi
                     return Observe();
                 case "start":
                     if (Retained) throw new WifiError("У ПОМОГАТОРА уже есть сеанс точки доступа.");
+                    PrepareStart();
                     Acquire(request.Ssid, request.Password, request.Automatic);
                     ssid = request.Ssid;
                     password = request.Password;
@@ -66,9 +77,10 @@ namespace PomogatorWifi
                     RequireSession(request);
                     var current = Observe();
                     if (current.Active) return current;
+                    if (current.Error != null) throw new WifiError(current.Error);
                     if (current.WindowsState != (int)HostedNetwork.State.Idle)
                         throw new WifiError("Восстановление доступно, когда Windows подтверждает, что точка выключена.");
-                    stop(); // Release any reference left by Windows on this same client handle.
+                    PrepareStart();
                     Acquire(ssid, password, request.Automatic);
                     log("hosted_recovered", "source=" + Origin(request));
                     return Observe();
@@ -104,10 +116,28 @@ namespace PomogatorWifi
         {
             // A drop observed after this point invalidates the reference even if the same GUID reappears.
             var before = interruptions();
-            start(name, key, automatic);
+            try { start(name, key, automatic); }
+            catch (WlanFailure error)
+            {
+                nextStart = clock().AddSeconds(5);
+                lastStartFailure = error.Message;
+                throw;
+            }
+            lastStartFailure = null;
+            interruptionNote = null;
             acquiredAt = before;
             acquired = true;
             adapter = Guid.Empty;
+        }
+
+        private void PrepareStart()
+        {
+            if (lastStartFailure != null && clock() < nextStart)
+                throw new WifiError("Подождите несколько секунд перед повтором. " + lastStartFailure);
+            // Confirm the state independently before closing a passive or obsolete local handle.
+            if (fresh(out _) != HostedNetwork.State.Idle)
+                throw new WifiError("Windows не подтвердила, что Hosted Network готова к запуску. Проверьте адаптер и другие точки доступа.");
+            renew();
         }
 
         internal OwnerReply Observe()
@@ -119,7 +149,11 @@ namespace PomogatorWifi
                 readFailed = false;
 
                 if (acquired && interruptions() != acquiredAt)
-                    Lost("windows_notification reason=" + interruptionReason());
+                {
+                    var reason = interruptionReason();
+                    interruptionNote = HostedNetwork.Explain(0, (uint)reason);
+                    Lost("windows_notification reason=" + reason + " " + interruptionNote);
+                }
                 if (acquired && state != HostedNetwork.State.Active)
                     Lost("windows_state=" + state);
                 if (acquired && adapter != Guid.Empty && adapter != observed)
@@ -130,7 +164,7 @@ namespace PomogatorWifi
                     log("hosted_ownership_confirmed", "adapter=" + adapter);
                 }
 
-                return new OwnerReply { Owner = token, Adapter = observed, WindowsState = (int)state,
+                return new OwnerReply { Owner = token, Adapter = observed, WindowsState = (int)state, WlanNote = interruptionNote,
                     Active = acquired && adapter != Guid.Empty && state == HostedNetwork.State.Active };
             }
             catch (Exception error)
@@ -138,7 +172,21 @@ namespace PomogatorWifi
                 if (!readFailed)
                     log("hosted_status_unconfirmed", error is WlanFailure ? error.Message : error.GetType().Name);
                 readFailed = true;
-                return new OwnerReply { Owner = token, Error = "Windows временно не подтверждает состояние точки Wi-Fi." };
+                var note = (error as WlanFailure)?.Message ?? "Windows временно не подтверждает состояние точки Wi-Fi.";
+                if (Retained && error is WlanFailure wlan && wlan.CanReadFresh)
+                {
+                    try
+                    {
+                        if (fresh(out var observed) == HostedNetwork.State.Idle)
+                        {
+                            if (acquired) Lost("fresh_wlan_state=Idle");
+                            return new OwnerReply { Owner = token, Adapter = observed, WindowsState = (int)HostedNetwork.State.Idle,
+                                WlanNote = "Точка выключена. Для восстановления будет открыт новый сеанс WLAN." };
+                        }
+                    }
+                    catch (WlanFailure current) { note = current.Message; }
+                }
+                return new OwnerReply { Owner = token, Error = note };
             }
         }
 

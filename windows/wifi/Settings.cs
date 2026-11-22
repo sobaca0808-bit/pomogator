@@ -77,8 +77,10 @@ namespace PomogatorWifi
 
         internal static void LogError(string stage, Exception error)
         {
-            var operation = error is IcsFailure failure ? failure.Operation : error.GetType().Name;
-            Log(stage, operation + string.Format(" HRESULT=0x{0:X8}", error.HResult));
+            if (error is IcsFailure failure) Log(stage, failure.Diagnostic);
+            else if (error is WlanFailure wlan) Log(stage, wlan.Message);
+            else if (error is WifiError) Log(stage, error.GetType().Name);
+            else Log(stage, error.GetType().Name + string.Format(" managed_hresult=0x{0:X8}", error.HResult));
         }
     }
 }

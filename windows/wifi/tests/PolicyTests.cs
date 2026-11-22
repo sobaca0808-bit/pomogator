@@ -79,6 +79,32 @@ var tests = new (string Name, Action Run)[] {
         system.ObjectFour.RoleReadFailure = unchecked((int)0x80004002);
         using (var snapshot = system.Open()) Check(!snapshot.Issues.Single().Unsupported);
     }),
+    ("Distinguish SharingInstalled=false from a native COM failure", () => {
+        var system = new FixtureWindows { SharingInstalled = false };
+        var unavailable = Expect<IcsFailure>(() => system.Open());
+        Check(unavailable.Diagnostic == "SharingInstalled=false" && !unavailable.NativeCode.HasValue &&
+            unavailable.Message.Contains("SharedAccess") && !unavailable.Message.Contains("80131500"));
+        system.SharingError = new COMException("internal", unchecked((int)0x80131500));
+        var native = Expect<IcsFailure>(() => system.Open());
+        Check(native.Diagnostic == "SharingInstalled HRESULT=0x80131500" && !native.Message.Contains("internal"));
+        Check(system.Writes.Count == 0);
+    }),
+    ("Skip an unsupported placeholder if unmarshaling returns E_NOINTERFACE", () => {
+        var system = new FixtureWindows();
+        system.ObjectFour.ReadError = new InvalidCastException("COM output");
+        using (var snapshot = system.Open())
+        {
+            Check(snapshot.Issues.Single().Unsupported);
+            snapshot.RequireVerified(system.Source.Id, system.Target.Id);
+        }
+        system.ObjectFour.Ports.Status = ConnectionStatus.Connected;
+        using (var snapshot = system.Open())
+        {
+            Check(!snapshot.Issues.Single().Unsupported);
+            Reject(() => snapshot.RequireVerified(system.Source.Id, system.Target.Id));
+        }
+        Check(system.Writes.Count == 0);
+    }),
     ("Find the virtual adapter by WLAN GUID after it appears", () => {
         var system = new FixtureWindows { ShowTarget = false };
         var attempts = 0;
@@ -332,6 +358,41 @@ var tests = new (string Name, Action Run)[] {
         Check(radio.Off(ours).Owner == Guid.Empty && radio.Stops == 1);
         Check(radio.Events.Any(item => item.Contains("hosted_status_restored")));
     }),
+    ("Recover on a fresh idle WLAN after 5023 and stop 19 from looping", () => {
+        var radio = new RadioFixture();
+        var initial = radio.Start();
+        radio.Gone++;
+        radio.State = HostedNetwork.State.Idle;
+        radio.ReadCode = 5023;
+        Check(radio.Session.Observe().WindowsState == (int)HostedNetwork.State.Idle);
+        radio.BadStart = new WlanFailure(31, 19, "WlanHostedNetworkStartUsing");
+        var ap = Expect<WlanFailure>(() => radio.Recover(initial));
+        Check(ap.Message.Contains("WLAN 31, причина 19") && ap.Message.Contains("WlanHostedNetworkStartUsing"));
+        Check(radio.Starts == 2 && radio.Renewed == 2 && radio.Stops == 0);
+        Reject(() => radio.Recover(initial));
+        Check(radio.Starts == 2 && radio.Renewed == 2 && radio.Session.Retained);
+        radio.Now = radio.Now.AddSeconds(5);
+        radio.BadStart = null;
+        var recovered = radio.Recover(initial);
+        Check(recovered.Active && recovered.Owner == initial.Owner);
+        Check(radio.Off(recovered).WindowsState == (int)HostedNetwork.State.Idle);
+    }),
+    ("Service outage preserves ownership and a foreign active point is never recycled", () => {
+        var radio = new RadioFixture();
+        var initial = radio.Start();
+        radio.ReadCode = radio.FreshCode = 1062;
+        var unavailable = radio.Session.Observe();
+        Check(unavailable.Owner == initial.Owner && !unavailable.WindowsState.HasValue &&
+            unavailable.Error.Contains("WlanSvc"));
+        Reject(() => radio.Recover(initial));
+        radio.FreshCode = 0;
+        radio.Gone++;
+        Check(!radio.Session.Observe().Active);
+        Reject(() => radio.Recover(initial)); // Fresh query sees an active point.
+        Check(radio.Renewed == 1 && radio.Stops == 0);
+        radio.State = HostedNetwork.State.Idle;
+        Check(radio.Recover(initial).Active && radio.Renewed == 2);
+    }),
     ("Manual external OFF verifies WLAN identity and generation before calling ForceStop", () => {
         var target = new HostedTarget { Adapter = Guid.NewGuid(), Bssid = "12-34-56-78-9A-BC", SsidBytes = "UE9NT0dBVE9S" };
         var active = new HostedTarget { Adapter = target.Adapter, Bssid = target.Bssid, SsidBytes = target.SsidBytes };
@@ -412,6 +473,8 @@ sealed class FixtureWindows : INetSharingManager
     internal readonly FixtureConnection ObjectFour;
     private readonly FixtureConnection[] connections;
     internal bool ShowTarget = true;
+    internal bool SharingInstalled = true;
+    internal Exception SharingError;
 
     internal FixtureWindows()
     {
@@ -437,12 +500,13 @@ sealed class FixtureWindows : INetSharingManager
         return HostedNetwork.State.Active;
     }
 
-    public bool GetSharingInstalled() => true;
+    public bool GetSharingInstalled() => SharingError == null ? SharingInstalled : throw SharingError;
     public void _VtblGap1_2() => throw new NotSupportedException();
 
     public int GetConfiguration(INetConnection connection, out INetSharingConfiguration configuration)
     {
         var fixture = (FixtureConnection)connection;
+        if (fixture.ReadError != null) throw fixture.ReadError;
         configuration = fixture.ReadResult == 0 ? fixture : null;
         return fixture.ReadResult;
     }
@@ -474,6 +538,7 @@ sealed class FixtureConnection : INetConnection, INetSharingConfiguration
     internal Guid Id = Guid.NewGuid();
     internal readonly FixtureProps Ports;
     internal int ReadResult;
+    internal Exception ReadError;
     internal int RoleReadFailure;
     internal int EnableFailure;
     internal bool IgnoreEnable;
@@ -523,7 +588,10 @@ internal sealed class RadioFixture
     internal HostedNetwork.State State = HostedNetwork.State.Idle;
     internal long Gone;
     internal bool OtherReference, FailRead, FailStop;
-    internal int Stops;
+    internal uint ReadCode, FreshCode;
+    internal WlanFailure BadStart;
+    internal int Stops, Starts, Renewed;
+    internal DateTime Now = new DateTime(2026, 11, 22, 1, 0, 0, DateTimeKind.Utc);
     internal readonly Guid Adapter = Guid.NewGuid();
     internal readonly List<string> Events = new();
     internal readonly OwnerSession Session;
@@ -531,6 +599,8 @@ internal sealed class RadioFixture
     internal RadioFixture()
     {
         Session = new OwnerSession(Query, () => Gone, () => 13, (name, password, automatic) => {
+            Starts++;
+            if (BadStart != null) throw BadStart;
             if (State != HostedNetwork.State.Idle) throw new WifiError("Busy");
             State = HostedNetwork.State.Active;
         }, () => {
@@ -538,12 +608,20 @@ internal sealed class RadioFixture
             Stops++;
             State = OtherReference ? HostedNetwork.State.Active : HostedNetwork.State.Idle;
             return new HostedRelease(0, 0);
-        }, (code, detail) => Events.Add(code + " " + detail));
+        }, (code, detail) => Events.Add(code + " " + detail), Fresh, () => { Renewed++; ReadCode = 0; }, () => Now);
     }
 
     private HostedNetwork.State Query(out Guid adapter)
     {
         if (FailRead) throw new WlanFailure(31, 0);
+        if (ReadCode != 0) throw new WlanFailure(ReadCode, 0);
+        adapter = Adapter;
+        return State;
+    }
+
+    private HostedNetwork.State Fresh(out Guid adapter)
+    {
+        if (FreshCode != 0) throw new WlanFailure(FreshCode, 0);
         adapter = Adapter;
         return State;
     }
