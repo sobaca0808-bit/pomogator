@@ -6,6 +6,8 @@
     <NoWarn>$(NoWarn);CA1416</NoWarn>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="ui/**/*.cs" />
+    <Compile Include="../WifiState.cs" Link="WifiState.cs" />
     <Compile Include="../Ics.cs" Link="Ics.cs" />
     <Compile Include="../IcsInterop.cs" Link="IcsInterop.cs" />
     <Compile Include="../Policy.cs" Link="Policy.cs" />

@@ -19,7 +19,7 @@ namespace PomogatorWifi
     [Flags]
     internal enum Characteristics : uint
     {
-        Shared = 0x100, HomeNetCapable = 0x1000, SharedPrivate = 0x2000, HostedNetwork = 0x10000
+        Shared = 0x100, HomeNetCapable = 0x1000, SharedPrivate = 0x2000, HostedNetwork = 0x10000, WifiDirect = 0x40000
     }
 
     internal class Connection

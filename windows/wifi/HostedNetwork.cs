@@ -16,6 +16,9 @@ namespace PomogatorWifi
         {
             internal State State;
             internal Guid Adapter;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 6)]
+            internal byte[] Mac;
+            internal uint Phy, Frequency, PeerCount;
         }
 
         [StructLayout(LayoutKind.Sequential)]
@@ -33,7 +36,9 @@ namespace PomogatorWifi
             Check(WlanOpenHandle(2, IntPtr.Zero, out version, out handle), 0);
         }
 
-        internal State Query(out Guid adapter)
+        internal State Query(out Guid adapter) => Query(out adapter, out _);
+
+        internal State Query(out Guid adapter, out uint peers)
         {
             IntPtr buffer;
             Check(WlanHostedNetworkQueryStatus(handle, out buffer, IntPtr.Zero), 0);
@@ -41,6 +46,7 @@ namespace PomogatorWifi
             {
                 var status = (StatusHeader)Marshal.PtrToStructure(buffer, typeof(StatusHeader));
                 adapter = status.Adapter;
+                peers = status.PeerCount;
                 return status.State;
             }
             finally { WlanFreeMemory(buffer); }
@@ -72,6 +78,20 @@ namespace PomogatorWifi
             finally { Array.Clear(key, 0, key.Length); }
             Check(WlanHostedNetworkStartUsing(handle, out reason, IntPtr.Zero), reason);
             started = true;
+        }
+
+        internal string Ssid()
+        {
+            var settings = ReadSettings();
+            return Encoding.UTF8.GetString(settings.Ssid, 0, (int)Math.Min(settings.SsidLength, 32u));
+        }
+
+        internal bool HasWifi()
+        {
+            IntPtr buffer;
+            Check(WlanEnumInterfaces(handle, IntPtr.Zero, out buffer), 0);
+            try { return Marshal.ReadInt32(buffer) > 0; }
+            finally { WlanFreeMemory(buffer); }
         }
 
         private Settings ReadSettings()
@@ -125,6 +145,8 @@ namespace PomogatorWifi
 
         [DllImport("wlanapi.dll")]
         private static extern uint WlanOpenHandle(uint version, IntPtr reserved, out uint negotiated, out IntPtr client);
+        [DllImport("wlanapi.dll")]
+        private static extern uint WlanEnumInterfaces(IntPtr client, IntPtr reserved, out IntPtr interfaces);
         [DllImport("wlanapi.dll")]
         private static extern uint WlanCloseHandle(IntPtr client, IntPtr reserved);
         [DllImport("wlanapi.dll")]

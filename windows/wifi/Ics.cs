@@ -24,11 +24,14 @@ namespace PomogatorWifi
         internal readonly Guid Id;
         internal readonly bool Unsupported;
         internal readonly string Detail;
+        internal readonly bool ActiveWifiDirect;
 
         internal IcsIssue(IcsFailure error, Guid id, Connection connection, bool unsupported)
         {
             Id = id;
             Unsupported = unsupported;
+            ActiveWifiDirect = connection != null && connection.Connected &&
+                (connection.Flags & Characteristics.WifiDirect) != 0;
             Detail = error.Operation + string.Format(" GUID={0} HRESULT=0x{1:X8}", id == Guid.Empty ? "не прочитан" : id.ToString(), error.HResult);
             if (connection != null)
                 Detail += string.Format(" MediaType={0} Status={1} Characteristics=0x{2:X}",
@@ -114,7 +117,7 @@ namespace PomogatorWifi
                     // A disconnected object without a network medium or sharing flags is not a usable ICS interface.
                     unsupported = result == NoInterface && media == MediaType.None && status == ConnectionStatus.Disconnected &&
                         (flags & (Characteristics.Shared | Characteristics.SharedPrivate |
-                                  Characteristics.HomeNetCapable | Characteristics.HostedNetwork)) == 0;
+                                  Characteristics.HomeNetCapable | Characteristics.HostedNetwork | Characteristics.WifiDirect)) == 0;
                     throw new COMException("Windows не вернула конфигурацию ICS.", result);
                 }
                 var config = Keep(rawConfig);

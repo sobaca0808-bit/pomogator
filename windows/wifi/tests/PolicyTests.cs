@@ -192,6 +192,65 @@ var tests = new (string Name, Action Run)[] {
             Check(Policy.CanRestore(connections, source.Id, target.Id, true, true));
         } finally { source.Sharing = null; }
     }),
+    ("Distinguish inactive, owned Hosted Network, external Hosted Network, and mobile hotspot", () => {
+        Check(WifiRules.Phase(true, HostedNetwork.State.Idle, false, MobilePhase.Off, false) == WifiPhase.Off);
+        Check(WifiRules.Phase(true, HostedNetwork.State.Active, true, MobilePhase.Off, false) == WifiPhase.Owned);
+        Check(WifiRules.Phase(true, HostedNetwork.State.Active, false, MobilePhase.Off, false) == WifiPhase.External);
+        Check(WifiRules.Phase(true, HostedNetwork.State.Idle, false, MobilePhase.On, false) == WifiPhase.External);
+        Check(WifiRules.Phase(true, HostedNetwork.State.Idle, false, MobilePhase.Transition, false) == WifiPhase.External);
+        Check(WifiRules.Phase(true, HostedNetwork.State.Unavailable, false, MobilePhase.Unknown, true) == WifiPhase.External);
+        Check(WifiRules.Phase(false, HostedNetwork.State.Unavailable, false, MobilePhase.Unknown, false) == WifiPhase.Unavailable);
+    }),
+    ("Auto start requires saved credentials and an idle point; no start beside external sharing", () => {
+        Check(WifiRules.AutoStart(true, WifiPhase.Off, true));
+        Check(!WifiRules.AutoStart(false, WifiPhase.Off, true));
+        Check(!WifiRules.AutoStart(true, WifiPhase.Off, false));
+        foreach (var phase in new[] { WifiPhase.External, WifiPhase.Owned, WifiPhase.Unavailable })
+            Check(!WifiRules.AutoStart(true, phase, true));
+    }),
+    ("Auto recovery needs an observed outage and resumes once after PPPoE returns", () => {
+        var edge = new RecoveryEdge();
+        Check(!edge.Observe(true, true, true));
+        Check(!edge.Observe(true, true, false));
+        Check(!edge.Observe(true, true, null));
+        Check(edge.Observe(true, true, true));
+        Check(!edge.Observe(true, true, true));
+        Check(!edge.Observe(true, true, false));
+        Check(!edge.Observe(true, false, true));
+        Check(!edge.Observe(true, true, true));
+        Check(!edge.Observe(false, true, false));
+        Check(!edge.Observe(true, true, true));
+        Check(WifiRules.AutomaticTarget(target.Id, target.Id));
+        Check(!WifiRules.AutomaticTarget(target.Id, source.Id));
+        Check(!WifiRules.AutomaticTarget(Guid.Empty, Guid.Empty));
+    }),
+    ("Restore consented ICS roles only and leave a pair changed outside the utility untouched", () => {
+        var system = new FixtureWindows();
+        var session = system.Find();
+        Check(session.ConfigureSharing(pair => true) == SharingResult.Verified);
+        system.ObjectFour.ReadResult = 0;
+        system.ObjectFour.Role = SharingRole.Private;
+        var writes = system.Writes.Count;
+        Reject(() => session.RestoreOwnedPair());
+        Check(system.Writes.Count == writes);
+        system.ObjectFour.Role = null;
+        session.RestoreOwnedPair();
+        Check(system.Target.Role == null && system.Source.Role == null);
+    }),
+    ("Only the original PPPoE and target can be repaired after a disconnect", () => {
+        var system = new FixtureWindows();
+        var session = system.Find();
+        Check(session.ConfigureSharing(pair => true) == SharingResult.Verified);
+        system.Source.Ports.Status = ConnectionStatus.Disconnected;
+        system.Target.Role = null;
+        var writes = system.Writes.Count;
+        Reject(() => session.ConfigureSharing(_ => true, repair: true));
+        Check(writes == system.Writes.Count);
+        system.Source.Ports.Status = ConnectionStatus.Connected;
+        Check(session.ConfigureSharing(_ => true, repair: true) == SharingResult.Verified);
+        Check(system.Writes.Count == writes + 1);
+        Check(system.Writes.Last() == "enable Private");
+    }),
     ("Validate SSID in UTF-8 bytes and passphrase in printable ASCII", () => {
         Check(Policy.EncodeSsid(new string('Ж', 16)).Length == 32);
         Reject(() => Policy.EncodeSsid(new string('Ж', 17)));
