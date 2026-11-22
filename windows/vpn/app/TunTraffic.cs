@@ -11,7 +11,7 @@ internal sealed record TunTrafficSample(TunPacketSample? Windows, TunXraySample?
         return new TunTrafficSample(windows, xray);
     }
 
-    internal IEnumerable<string> Describe(string phase, TunTrafficSample earlier)
+    internal IEnumerable<string> Describe(string phase, TunTrafficSample earlier, bool explainFailure = true)
     {
         var sent = Difference(Windows?.SentByWindows, earlier.Windows?.SentByWindows);
         var received = Difference(Windows?.ReceivedByWindows, earlier.Windows?.ReceivedByWindows);
@@ -26,6 +26,7 @@ internal sealed record TunTrafficSample(TunPacketSample? Windows, TunXraySample?
             $"{Format(Difference(Windows?.InputErrors, earlier.Windows?.InputErrors))}.";
         yield return $"{phase} · байты полезной нагрузки Xray TUN ↑/↓: {Format(tunUp)}/{Format(tunDown)}; " +
             $"байты транспорта VLESS ↑/↓: {Format(vpnUp)}/{Format(vpnDown)}.";
+        if (!explainFailure) yield break;
         var indication = sent == 0 ? "Windows не зарегистрировала исходящие пакеты на Wintun." :
             tunUp == 0 && sent > 0 ? "Wintun видел исходящие пакеты, полезная нагрузка на входе Xray не зарегистрирована." :
             vpnUp == 0 && tunUp > 0 ? "Xray принял полезную нагрузку TUN, передача через VLESS не зарегистрирована." :

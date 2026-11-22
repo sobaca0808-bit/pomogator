@@ -129,6 +129,7 @@ internal static class TunWindows
                 ? new[] { pinnedAddress } : IPAddress.TryParse(context.DnsEndPoint.Host, out var literal) &&
                 literal.AddressFamily == AddressFamily.InterNetwork ? new[] { literal } :
                 await Dns.GetHostAddressesAsync(context.DnsEndPoint.Host, AddressFamily.InterNetwork, token);
+            SocketException? lastError = null;
             foreach (var ip in addresses)
             {
                 Socket? socket = null;
@@ -139,10 +140,10 @@ internal static class TunWindows
                     await socket.ConnectAsync(ip, context.DnsEndPoint.Port, token);
                     return new NetworkStream(socket, ownsSocket: true);
                 }
-                catch (SocketException) { socket?.Dispose(); }
+                catch (SocketException error) { socket?.Dispose(); lastError = error; }
                 catch { socket?.Dispose(); throw; }
             }
-            throw new HttpRequestException("No usable IPv4 route through TUN.");
+            throw new HttpRequestException("No usable IPv4 route through TUN.", lastError);
         };
         return new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(6) };
     }

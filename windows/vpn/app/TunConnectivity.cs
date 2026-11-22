@@ -53,8 +53,11 @@ internal static class TunConnectivity
         var afterDns = await TunTrafficSample.Capture(record.Id, diagnosticsPort, enginePid, token);
         var https = await CheckHttps(record.Id, token);
         var afterHttps = await TunTrafficSample.Capture(record.Id, diagnosticsPort, enginePid, token);
-        return new TunChecks(await direct, await windows, https,
-            afterDns.Describe("DNS", before).Concat(afterHttps.Describe("HTTPS", afterDns)).ToArray());
+        var directResult = await direct;
+        var windowsResult = await windows;
+        return new TunChecks(directResult, windowsResult, https,
+            afterDns.Describe("DNS", before, !directResult.Success || !windowsResult.Success)
+                .Concat(afterHttps.Describe("HTTPS", afterDns, !https.Success)).ToArray());
     }
 
     internal static async Task<TunProbe> CheckResolver(IPAddress resolver, int index, CancellationToken token, int port = 53)
@@ -66,7 +69,7 @@ internal static class TunConnectivity
         {
             var query = TunDns.Query(name);
             using var attempt = CancellationTokenSource.CreateLinkedTokenSource(token);
-            attempt.CancelAfter(TimeSpan.FromSeconds(2.5));
+            attempt.CancelAfter(TimeSpan.FromSeconds(5));
             try
             {
                 using var udp = TunWindows.OpenSocket(index, resolver, SocketType.Dgram, ProtocolType.Udp);
@@ -112,7 +115,7 @@ internal static class TunConnectivity
     private static async Task<(TunDnsAnswer Answer, int Code)> ReadTcp(int index, IPEndPoint destination, byte[] query, CancellationToken token)
     {
         using var attempt = CancellationTokenSource.CreateLinkedTokenSource(token);
-        attempt.CancelAfter(TimeSpan.FromSeconds(2));
+        attempt.CancelAfter(TimeSpan.FromSeconds(5));
         using var tcp = TunWindows.OpenSocket(index, destination.Address, SocketType.Stream, ProtocolType.Tcp);
         await tcp.ConnectAsync(destination, attempt.Token);
         await using var stream = new NetworkStream(tcp);
@@ -142,7 +145,7 @@ internal static class TunConnectivity
         foreach (var name in new[] { ControlName, AlternateName })
         {
             using var attempt = CancellationTokenSource.CreateLinkedTokenSource(token);
-            attempt.CancelAfter(TimeSpan.FromSeconds(3));
+            attempt.CancelAfter(TimeSpan.FromSeconds(5));
             try
             {
                 if ((await Dns.GetHostAddressesAsync(name, AddressFamily.InterNetwork, attempt.Token)).Length != 0)
@@ -188,7 +191,9 @@ internal static class TunConnectivity
             if (certificate != SslPolicyErrors.None) outcome += "; сертификат: " + certificate;
             if (!string.IsNullOrEmpty(chainStatus)) outcome += "; цепочка: " + chainStatus;
             for (var cause = error.InnerException; cause != null; cause = cause.InnerException)
-                if (cause is AuthenticationException or IOException or SocketException)
+                if (cause is SocketException socket)
+                    outcome += "; код сокета Windows " + socket.NativeErrorCode;
+                else if (cause is AuthenticationException or IOException)
                     outcome += $"; {cause.GetType().Name} 0x{cause.HResult:X8}";
         }
 
