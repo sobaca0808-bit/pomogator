@@ -103,8 +103,10 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
             record = new TunRecovery(id, peer.ToString(), request.Before);
             if (request.Recover)
             {
-                var restored = await TunWindows.Recover(record);
-                await Send(channel, new TunReply(restored, "Не удалось безопасно убрать оставшийся интерфейс TUN. Запись восстановления сохранена."), boot.Token);
+                string? reason = null;
+                var restored = await TunWindows.Recover(record, code => reason = code);
+                await Send(channel, new TunReply(restored, "Не удалось безопасно убрать оставшийся интерфейс TUN. Запись восстановления сохранена. " +
+                    (reason == null ? "" : "Диагностика: " + reason + ".")), boot.Token);
                 return restored ? 0 : 1;
             }
 

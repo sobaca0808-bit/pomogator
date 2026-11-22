@@ -19,7 +19,8 @@ internal static class NativeTunTests
         var beforeWeb = TunWindows.Index(web);
         var beforeDns = TunWindows.Index(dns);
         var snapshot = TunWindows.Capture(web);
-        var recovery = new TunRecovery(fixtureId, webTarget, snapshot);
+        var fixtureRoutes = new[] { webTarget + "/32", dnsTarget + "/32" };
+        var recovery = new TunRecovery(fixtureId, webTarget, snapshot, fixtureRoutes, dnsTarget);
         Require(TunWindows.Vacant(recovery), "Test adapter was not initially absent.");
 
         using var httpDestination = new TcpListener(IPAddress.Loopback, 0);
@@ -51,7 +52,7 @@ internal static class NativeTunTests
 
         // This test is intentionally not a default-route test. The runner's connection and DNS are left on its original interface.
         using var console = new TunConsole();
-        var fixture = TunConfig.CreateEngine(fixtureId, new[] { webTarget + "/32", dnsTarget + "/32" },
+        var fixture = TunConfig.CreateEngine(fixtureId, fixtureRoutes,
             new[] { "[2001:db8:9::/48]:all" }, socks, password, readiness, dnsTarget);
         var seenIndex = 0;
         Process? child = null;
@@ -98,7 +99,13 @@ internal static class NativeTunTests
             await child.WaitForExitAsync(timeLimit.Token);
         }
         if (!await TunWindows.WaitClean(recovery, TimeSpan.FromSeconds(3)))
-            Require(await TunWindows.Recover(recovery), "Could not clean the adapter left by an abrupt exit.");
+        {
+            Require(!await TunWindows.Recover(recovery with { InstalledDns = "192.0.2.1" }),
+                "Recovery modified a device whose DNS did not match the saved plan.");
+            string? diagnostic = null;
+            var clean = await TunWindows.Recover(recovery, reason => diagnostic = reason);
+            Require(clean, "Could not clean the adapter left by an abrupt exit: " + diagnostic);
+        }
         Require(TunWindows.Index(web) == beforeWeb && TunWindows.Index(dns) == beforeDns &&
             TunWindows.Same(snapshot, TunWindows.Capture(web)), "Initial routes or DNS differ after crash recovery.");
         Console.WriteLine("PASS Native Wintun: Windows HTTP (UseProxy=false), UDP, DNS/route scope, graceful restoration and process-crash recovery");

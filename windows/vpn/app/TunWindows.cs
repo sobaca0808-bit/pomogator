@@ -13,7 +13,8 @@ using Microsoft.Win32;
 namespace Pomogator.Vpn;
 
 internal sealed record TunBaseline(int Uplink, string UplinkId, string[] Addresses, string[] Dns, int InternetRoute);
-internal sealed record TunRecovery(Guid Id, string Peer, TunBaseline Before);
+internal sealed record TunRecovery(Guid Id, string Peer, TunBaseline Before, string[]? InstalledRoutes = null,
+    string InstalledDns = TunConfig.Resolver);
 internal sealed record TunObservation(bool Interface, bool Routes, bool Dns);
 
 internal static class TunWindows
@@ -127,31 +128,38 @@ internal static class TunWindows
         return registry == null;
     }
 
-    internal static async Task<bool> Recover(TunRecovery record)
+    internal static async Task<bool> Recover(TunRecovery record, Action<string>? diagnostic = null)
     {
         if (Clean(record)) return true;
         var adapter = Find(record.Id);
         // An unrecognized device or foreign additions are left for manual inspection.
-        if (adapter == null) return false;
+        if (adapter == null) return Refuse("adapter-not-visible");
         var props = adapter.GetIPProperties();
         if (props.UnicastAddresses.Any(a => !a.Address.IsIPv6LinkLocal && a.Address.ToString() != TunConfig.Address &&
                 !a.Address.ToString().StartsWith("169.254.", StringComparison.Ordinal)) ||
-            props.DnsAddresses.Any(a => a.ToString() != TunConfig.Resolver)) return false;
+            props.DnsAddresses.Any(a => a.ToString() != record.InstalledDns)) return Refuse("unrecognized-address-or-dns");
         var routes = await ReadRoutes(Index(adapter));
-        if (routes == null) return false;
-        var allowed = TunConfig.Routes(IPAddress.Parse(record.Peer)).Concat(new[] {
+        if (routes == null) return Refuse("could-not-read-routes");
+        var allowed = (record.InstalledRoutes ?? TunConfig.Routes(IPAddress.Parse(record.Peer))).Concat(new[] {
             TunConfig.Address + "/32", "198.18.240.0/30", "198.18.240.3/32", "255.255.255.255/32",
             "224.0.0.0/4", "ff00::/8", "fe80::/64", "169.254.0.0/16"
         }).ToHashSet();
         if (routes.Any(route => !allowed.Contains(route) && !(route.StartsWith("fe80:", StringComparison.OrdinalIgnoreCase) &&
-            route.EndsWith("/128", StringComparison.Ordinal)))) return false;
+            route.EndsWith("/128", StringComparison.Ordinal)))) return Refuse("unrecognized-route");
         using var registry = Registry.LocalMachine.OpenSubKey(ConnectionKey(record.Id));
         var pnp = registry?.GetValue("PnpInstanceID") as string;
         if (pnp == null || !(pnp.StartsWith("SWD\\WINTUN\\", StringComparison.OrdinalIgnoreCase) ||
-            pnp.StartsWith("ROOT\\WINTUN\\", StringComparison.OrdinalIgnoreCase))) return false;
+            pnp.StartsWith("ROOT\\WINTUN\\", StringComparison.OrdinalIgnoreCase))) return Refuse("unrecognized-device-instance");
 
         var result = await Run(Path.Combine(Environment.SystemDirectory, "pnputil.exe"), "/remove-device", pnp);
-        return result?.Exit == 0 && await WaitClean(record, TimeSpan.FromSeconds(5));
+        if (result?.Exit != 0) return Refuse("device-remove-failed");
+        return await WaitClean(record, TimeSpan.FromSeconds(5)) || Refuse("device-still-present");
+
+        bool Refuse(string reason)
+        {
+            diagnostic?.Invoke(reason);
+            return false;
+        }
     }
 
     internal static async Task<bool> WaitClean(TunRecovery record, TimeSpan limit)

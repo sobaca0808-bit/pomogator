@@ -289,7 +289,8 @@ public partial class MainWindow : Window
                 catch (Exception error) when (error is SocketException or OperationCanceledException && !source.IsCancellationRequested)
                 { throw new VpnError("Не удалось получить IPv4-адрес VPN-сервера через текущий DNS."); }
                 if (peer == null) throw new VpnError("У VPN-сервера нет пригодного IPv4-адреса для TUN.");
-                recovery = new TunRecovery(Guid.NewGuid(), peer.ToString(), TunWindows.Capture(peer));
+                recovery = new TunRecovery(Guid.NewGuid(), peer.ToString(), TunWindows.Capture(peer),
+                    TunConfig.Routes(peer));
                 bridgePassword = Convert.ToHexString(RandomNumberGenerator.GetBytes(24));
             }
             var latency = await Xray.CheckServerAsync(peer == null ? profile : profile with { Host = peer.ToString() }, source.Token);
@@ -434,10 +435,14 @@ public partial class MainWindow : Window
                 return false;
             }
             File.Delete(LocalData.TunRecovery);
-            var current = TunWindows.Capture(IPAddress.Parse(record.Peer));
-            tunStatus = TunWindows.Same(record.Before, current) && current.InternetRoute == record.Before.InternetRoute
-                ? "TUN: интерфейс и собственные маршруты удалены. Исходные маршруты и DNS подтверждены."
-                : "TUN: интерфейс удалён. Состояние рабочей сети отличается от исходного.";
+            try
+            {
+                var current = TunWindows.Capture(IPAddress.Parse(record.Peer));
+                tunStatus = TunWindows.Same(record.Before, current) && current.InternetRoute == record.Before.InternetRoute
+                    ? "TUN: интерфейс и собственные маршруты удалены. Исходные маршруты и DNS подтверждены."
+                    : "TUN: интерфейс удалён. Состояние рабочей сети отличается от исходного.";
+            }
+            catch { tunStatus = "TUN: интерфейс удалён. Проверить состояние текущего подключения не удалось."; }
             AddLog(tunStatus);
             return true;
         }
