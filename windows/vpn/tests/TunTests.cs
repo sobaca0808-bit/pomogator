@@ -326,9 +326,16 @@ internal static class NativeTunTests
             TunWindows.MatchesBaseline(snapshot, TunWindows.Capture(peer)), "Initial routes or DNS differ after stop.");
         Require(seenIndex != 0, "No TUN interface was observed.");
 
+        var crashDiagnostic = new TunEngineDiagnostic();
         using (var crashed = await Xray.StartAsync(executable, fixture, readiness, timeLimit.Token, Track,
-            WindowsLifetime.OwnsLoopback, inheritConsole: true, startupSeconds: 24))
+            WindowsLifetime.OwnsLoopback, inheritConsole: true, startupSeconds: 24, diagnosticLine: crashDiagnostic.Read))
         {
+            var active = await TunReadiness.Wait(() =>
+            {
+                var state = TunWindows.Observe(recovery, web);
+                return state.Ready && !crashDiagnostic.Started ? state with { ErrorCode = "TUN_ENGINE_NOT_READY" } : state;
+            }, () => crashed.Running, TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(150), timeLimit.Token);
+            Require(active.Ready, "TUN did not become ready before the simulated crash: " + active.Failure);
             child!.Kill();
             await child.WaitForExitAsync(timeLimit.Token);
         }
