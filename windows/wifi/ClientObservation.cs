@@ -107,7 +107,8 @@ namespace PomogatorWifi
         internal IEnumerable<string> Lines()
         {
             yield return "Запуск точки — " + (!observed ? "WLAN не подтвердила состояние." :
-                active ? "Hosted Network запущена в конце наблюдения." : "в конце наблюдения Hosted Network выключена или недоступна.");
+                active ? "Hosted Network запущена по последнему успешному чтению." :
+                "по последнему успешному чтению Hosted Network выключена или недоступна.");
             if (changed) yield return "Виртуальный адаптер сменился. Итог подключения относится к последнему подтверждённому адаптеру.";
             yield return "WPA2 — " + (authenticated ? "Windows видела аутентифицированного клиента." :
                 "Windows не подтвердила аутентификацию клиента. Точная причина по этому наблюдению неизвестна.");

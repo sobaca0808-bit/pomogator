@@ -65,7 +65,10 @@ namespace PomogatorWifi
                         observation.Observe(activity);
                         lines.Add(activity.Line());
                     }
-                    if (token.WaitHandle.WaitOne(TimeSpan.FromSeconds(1))) token.ThrowIfCancellationRequested();
+                    var remaining = duration - elapsed.Elapsed;
+                    if (remaining > TimeSpan.Zero && token.WaitHandle.WaitOne(
+                        remaining < TimeSpan.FromSeconds(1) ? remaining : TimeSpan.FromSeconds(1)))
+                        token.ThrowIfCancellationRequested();
                 }
             }
             finally { network?.Dispose(); }
