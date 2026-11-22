@@ -1,8 +1,15 @@
 using System.Diagnostics;
+using System.Net;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
 namespace Pomogator.Vpn;
+
+[Flags]
+internal enum PeerTcp
+{
+    None = 0, SynSent = 1, Established = 2, ExpectedSource = 4, TunSource = 8, OtherSource = 16, Seen = 32
+}
 
 internal static class WindowsLifetime
 {
@@ -37,26 +44,59 @@ internal static class WindowsLifetime
     }
 
     internal static bool OwnsLoopback(int port, int pid)
+        => ReadTcpTable(3, row => row.LocalAddress == 0x0100007f && row.LocalPort == port && row.Pid == pid) == true;
+
+    internal static PeerTcp? ReadPeerTcp(int pid, IPAddress peer, int port, IPAddress source)
+    {
+        var expectedRemote = BitConverter.ToInt32(peer.GetAddressBytes());
+        var expectedLocal = BitConverter.ToInt32(source.GetAddressBytes());
+        var tunLocal = BitConverter.ToInt32(IPAddress.Parse(TunConfig.Address).GetAddressBytes());
+        var result = PeerTcp.None;
+        var read = ReadTcpTable(5, row =>
+        {
+            if (row.Pid != pid || row.RemoteAddress != expectedRemote || row.RemotePort != port) return false;
+            result |= PeerTcp.Seen;
+            result |= row.LocalAddress == expectedLocal ? PeerTcp.ExpectedSource :
+                row.LocalAddress == tunLocal ? PeerTcp.TunSource :
+                row.LocalAddress == 0 ? PeerTcp.None : PeerTcp.OtherSource;
+            if (row.State == 3) result |= PeerTcp.SynSent;
+            if (row.State == 5) result |= PeerTcp.Established;
+            return false;
+        });
+        return read.HasValue ? result : null;
+    }
+
+    private readonly record struct TcpOwnerRow(int State, int LocalAddress, int LocalPort, int RemoteAddress, int RemotePort, int Pid);
+
+    private static int ReadPort(IntPtr row, int offset)
+        => (ushort)IPAddress.NetworkToHostOrder((short)Marshal.ReadInt32(row, offset));
+
+    private static bool? ReadTcpTable(uint tableClass, Func<TcpOwnerRow, bool> match)
     {
         int size = 0;
         const uint insufficient = 122;
-        if (GetExtendedTcpTable(IntPtr.Zero, ref size, false, 2, 3, 0) != insufficient || size < 4) return false;
-        var table = Marshal.AllocHGlobal(size);
-        try
+        if (GetExtendedTcpTable(IntPtr.Zero, ref size, false, 2, tableClass, 0) != insufficient) return null;
+        for (var attempt = 0; size >= 4 && attempt < 3; attempt++)
         {
-            if (GetExtendedTcpTable(table, ref size, false, 2, 3, 0) != 0) return false;
-            var rows = Marshal.ReadInt32(table);
-            for (var index = 0; index < rows && index < (size - 4) / 24; index++)
+            var capacity = size;
+            var table = Marshal.AllocHGlobal(capacity);
+            try
             {
-                var row = IntPtr.Add(table, 4 + index * 24);
-                var portWord = Marshal.ReadInt32(row, 8);
-                var localPort = ((portWord & 0xff) << 8) | ((portWord >> 8) & 0xff);
-                if (Marshal.ReadInt32(row, 4) == 0x0100007f && localPort == port && Marshal.ReadInt32(row, 20) == pid)
-                    return true;
+                var status = GetExtendedTcpTable(table, ref size, false, 2, tableClass, 0);
+                if (status == insufficient) continue;
+                if (status != 0) return null;
+                var rows = Math.Min(Marshal.ReadInt32(table), (capacity - 4) / 24);
+                for (var index = 0; index < rows; index++)
+                {
+                    var row = IntPtr.Add(table, 4 + index * 24);
+                    if (match(new TcpOwnerRow(Marshal.ReadInt32(row), Marshal.ReadInt32(row, 4), ReadPort(row, 8),
+                        Marshal.ReadInt32(row, 12), ReadPort(row, 16), Marshal.ReadInt32(row, 20)))) return true;
+                }
+                return false;
             }
-            return false;
+            finally { Marshal.FreeHGlobal(table); }
         }
-        finally { Marshal.FreeHGlobal(table); }
+        return null;
     }
 
     [DllImport("kernel32.dll", SetLastError = true)]

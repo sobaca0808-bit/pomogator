@@ -13,7 +13,13 @@ using Microsoft.Win32;
 
 namespace Pomogator.Vpn;
 
-internal sealed record TunBaseline(int Uplink, string UplinkId, string[] Addresses, string[] Dns, int InternetRoute, int? PublicRoute = null);
+internal sealed record TunBaseline(int Uplink, string UplinkId, string[] Addresses, string[] Dns, int InternetRoute,
+    int? PublicRoute = null, string? SourceIpv4 = null)
+{
+    internal bool HasSource(IPAddress source) => source.AddressFamily == AddressFamily.InterNetwork &&
+        !source.Equals(IPAddress.Any) && !IPAddress.IsLoopback(source) && source.ToString() != TunConfig.Address &&
+        Addresses.Contains(source.ToString());
+}
 internal sealed record TunRecovery(Guid Id, string Peer, TunBaseline Before, string[]? InstalledRoutes = null,
     string InstalledDns = TunConfig.Resolver);
 

@@ -29,6 +29,7 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
     internal string? EngineNote { get; private set; }
     internal int DiagnosticsPort { get; private set; }
     internal int EnginePid { get; private set; }
+    internal int PeerPort { get; private set; }
     internal TunControlEndpoint? Control { get; private set; }
     internal TunRecovery Record { get; } = record;
     internal bool Running => helper is { HasExited: false };
@@ -37,6 +38,7 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
 
     internal async Task StartAsync(Profile profile, CancellationToken token)
     {
+        PeerPort = profile.Port;
         if (TunWindows.OtherVpn()) throw new VpnError("Найден другой VPN или UBoost. Выберите локальный прокси либо завершите другой VPN самостоятельно.");
         if (File.Exists(LocalData.TunRecovery) || !TunWindows.Vacant(Record)) throw new VpnError("Имя или идентификатор интерфейса TUN уже занят.");
         LocalData.Save(LocalData.TunRecovery, Record);
@@ -182,6 +184,8 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
 
             if (request.Profile is not { Full: null } profile ||
                 profile.Security is not ("tls" or "reality") || profile.Id == Guid.Empty || profile.Port is < 1 or > 65535) return 1;
+            if (!IPAddress.TryParse(record.Before.SourceIpv4, out var source) || !record.Before.HasSource(source))
+                throw new VpnError("Не подтверждён исходный IPv4 для подключения Xray. TUN не запущен.");
             if (!TunWindows.Vacant(record) || TunWindows.OtherVpn() || SystemProxy.AnyInUse() ||
                 !TunWindows.MatchesBaseline(request.Before, TunWindows.Capture(peer)))
                 throw new VpnError("Перед запуском изменился рабочий интерфейс или появился другой VPN. Настройки не применены.");
@@ -194,7 +198,7 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
             var control = new TunControlEndpoint(controlPort, "pomogator",
                 Convert.ToHexString(RandomNumberGenerator.GetBytes(24)), TunConfig.InternetProbe, 443);
             launchingTun = true;
-            var config = TunConfig.Engine(id, peer, profile, port, diagnosticsPort, control);
+            var config = TunConfig.Engine(id, peer, source, profile, port, diagnosticsPort, control);
             // Start watching the parent before the first network change, including driver initialization.
             using var alive = CancellationTokenSource.CreateLinkedTokenSource(boot.Token);
             var runtime = Read<int>(channel, CancellationToken.None);

@@ -58,6 +58,7 @@ internal static class NativeTunTests
         var beforeDns = TunWindows.Index(dns);
         var peer = IPAddress.Parse("203.0.113.21");
         var snapshot = TunWindows.Capture(peer);
+        var uplinkAddress = snapshot.Addresses.Select(IPAddress.Parse).First(snapshot.HasSource);
         var fixtureRoutes = new[] { webTarget + "/32", dnsTarget + "/32" };
         var recovery = new TunRecovery(fixtureId, peer.ToString(), snapshot, fixtureRoutes, dnsTarget);
         Require(TunWindows.Vacant(recovery), "Test adapter was not initially absent.");
@@ -72,17 +73,30 @@ internal static class NativeTunTests
         using var timeLimit = new CancellationTokenSource(TimeSpan.FromSeconds(75));
 
         var upstreamPort = Xray.FreePort();
+        var upstreamReady = Xray.FreePort();
+        while (upstreamReady == upstreamPort) upstreamReady = Xray.FreePort();
+        const string upstreamHost = "vless-fixture.test";
+        using var upstreamCertificate = CreateCertificate(upstreamHost);
+        using var upstreamKey = upstreamCertificate.GetRSAPrivateKey()!;
         var upstreamConfig = JsonSerializer.Serialize(new {
             log = new { loglevel = "none" },
-            inbounds = new[] { new { listen = "127.0.0.1", port = upstreamPort, protocol = "vless",
-                settings = new { clients = new[] { new { id } }, decryption = "none" } } },
+            inbounds = new object[] {
+                new { listen = "127.0.0.1", port = upstreamReady, protocol = "http" },
+                new { listen = uplinkAddress.ToString(), port = upstreamPort, protocol = "vless",
+                    settings = new { clients = new[] { new { id } }, decryption = "none" },
+                    streamSettings = new { network = "raw", security = "tls", tlsSettings = new {
+                        certificates = new[] { new { certificate = upstreamCertificate.ExportCertificatePem().Split('\n'),
+                            key = upstreamKey.ExportRSAPrivateKeyPem().Split('\n') } }
+                    } }
+                }
+            },
             outbounds = new object[] { new { tag = "block", protocol = "blackhole" }, Redirect("web", httpPort), Redirect("dns", dnsPort) },
             routing = new { rules = new object[] {
                 new { type = "field", ip = new[] { webTarget }, port = httpPort.ToString(), network = "tcp", outboundTag = "web" },
                 new { type = "field", ip = new[] { dnsTarget }, port = "53", network = "tcp,udp", outboundTag = "dns" }
             } }
         });
-        using var upstream = await Xray.StartAsync(executable, upstreamConfig, upstreamPort, timeLimit.Token,
+        using var upstream = await Xray.StartAsync(executable, upstreamConfig, upstreamReady, timeLimit.Token,
             WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback);
         var readiness = Xray.FreePort();
         var diagnosticsPort = Xray.FreePort();
@@ -92,11 +106,15 @@ internal static class NativeTunTests
             controlPort = Xray.FreePort();
         var control = new TunControlEndpoint(controlPort, "tun-fixture", Convert.ToHexString(RandomNumberGenerator.GetBytes(24)),
             webTarget, httpPort);
-        var client = Profiles.Parse($"vless://{id}@127.0.0.1:{upstreamPort}");
-        // Exercise the production shape: Wintun forwards directly to the selected VLESS.
+        var client = Profiles.Parse($"vless://{id}@{uplinkAddress}:{upstreamPort}?security=tls&sni={upstreamHost}");
+        var outbound = TunConfig.UplinkOutbound(uplinkAddress, uplinkAddress, client);
+        var stream = (Dictionary<string, object>)outbound["streamSettings"];
+        var tls = (Dictionary<string, object>)stream["tlsSettings"];
+        tls["pinnedPeerCertSha256"] = Convert.ToHexString(SHA256.HashData(upstreamCertificate.RawData));
+        // The test peer listens on the runner's non-loopback IPv4 and uses an ephemeral pinned certificate.
         using var console = new TunConsole();
         var fixture = TunConfig.CreateEngine(fixtureId, fixtureRoutes, new[] { "198.51.100.0/24:all", "[2001:db8:9::/48]:all" },
-            XrayConfig.Outbound(client, "vpn"), readiness, dnsTarget, diagnosticsPort: diagnosticsPort, control: control);
+            outbound, readiness, dnsTarget, diagnosticsPort: diagnosticsPort, control: control, peer: uplinkAddress);
         var seenIndex = 0;
         Process? child = null;
         IDisposable Track(Process process) { child = process; return WindowsLifetime.Attach(process); }
@@ -261,7 +279,17 @@ internal static class NativeTunTests
                 // It enters through the authenticated loopback control inlet and validates the same certificate.
                 await RequireControlAuthentication(control, timeLimit.Token);
                 var controlResponse = AnswerHttps(httpDestination, certificate, tlsHost, requestBody, responseBody, timeLimit.Token,
-                    stage => Console.WriteLine("TLS control fixture: " + stage));
+                    stage =>
+                    {
+                        Console.WriteLine("TLS control fixture: " + stage);
+                        if (stage != "server received request payload") return;
+                        var observed = WindowsLifetime.ReadPeerTcp(child!.Id, uplinkAddress, upstreamPort, uplinkAddress);
+                        const PeerTcp expected = PeerTcp.Seen | PeerTcp.Established | PeerTcp.ExpectedSource;
+                        Require(observed.HasValue && (observed.Value & expected) == expected &&
+                            (observed.Value & (PeerTcp.TunSource | PeerTcp.OtherSource)) == 0 &&
+                            TunWindows.Index(uplinkAddress) != seenIndex,
+                            "Did not observe the TUN Xray's outbound TCP socket with the expected non-Wintun source.");
+                    });
                 using (var http = TunControlProbe.Client(control, child!.Id, tlsHost, (_, candidate, _, errors) =>
                     candidate?.GetCertHashString() == certificate.Thumbprint &&
                     (errors & SslPolicyErrors.RemoteCertificateNameMismatch) == 0,
@@ -303,7 +331,7 @@ internal static class NativeTunTests
         }
         Require(TunWindows.Index(web) == beforeWeb && TunWindows.Index(dns) == beforeDns &&
             TunWindows.MatchesBaseline(snapshot, TunWindows.Capture(peer)), "Initial routes or DNS differ after crash recovery.");
-        Console.WriteLine("PASS Native Wintun: TLS upload/download, authenticated and restricted same-engine VLESS control, invalid certificate, DNS UDP/TCP, route isolation and cleanup");
+        Console.WriteLine("PASS Native Wintun: TLS VLESS with a verified non-Wintun source, duplex HTTPS and restricted same-engine control, DNS UDP/TCP and cleanup");
     }
 
     private static object Redirect(string tag, int port) => new { tag, protocol = "freedom", settings = new {
@@ -319,7 +347,8 @@ internal static class NativeTunTests
         subject.AddDnsName(host);
         request.CertificateExtensions.Add(subject.Build());
         using var generated = request.CreateSelfSigned(DateTimeOffset.Now.AddMinutes(-1), DateTimeOffset.Now.AddMinutes(10));
-        return new X509Certificate2(generated.Export(X509ContentType.Pfx), (string?)null, X509KeyStorageFlags.UserKeySet);
+        return new X509Certificate2(generated.Export(X509ContentType.Pfx), (string?)null,
+            X509KeyStorageFlags.UserKeySet | X509KeyStorageFlags.Exportable);
     }
 
     private static readonly string[] ControlLogMarkers = ["request to Method [CONNECT]", "pmt-control-vless",

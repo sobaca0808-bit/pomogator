@@ -61,14 +61,26 @@ public static class TunConfig
         return profile with { Host = peer.ToString(), Options = options, Full = null };
     }
 
-    public static string Engine(Guid id, IPAddress peer, Profile profile, int readiness, int diagnosticsPort = 0, TunControlEndpoint? control = null) =>
+    public static string Engine(Guid id, IPAddress peer, IPAddress source, Profile profile, int readiness,
+        int diagnosticsPort = 0, TunControlEndpoint? control = null) =>
         CreateEngine(id, Routes(peer), new[] { "allexceptlan", "[::/0]:all", "misconfigtun" },
-            XrayConfig.Outbound(Pinned(profile, peer), "vpn"), readiness,
-            diagnosticsPort: diagnosticsPort > 0 ? diagnosticsPort : null, dnsOverHttps: DnsUpstream, control: control);
+            UplinkOutbound(peer, source, profile), readiness,
+            diagnosticsPort: diagnosticsPort > 0 ? diagnosticsPort : null, dnsOverHttps: DnsUpstream, control: control, peer: peer);
+
+    internal static Dictionary<string, object> UplinkOutbound(IPAddress peer, IPAddress source, Profile profile)
+    {
+        if (source.AddressFamily != AddressFamily.InterNetwork || source.Equals(IPAddress.Any) ||
+            IPAddress.IsLoopback(source) || source.Equals(IPAddress.Parse(Address)))
+            throw new ArgumentException("An IPv4 address of the uplink is required.", nameof(source));
+        var outbound = XrayConfig.Outbound(Pinned(profile, peer), "vpn");
+        outbound["sendThrough"] = source.ToString();
+        return outbound;
+    }
 
     // Production and native CI use the same TUN, routing and optional StatsService.
     internal static string CreateEngine(Guid id, string[] routes, string[] filters, object outbound, int readiness,
-        string resolver = Resolver, int? diagnosticsPort = null, string? dnsOverHttps = null, TunControlEndpoint? control = null)
+        string resolver = Resolver, int? diagnosticsPort = null, string? dnsOverHttps = null, TunControlEndpoint? control = null,
+        IPAddress? peer = null)
     {
         var outbounds = new List<object> { outbound, new { tag = "block", protocol = "blackhole" } };
         var rules = new List<object> {
@@ -84,6 +96,9 @@ public static class TunConfig
             } },
             new { listen = "127.0.0.1", port = readiness, protocol = "http", tag = "readiness" }
         };
+        if (peer != null)
+            rules.Add(new { type = "field", ruleTag = "pmt-peer-reentry", inboundTag = new[] { TunTag },
+                ip = new[] { peer + "/32" }, outboundTag = "block" });
         if (control != null)
         {
             if (!IPAddress.TryParse(control.Destination, out var target) || target.AddressFamily != AddressFamily.InterNetwork ||

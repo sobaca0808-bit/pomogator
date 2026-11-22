@@ -298,7 +298,14 @@ public partial class MainWindow : Window
                 recovery = new TunRecovery(Guid.NewGuid(), peer.ToString(), TunWindows.Capture(peer),
                     TunConfig.Routes(peer));
             }
-            var latency = await Xray.CheckServerAsync(peer == null ? profile : profile with { Host = peer.ToString() }, source.Token);
+            var (latency, peerSource) = await Xray.CheckServerSourceAsync(
+                peer == null ? profile : profile with { Host = peer.ToString() }, source.Token);
+            if (recovery != null)
+            {
+                if (!recovery.Before.HasSource(peerSource))
+                    throw new VpnError("Источник TCP-подключения не принадлежит исходному интерфейсу IPv4. TUN не запущен.");
+                recovery = recovery with { Before = recovery.Before with { SourceIpv4 = peerSource.ToString() } };
+            }
             LatencyText.Text = $"Задержка TCP до сервера: {Math.Round(latency.TotalMilliseconds)} мс.";
             AddLog("TCP-порт VPN-сервера доступен.");
 
@@ -331,6 +338,7 @@ public partial class MainWindow : Window
                 using (var preflight = Xray.ThroughProxy(checkPort))
                     if (await InternetHealth.ProbeAsync(preflight, source.Token) == null)
                         throw new VpnError("HTTPS через выбранный VLESS недоступен до включения TUN.");
+                AddLog("До запуска TUN: HTTPS через выбранный VLESS подтверждён.");
                 Detail.Text = "Ожидание интерфейса, IPv4-адреса, маршрутов и DNS Wintun…";
                 tun = new TunSession(recovery);
                 try { await tun.StartAsync(profile, source.Token); }
@@ -918,7 +926,7 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog(this) != true) return;
         try
         {
-            var header = new[] { "ПОМОГАТОР VPN 0.3.4", Status.Text, CoreCheck.Text, ProxyCheck.Text, TrafficCheck.Text,
+            var header = new[] { "ПОМОГАТОР VPN 0.3.5", Status.Text, CoreCheck.Text, ProxyCheck.Text, TrafficCheck.Text,
                 SystemCheck.Text, TunCheck.Text, CheckedAt.Text, "" };
             var observations = tunObservation?.Lines() ?? Enumerable.Empty<string>();
             var probes = tunChecks?.Lines() ?? Enumerable.Empty<string>();

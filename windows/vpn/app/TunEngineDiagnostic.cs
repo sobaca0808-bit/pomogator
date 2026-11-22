@@ -6,12 +6,14 @@ internal sealed class TunEngineDiagnostic
     private int? exitCode;
     private int started;
     internal bool Started => Volatile.Read(ref started) != 0;
-    private readonly int[] counters = new int[7];
     private static readonly string[] Labels = [
         "маршрут контрольной пробы выбрал VLESS", "маршрут контрольной пробы отклонён",
-        "сбой исходящего подключения", "TLS или REALITY внешнего соединения",
-        "сбой DNS-over-HTTPS", "сбой чтения или передачи VLESS", "исходящий сбой без уточнённой стадии"
+        "сбой открытия исходящего сокета", "TLS или REALITY внешнего соединения",
+        "сбой DNS-over-HTTPS", "сбой чтения или передачи VLESS", "исходящий сбой без уточнённой стадии",
+        "TUN перехватил трафик к VPN-серверу, повторная отправка заблокирована",
+        "открыт защищённый транспорт VLESS"
     ];
+    private readonly int[] counters = new int[Labels.Length];
 
     internal string[] TakeEvents()
     {
@@ -50,6 +52,8 @@ internal sealed class TunEngineDiagnostic
             Interlocked.Increment(ref counters[5]);
         if (Has("failed to process outbound traffic") || Has("failed to find an available destination"))
             Interlocked.Increment(ref counters[6]);
+        if (Has("Hit route rule: [pmt-peer-reentry]")) Interlocked.Increment(ref counters[7]);
+        if (Has("proxy/vless/outbound: tunneling request to")) Interlocked.Increment(ref counters[8]);
     }
 
     internal void Exited(int code) => exitCode = code;

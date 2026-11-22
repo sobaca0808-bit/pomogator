@@ -204,7 +204,7 @@ Test("TUN splits public IPv4 routes around the pinned peer and LAN", () => {
         route.Contains(IPAddress.Parse("127.0.0.1"))));
     Assert(routes.Any(route => route.Contains(IPAddress.Parse(TunConfig.Resolver))));
     Assert(routes.Any(route => route.Contains(IPAddress.Parse("203.0.113.70"))));
-    using var config = JsonDocument.Parse(TunConfig.Engine(Guid.NewGuid(), peer, Profiles.Parse(Base + "?security=tls"), 12346));
+    using var config = JsonDocument.Parse(TunConfig.Engine(Guid.NewGuid(), peer, IPAddress.Parse("192.0.2.31"), Profiles.Parse(Base + "?security=tls"), 12346));
     var settings = config.RootElement.GetProperty("inbounds")[0].GetProperty("settings");
     Assert(settings.GetProperty("autoOutboundsInterface").GetString() == "");
     Assert(config.RootElement.GetProperty("outbounds")[0].GetProperty("protocol").GetString() == "vless");
@@ -290,7 +290,7 @@ Test("Only classified Xray diagnostics and its exit code can appear in the TUN r
         !diagnostic.Description.Contains("fixture-secret") && !diagnostic.Description.Contains("other-credential"));
 });
 Test("Production TUN routes encrypted DNS and keeps telemetry on loopback", () => {
-    using var config = JsonDocument.Parse(TunConfig.Engine(Guid.NewGuid(), IPAddress.Parse("203.0.113.71"),
+    using var config = JsonDocument.Parse(TunConfig.Engine(Guid.NewGuid(), IPAddress.Parse("203.0.113.71"), IPAddress.Parse("192.0.2.31"),
         Profiles.Parse(Base + "?security=tls"), 34002, 34003));
     var root = config.RootElement;
     Assert(root.GetProperty("dns").GetProperty("servers")[0].GetString() == "https://dns.quad9.net/dns-query");
@@ -305,9 +305,30 @@ Test("Production TUN routes encrypted DNS and keeps telemetry on loopback", () =
     var dns = root.GetProperty("outbounds").EnumerateArray().Single(item => item.GetProperty("protocol").GetString() == "dns");
     Assert(dns.GetProperty("streamSettings").GetProperty("sockopt").GetProperty("dialerProxy").GetString() == "vpn");
 });
+Test("Pin the TUN VLESS source and reject the VPN peer re-entering Wintun", () => {
+    var peer = IPAddress.Parse("203.0.113.71");
+    var source = IPAddress.Parse("192.0.2.31");
+    var profile = Profiles.Parse(Base + "?security=reality&type=tcp&flow=xtls-rprx-vision&sni=vpn.example&pbk=" + RealityKey + "&sid=01");
+    using var config = JsonDocument.Parse(TunConfig.Engine(Guid.NewGuid(), peer, source, profile, 34002));
+    var root = config.RootElement;
+    var outbound = root.GetProperty("outbounds")[0];
+    Assert(outbound.GetProperty("sendThrough").GetString() == source.ToString());
+    Assert(outbound.GetProperty("streamSettings").GetProperty("realitySettings").GetProperty("serverName").GetString() == "vpn.example");
+    var rules = root.GetProperty("routing").GetProperty("rules").EnumerateArray().ToArray();
+    var rejected = Array.FindIndex(rules, rule => rule.TryGetProperty("ruleTag", out var tag) &&
+        tag.GetString() == "pmt-peer-reentry");
+    Assert(rejected >= 0 && rejected < rules.Length - 1);
+    var guard = rules[rejected];
+    Assert(guard.GetProperty("inboundTag")[0].GetString() == "pomogator-tun" &&
+        guard.GetProperty("ip")[0].GetString() == peer + "/32" && guard.GetProperty("outboundTag").GetString() == "block");
+    using var proxy = JsonDocument.Parse(XrayConfig.Create(profile, 34003));
+    Assert(!proxy.RootElement.GetProperty("outbounds")[0].TryGetProperty("sendThrough", out _));
+    var baseline = new TunBaseline(7, "fixture", new[] { source.ToString(), TunConfig.Address }, [], 7);
+    Assert(baseline.HasSource(source) && !baseline.HasSource(peer) && !baseline.HasSource(IPAddress.Parse(TunConfig.Address)));
+});
 Test("Only the authenticated diagnostic inlet can reach the pinned destination", () => {
     var endpoint = new TunControlEndpoint(34004, "fixture-user", "fixture-password", "1.1.1.1", 443);
-    using var config = JsonDocument.Parse(TunConfig.Engine(Guid.NewGuid(), IPAddress.Parse("203.0.113.71"),
+    using var config = JsonDocument.Parse(TunConfig.Engine(Guid.NewGuid(), IPAddress.Parse("203.0.113.71"), IPAddress.Parse("192.0.2.31"),
         Profiles.Parse(Base + "?security=tls"), 34002, 34003, endpoint));
     var root = config.RootElement;
     var inlet = root.GetProperty("inbounds").EnumerateArray().Single(item =>
@@ -315,7 +336,7 @@ Test("Only the authenticated diagnostic inlet can reach the pinned destination",
     Assert(inlet.GetProperty("listen").GetString() == "127.0.0.1");
     Assert(inlet.GetProperty("settings").GetProperty("accounts")[0].GetProperty("pass").GetString() == endpoint.Password);
     var rules = root.GetProperty("routing").GetProperty("rules").EnumerateArray().Where(rule =>
-        rule.TryGetProperty("ruleTag", out _)).ToArray();
+        rule.TryGetProperty("ruleTag", out var tag) && tag.GetString()!.StartsWith("pmt-control-")).ToArray();
     Assert(rules.Length == 2 && rules[0].GetProperty("ip")[0].GetString() == "1.1.1.1/32" &&
         rules[0].GetProperty("port").GetString() == "443" && rules[0].GetProperty("network").GetString() == "tcp" &&
         rules[0].GetProperty("outboundTag").GetString() == "vpn" && rules[1].GetProperty("outboundTag").GetString() == "block");
@@ -331,14 +352,20 @@ Test("Differential diagnosis and Xray event sampling export categories without r
     engine.Read("REALITY: received real certificate marker");
     engine.Read("failed to handle DOH response marker");
     engine.Read("failed to decode response header marker");
+    engine.Read("Hit route rule: [pmt-peer-reentry] marker");
+    engine.Read("proxy/vless/outbound: tunneling request to marker");
     var events = engine.TakeEvents();
-    Assert(events.Length == 5 && !string.Join(" ", events).Contains("marker") && engine.TakeEvents().Length == 0);
+    Assert(events.Length == 7 && !string.Join(" ", events).Contains("marker") && engine.TakeEvents().Length == 0);
     var fail = new TunProbe(false, "пример ошибки", 3);
     var pass = new TunProbe(true, "пример успеха", 5);
     var report = new TunChecks(pass, pass, fail, events, fail, pass);
     Assert(!report.Success);
     Assert(report.Lines().Any(line => line.Contains("Сбой наблюдается на пути через Wintun")));
     Assert(report.Lines().Any(line => line.Contains("HTTPS через локальный вход того же Xray")));
+    Assert(new TunChecks(fail, fail, fail, DirectPinned: fail, SameEngine: fail).FailedStage.Contains("VLESS"));
+    Assert(new TunChecks(fail, fail, pass, DirectPinned: pass, SameEngine: pass).FailedStage.Contains("DNS"));
+    Assert(TunConnectivity.PeerLine(PeerTcp.Seen | PeerTcp.ExpectedSource | PeerTcp.Established, 7, 7).Contains("ESTABLISHED"));
+    Assert(TunConnectivity.PeerLine(PeerTcp.None, 7, 7).Contains("сокет не зафиксирован"));
 });
 Test("Report Windows packets separately from Xray bytes and preserve unknown/reset", () => {
     const string json = """
@@ -407,7 +434,7 @@ if (!string.IsNullOrWhiteSpace(executable))
     }) await CheckConfiguration(executable, profile);
     var advanced = Profiles.ParseList(EasyGo("server.example", 443, Id, RealityKey), keepRouting: true).Single();
     await CheckConfiguration(executable, advanced);
-    var tunConfig = TunConfig.Engine(Guid.NewGuid(), IPAddress.Parse("203.0.113.71"), advanced, 34010, 34011,
+    var tunConfig = TunConfig.Engine(Guid.NewGuid(), IPAddress.Parse("203.0.113.71"), IPAddress.Parse("192.0.2.31"), advanced, 34010, 34011,
         new TunControlEndpoint(34012, "fixture-user", "fixture-password", TunConfig.InternetProbe, 443));
     await CheckConfiguration(executable, advanced, tunConfig);
     Console.WriteLine("PASS Pinned Xray validates transports, full EasyGo and TUN DoH/StatsService configuration");

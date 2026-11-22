@@ -153,7 +153,10 @@ public sealed class Xray : IDisposable
         catch (OperationCanceledException) when (!token.IsCancellationRequested) { return false; }
     }
 
-    public static async Task<TimeSpan> CheckServerAsync(Profile profile, CancellationToken token)
+    public static async Task<TimeSpan> CheckServerAsync(Profile profile, CancellationToken token) =>
+        (await CheckServerSourceAsync(profile, token)).Elapsed;
+
+    public static async Task<(TimeSpan Elapsed, IPAddress Source)> CheckServerSourceAsync(Profile profile, CancellationToken token)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         deadline.CancelAfter(TimeSpan.FromSeconds(6));
@@ -162,7 +165,8 @@ public sealed class Xray : IDisposable
         {
             var watch = Stopwatch.StartNew();
             await client.ConnectAsync(profile.Host, profile.Port, deadline.Token);
-            return watch.Elapsed;
+            var address = ((IPEndPoint)client.Client.LocalEndPoint!).Address;
+            return (watch.Elapsed, address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address);
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested)
         { throw new VpnError("VPN-сервер не ответил на TCP-проверку за 6 секунд."); }

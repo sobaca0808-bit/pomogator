@@ -20,9 +20,13 @@ internal sealed record TunChecks(TunProbe Resolver, TunProbe Windows, TunProbe H
     TunProbe? DirectPinned = null, TunProbe? SameEngine = null)
 {
     internal bool Success => Resolver.Success && Windows.Success && Https.Success;
-    internal string FailedStage => !Resolver.Success ? "запрос к DNS на Wintun" :
+    private bool BothHttpsFailed => DirectPinned is { Success: false } && SameEngine is { Success: false } && !Https.Success;
+    internal string FailedStage => BothHttpsFailed ? "исходящий HTTPS через VLESS при активном TUN" :
+        !Resolver.Success ? "запрос к DNS на Wintun" :
         !Windows.Success ? "системное разрешение DNS" : "HTTPS через Wintun";
-    internal string Failure => !Resolver.Success && !Windows.Success ?
+    internal string Failure => BothHttpsFailed ?
+        "Обе HTTPS-пробы по IPv4 завершились с ошибкой. Проверьте исходящий маршрут и соединение Xray с VPN-сервером." :
+        !Resolver.Success && !Windows.Success ?
         "DNS-сервер TUN и системный DNS Windows не подтвердили разрешение имени." :
         !Resolver.Success ? "DNS-сервер TUN не подтвердил ответ через виртуальный интерфейс." :
         !Windows.Success ? "DNS-сервер ответил через Wintun, но системный DNS Windows не разрешил контрольное имя." :
@@ -81,8 +85,11 @@ internal static class TunConnectivity
         TunProbe? control = null;
         if (session.Control is { } endpoint)
         {
-            control = await PinnedHttps(validation => TunControlProbe.Client(endpoint, session.EnginePid,
+            var probe = PinnedHttps(validation => TunControlProbe.Client(endpoint, session.EnginePid,
                 TunConfig.InternetProbeHost, validation), token);
+            var trace = await ObservePeer(probe, session, token);
+            control = await probe;
+            lines.Add(trace);
             var afterControl = await Capture();
             lines.AddRange(afterControl.Describe("HTTPS локальный вход Xray", afterHttps, explainFailure: false));
             await AddEngineEvents("HTTPS локальный вход Xray");
@@ -109,6 +116,38 @@ internal static class TunConnectivity
             lines.Add($"{phase} · Xray: {(events == null ? "события недоступны" : events.Length == 0 ?
                 "распознанных событий нет" : string.Join(", ", events))}.");
         }
+    }
+
+    private static async Task<string> ObservePeer(Task probe, TunSession session, CancellationToken token)
+    {
+        var peer = IPAddress.Parse(session.Record.Peer);
+        var source = IPAddress.Parse(session.Record.Before.SourceIpv4!);
+        PeerTcp? observed = null;
+        do
+        {
+            if (WindowsLifetime.ReadPeerTcp(session.EnginePid, peer, session.PeerPort, source) is { } sample)
+                observed = (observed ?? PeerTcp.None) | sample;
+            if (probe.IsCompleted) break;
+            token.ThrowIfCancellationRequested();
+            await Task.WhenAny(probe, Task.Delay(40, token));
+        } while (true);
+        return PeerLine(observed, TunWindows.Index(peer), session.Record.Before.Uplink);
+    }
+
+    internal static string PeerLine(PeerTcp? observed, int route, int expected)
+    {
+        var prefix = $"Исходящий TCP Xray к VPN-серверу · маршрут IF {route} (исходный IF {expected})";
+        if (observed == null) return prefix + "; таблица TCP недоступна.";
+        var flags = observed.Value;
+        if (!flags.HasFlag(PeerTcp.Seen)) return prefix + "; сокет не зафиксирован за время наблюдения.";
+        var details = new List<string>();
+        if (flags.HasFlag(PeerTcp.ExpectedSource)) details.Add("ожидаемый IPv4 источника");
+        if (flags.HasFlag(PeerTcp.TunSource)) details.Add("IPv4 источника принадлежит Wintun");
+        if (flags.HasFlag(PeerTcp.OtherSource)) details.Add("другой IPv4 источника");
+        if (flags.HasFlag(PeerTcp.SynSent)) details.Add("SYN_SENT");
+        if (flags.HasFlag(PeerTcp.Established)) details.Add("ESTABLISHED");
+        if (details.Count == 0) details.Add("сокет найден, источник или стадия не подтверждены");
+        return prefix + "; " + string.Join(", ", details) + ".";
     }
 
     internal static async Task<TunProbe> CheckResolver(IPAddress resolver, int index, CancellationToken token, int port = 53)
