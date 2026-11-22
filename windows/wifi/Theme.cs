@@ -15,6 +15,13 @@ namespace PomogatorWifi
         internal static readonly Color Accent = Color.FromArgb(109, 238, 211);
 
         internal static Icon Brand { get; } = ReadIcon();
+        internal static Image Mark { get; } = ReadMark();
+
+        private static Image ReadMark()
+        {
+            using (var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("WifiMark"))
+            using (var image = Image.FromStream(stream)) return new Bitmap(image);
+        }
 
         private static Icon ReadIcon()
         {
@@ -56,7 +63,7 @@ namespace PomogatorWifi
 
         internal static Button Button(string text, EventHandler action)
         {
-            var button = new GlassButton { Text = text, AccessibleName = text };
+            var button = new GlassButton { Text = text, AccessibleName = text, Dock = DockStyle.Fill };
             button.Click += action;
             return button;
         }
@@ -91,6 +98,17 @@ namespace PomogatorWifi
             StartPosition = FormStartPosition.CenterScreen;
             DoubleBuffered = true;
         }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            var enabled = 1;
+            if (DwmSetWindowAttribute(Handle, 20, ref enabled, sizeof(int)) < 0)
+                DwmSetWindowAttribute(Handle, 19, ref enabled, sizeof(int));
+        }
+
+        [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr window, int attribute, ref int value, int bytes);
 
         protected override void OnPaintBackground(PaintEventArgs e) => Theme.Background(e.Graphics, ClientRectangle);
     }

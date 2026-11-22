@@ -13,13 +13,16 @@ namespace PomogatorWifi
         private readonly UserSettings original;
         internal UserSettings Result { get; private set; }
 
-        internal SettingsWindow(UserSettings current, WifiPhase phase) : base("Настройки · ПОМОГАТОР Wi-Fi", new Size(492, 626))
+        internal SettingsWindow(UserSettings current, WifiPhase phase) : base("Настройки · ПОМОГАТОР Wi-Fi", new Size(492, 587))
         {
             original = current;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = MinimizeBox = false;
             StartPosition = FormStartPosition.CenterParent;
-            var root = WifiWindow.Rows(46, 184, 253, 51, 57);
+            AutoScroll = true;
+            var root = WifiWindow.Rows(46, 184, 253, 30, 55);
+            root.Dock = DockStyle.Top;
+            root.Height = 587;
             root.Padding = new Padding(21, 9, 21, 10);
             root.Controls.Add(Theme.Label("Настройки", 19, bold: true), 0, 0);
 
@@ -34,7 +37,7 @@ namespace PomogatorWifi
             fields.Controls.Add(name, 0, 1);
             var passwordFields = WifiWindow.Columns(0, 104);
             passwordFields.Controls.Add(key, 0, 0);
-            var show = Theme.Button("Показать", (_, __) => { });
+            var show = new GlassButton { Text = "Показать", Dock = DockStyle.Fill };
             show.Margin = new Padding(5, 2, 0, 3);
             show.Click += (_, __) => { key.UseSystemPasswordChar = !key.UseSystemPasswordChar; show.Text = key.UseSystemPasswordChar ? "Показать" : "Скрыть"; show.AccessibleName = show.Text + " пароль"; };
             show.AccessibleName = "Показать пароль";

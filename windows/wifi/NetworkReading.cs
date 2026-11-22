@@ -150,7 +150,11 @@ namespace PomogatorWifi
             report.Pppoe = pppoe.Length > 0 ? true : complete && !rasUnknown ? (bool?)false : null;
             if (tracked != null)
                 report.Pppoe = source?.Connected ?? (complete ? (bool?)false : null);
-            if (!complete) return;
+            if (!complete)
+            {
+                report.SharingNote = "Изменение ICS недоступно: Windows не вернула роли всех сетевых подключений.";
+                return;
+            }
 
             var roles = connections.Where(connection => connection.Sharing.HasValue).ToArray();
             var target = wifiDirect && report.Phase == WifiPhase.External && !report.Peers.HasValue
@@ -164,18 +168,29 @@ namespace PomogatorWifi
                 report.Sharing = roles.Length == 0 ? SharingState.Disabled : SharingState.Other;
 
             if (report.Phase != WifiPhase.Owned || target == Guid.Empty) return;
+            var destination = Policy.FindTarget(connections, target);
+            if (tracked != null && tracked.Target == target && source != null && destination != null)
+                report.PairDescription = DescribePair(source, destination);
             if (tracked != null && tracked.Target == target && source != null && source.Connected &&
-                Policy.FindTarget(connections, target) != null &&
+                destination != null &&
                 Policy.CanRestore(connections, tracked.Source, tracked.Target, true, true))
                 report.CanRepair = !Policy.ConfirmsSharing(connections, tracked.Source, tracked.Target);
 
-            if (report.Sharing != SharingState.Disabled || report.SharingNote != null) return;
-            if (tracked != null) return;
-            var destination = Policy.FindTarget(connections, target);
-            if (destination == null || pppoe.Length != 1 || !pppoe[0].IsPppoe) return;
+            if (report.SharingNote != null || report.CanRepair) return;
+            if (report.Sharing == SharingState.Other)
+                report.SharingNote = "Общий доступ уже настроен для другой пары или неполностью. Проверьте вкладку «Доступ» в ncpa.cpl.";
+            if (report.Sharing != SharingState.Disabled || tracked != null) return;
+            if (destination == null || pppoe.Length != 1 || !pppoe[0].IsPppoe)
+            {
+                report.SharingNote = "Для настройки ICS нужны одно активное PPPoE и готовый виртуальный адаптер.";
+                return;
+            }
             report.Candidate = new SharingLease { Owner = report.Owner, Source = pppoe[0].Id, Target = target };
-            report.PairDescription = "Источник интернета: " + pppoe[0].Name + "\r\nАдаптер точки доступа: " + destination.Name;
+            report.PairDescription = DescribePair(pppoe[0], destination);
         }
+
+        private static string DescribePair(Connection source, Connection destination) =>
+            "Источник интернета: " + source.Name + "\r\nАдаптер точки доступа: " + destination.Name;
 
         private static T SingleOrDefaultSafe<T>(this IEnumerable<T> items, Func<T, bool> matches) where T : class
         {

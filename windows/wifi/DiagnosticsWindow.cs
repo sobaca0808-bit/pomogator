@@ -39,6 +39,7 @@ namespace PomogatorWifi
             root.Controls.Add(row, 0, 4);
             Controls.Add(root);
             LoadReport(report, internet);
+            ActiveControl = refresh;
         }
 
         private static TextBox Box() => new TextBox { ReadOnly = true, Multiline = true, Dock = DockStyle.Fill,

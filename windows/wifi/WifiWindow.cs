@@ -29,13 +29,13 @@ namespace PomogatorWifi
         private string message;
         private WifiPhase shown;
 
-        internal WifiWindow(bool testing = false) : base("ПОМОГАТОР Wi-Fi", new Size(490, 578))
+        internal WifiWindow(bool testing = false) : base("ПОМОГАТОР Wi-Fi", new Size(490, 477))
         {
             this.testing = testing;
             FormBorderStyle = FormBorderStyle.FixedSingle;
-            MaximizeBox = false;
+            MaximizeBox = MinimizeBox = false;
 
-            var root = Rows(64, 236, 167, 64);
+            var root = Rows(59, 198, 141, 54);
             root.Padding = new Padding(24, 15, 24, 10);
             root.Controls.Add(Header(), 0, 0);
             root.Controls.Add(CenterPanel(), 0, 1);
@@ -51,7 +51,7 @@ namespace PomogatorWifi
         private TableLayoutPanel Header()
         {
             var row = Columns(40, 0, 43, 43);
-            row.Controls.Add(new PictureBox { Image = Theme.Brand.ToBitmap(), SizeMode = PictureBoxSizeMode.Zoom,
+            row.Controls.Add(new PictureBox { Image = Theme.Mark, SizeMode = PictureBoxSizeMode.Zoom,
                 Dock = DockStyle.Fill, Margin = new Padding(0, 8, 2, 17), BackColor = Color.Transparent }, 0, 0);
             var title = Theme.Label("ПОМОГАТОР Wi-Fi", 15, bold: true);
             title.Padding = new Padding(8, 0, 0, 0);
@@ -70,7 +70,7 @@ namespace PomogatorWifi
         private GlassPanel CenterPanel()
         {
             var panel = new GlassPanel { Dock = DockStyle.Fill, Margin = new Padding(0, 2, 0, 10), Padding = new Padding(14, 8, 14, 7) };
-            var contents = Rows(136, 38, 0);
+            var contents = Rows(111, 35, 0);
             var center = Columns(0, 146, 0);
             power.Dock = DockStyle.Fill;
             power.Margin = new Padding(0, 1, 0, 0);
@@ -78,6 +78,7 @@ namespace PomogatorWifi
             center.Controls.Add(power, 1, 0);
             phaseText.TextAlign = ContentAlignment.MiddleCenter;
             description.TextAlign = ContentAlignment.TopCenter;
+            description.AutoEllipsis = false;
             contents.Controls.Add(center, 0, 0);
             contents.Controls.Add(phaseText, 0, 1);
             contents.Controls.Add(description, 0, 2);
@@ -88,7 +89,7 @@ namespace PomogatorWifi
         private GlassPanel StatusPanel()
         {
             var panel = new GlassPanel { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 9), Padding = new Padding(17, 8, 17, 8) };
-            var table = Rows(35, 35, 35, 35);
+            var table = Rows(29, 29, 29, 29);
             AddFact(table, 0, "Имя сети", ssid);
             AddFact(table, 1, "Интернет на ПК", wan);
             AddFact(table, 2, "Общий доступ (ICS)", sharing);
@@ -267,11 +268,11 @@ namespace PomogatorWifi
         {
             switch (phase)
             {
-                case WifiPhase.Owned: return report.Sharing == SharingState.Verified ? "Точка под управлением ПОМОГАТОРА. Windows подтвердила общий доступ." :
+                case WifiPhase.Owned: return report.Sharing == SharingState.Verified ? "Точка под управлением ПОМОГАТОРА." :
                     "Точка работает. Общий доступ можно проверить в диагностике.";
                 case WifiPhase.External: return report.Mechanism == "Hosted Network" ?
-                    "Hosted Network запущена извне. Для перехода остановите её там, где включили." :
-                    "Точкой управляет Windows или другая программа. Проверьте «Мобильный хот-спот» в Windows.";
+                    "Для перехода остановите Hosted Network там, где включили." :
+                    "Проверьте «Мобильный хот-спот» в настройках Windows.";
                 case WifiPhase.Starting: return "Проверяем подключение и запускаем точку доступа.";
                 case WifiPhase.Stopping: return "Завершаем сеанс ПОМОГАТОРА.";
                 case WifiPhase.Unavailable: return report.HasWifi == false ? "Подключите USB Wi-Fi-адаптер и откройте диагностику." :
@@ -421,7 +422,8 @@ namespace PomogatorWifi
         {
             if (current.OwnedLease != null)
             {
-                if (MessageBox.Show(this, "Устройства потеряют связь с этой точкой. Вернуть исходный общий доступ для пары PPPoE и виртуального адаптера? Для этого Windows может запросить права администратора.",
+                var pair = current.PairDescription ?? "Ранее подтверждённая пара PPPoE и адаптера точки доступа.";
+                if (MessageBox.Show(this, pair + "\r\n\r\nВернуть исходный общий доступ? Windows может запросить права администратора. После остановки точки устройства отключатся.",
                     "Выключить Wi-Fi", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
                 Present(current, WifiPhase.Stopping);
                 var restored = await IcsWorker.Run(new SharingCommand { Action = "restore", Pair = current.OwnedLease });

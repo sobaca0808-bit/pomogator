@@ -16,6 +16,7 @@
     <Reference Include="System.Runtime.Serialization" />
     <Reference Include="System.Security" />
     <EmbeddedResource Include="assets/wifi.ico" LogicalName="WifiIcon" />
+    <EmbeddedResource Include="assets/wifi.png" LogicalName="WifiMark" />
     <InternalsVisibleTo Include="WifiUiTests" />
     <Compile Remove="tests/**/*.cs" />
   </ItemGroup>

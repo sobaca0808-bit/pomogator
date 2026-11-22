@@ -165,7 +165,15 @@ internal static class SmokeTests
                 var cell = table.GetPositionFromControl(child);
                 Require(cell.Column >= 0 && cell.Row >= 0, "control assigned to a table cell");
                 Require(child.Width > 0 && child.Height > 0, "visible control size");
-                if (child is Button) Require(child.Width >= 29 && child.Height >= 23, "usable button size");
+                if (child is Button button)
+                {
+                    Require(button.Width >= 29 && button.Height >= 23, "usable button size");
+                    if (button.Text.Length > 0)
+                        Require(button.Width >= TextRenderer.MeasureText(button.Text, button.Font).Width, "complete label " + button.Text);
+                    var screen = button.PointToScreen(new Point(0, button.Height - 1));
+                    if (button.FindForm() is WifiWindow main)
+                        Require(main.ClientRectangle.Contains(main.PointToClient(screen)), "main button in viewport");
+                }
             }
             VerifyLayout(child);
         }
