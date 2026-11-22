@@ -323,6 +323,9 @@ Test("Only the authenticated diagnostic inlet can reach the pinned destination",
 });
 Test("Differential diagnosis and Xray event sampling export categories without raw secrets", () => {
     var engine = new TunEngineDiagnostic();
+    Assert(!engine.Started);
+    engine.Read("2026/11/22 [Warning] core: Xray 26.11.9 started");
+    Assert(engine.Started);
     engine.Read("Hit route rule: [pmt-control-vless] marker");
     engine.Read("failed to dial to dest marker");
     engine.Read("REALITY: received real certificate marker");

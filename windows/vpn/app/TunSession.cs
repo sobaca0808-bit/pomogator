@@ -203,7 +203,14 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
                 diagnosticLine: diagnostic.Read, startupExit: diagnostic.Exited);
             if (await Task.WhenAny(start, runtime) == runtime) alive.Cancel();
             engine = await start;
-            var wait = TunReadiness.Wait(() => observation = TunWindows.Observe(record), () => engine.Running,
+            // Xray starts tagged listeners in unspecified order. Its startup marker appears only
+            // after the TUN handler has applied its filters and the other features have started.
+            var wait = TunReadiness.Wait(() =>
+            {
+                var state = TunWindows.Observe(record);
+                return observation = state.Ready && !diagnostic.Started ?
+                    state with { ErrorCode = "TUN_ENGINE_NOT_READY" } : state;
+            }, () => engine.Running,
                 TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(300), alive.Token);
             if (await Task.WhenAny(wait, runtime) == runtime) alive.Cancel();
             observation = await wait;

@@ -4,6 +4,8 @@ internal sealed class TunEngineDiagnostic
 {
     private string? detail;
     private int? exitCode;
+    private int started;
+    internal bool Started => Volatile.Read(ref started) != 0;
     private readonly int[] counters = new int[7];
     private static readonly string[] Labels = [
         "маршрут контрольной пробы выбрал VLESS", "маршрут контрольной пробы отклонён",
@@ -24,6 +26,8 @@ internal sealed class TunEngineDiagnostic
 
     internal void Read(string line)
     {
+        if (System.Text.RegularExpressions.Regex.IsMatch(line, @"Xray \d+\.\d+\.\d+ started\s*$"))
+            Interlocked.Exchange(ref started, 1);
         var known = line.Contains("unable to set routes", StringComparison.OrdinalIgnoreCase) ? "установка маршрутов" :
             line.Contains("unable to set ips", StringComparison.OrdinalIgnoreCase) ? "назначение IPv4" :
             line.Contains("unable to set DNS", StringComparison.OrdinalIgnoreCase) ? "назначение DNS" :
