@@ -1,0 +1,46 @@
+name: ПОМОГАТОР VPN — Windows x64
+
+on:
+  push:
+    branches: [vpn-v0.1.0]
+    paths:
+      - windows/vpn/**
+      - .github/workflows/vpn-windows.yml
+  pull_request:
+    paths:
+      - windows/vpn/**
+      - .github/workflows/vpn-windows.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Install pinned Xray
+        shell: pwsh
+        run: ./windows/vpn/scripts/Get-Xray.ps1 -Destination "$env:RUNNER_TEMP/pomogator-xray"
+      - name: Test profiles, loopback VLESS and WinINet restoration
+        shell: pwsh
+        run: |
+          $env:POMOGATOR_TEST_XRAY = Join-Path $env:RUNNER_TEMP 'pomogator-xray/xray.exe'
+          # The runner is disposable. The test refuses to overwrite an active proxy.
+          $env:POMOGATOR_TEST_WININET = '1'
+          dotnet run --project windows/vpn/tests/Tests.csproj -c Release
+      - name: Build Windows x64 package
+        shell: pwsh
+        run: |
+          dotnet publish windows/vpn/app/PomogatorVpn.csproj -c Release -r win-x64 --self-contained true -o windows/vpn/dist
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item "$env:RUNNER_TEMP/pomogator-xray/*" windows/vpn/dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PomogatorVpn-0.1.0-win-x64
+          path: windows/vpn/dist/

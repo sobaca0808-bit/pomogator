@@ -1,0 +1,51 @@
+<Window x:Class="Pomogator.Vpn.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="ПОМОГАТОР VPN" Width="780" Height="680" MinWidth="590" MinHeight="560"
+        WindowStartupLocation="CenterScreen" Background="#181A1F" Foreground="{StaticResource Text}"
+        FontFamily="Segoe UI" FontSize="14">
+  <Grid Margin="24">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/><RowDefinition Height="*"/>
+    </Grid.RowDefinitions>
+    <DockPanel Margin="0,0,0,18">
+      <TextBlock Text="ПОМОГАТОР VPN" FontSize="25" FontWeight="SemiBold"/>
+      <TextBlock Text="0.1.0" Foreground="{StaticResource Muted}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+    </DockPanel>
+    <Border Grid.Row="1" BorderBrush="{StaticResource Border}" BorderThickness="1" Background="{StaticResource Surface}"
+            CornerRadius="10" Padding="16" Margin="0,0,0,14">
+      <StackPanel>
+        <TextBlock x:Name="Status" Text="Отключено" FontSize="19" FontWeight="SemiBold" TextWrapping="Wrap"/>
+        <TextBlock x:Name="Detail" Text="Выберите профиль для подключения." Foreground="{StaticResource Muted}"
+                   TextWrapping="Wrap" Margin="0,5,0,12"/>
+        <WrapPanel x:Name="Modes">
+          <RadioButton x:Name="LocalMode" Content="Локальный прокси" IsChecked="True" Foreground="{StaticResource Text}" Margin="0,0,16,8"/>
+          <RadioButton x:Name="SystemMode" Content="Системный прокси" Foreground="{StaticResource Text}" Margin="0,0,16,8"/>
+          <RadioButton Content="Туннель (позже)" IsEnabled="False" Foreground="{StaticResource Muted}" Margin="0,0,0,8"/>
+        </WrapPanel>
+        <Button x:Name="Connect" Content="Подключиться" Click="ConnectClick" HorizontalAlignment="Left" MinWidth="178"
+                Margin="0,4,0,0" Foreground="#1C2516" Background="{StaticResource Accent}" FontWeight="SemiBold"/>
+      </StackPanel>
+    </Border>
+    <DockPanel Grid.Row="2" Margin="0,0,0,16">
+      <TextBlock DockPanel.Dock="Top" Text="Серверы" FontWeight="SemiBold" Margin="0,0,0,7"/>
+      <WrapPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
+        <Button x:Name="Paste" Content="Вставить VLESS" Click="PasteClick" Margin="0,0,7,4"/>
+        <Button x:Name="Import" Content="Открыть файл" Click="ImportClick" Margin="0,0,7,4"/>
+        <Button x:Name="Subscribe" Content="Подписка HTTPS" Click="SubscribeClick" Margin="0,0,7,4"/>
+        <Button x:Name="Remove" Content="Удалить" Click="RemoveClick" Margin="0,0,0,4"/>
+      </WrapPanel>
+      <ListBox x:Name="Servers" DisplayMemberPath="Name" SelectionChanged="SelectionChanged"
+               AutomationProperties.Name="Серверы" Background="#1D2026" Foreground="{StaticResource Text}"
+               BorderBrush="{StaticResource Border}" Padding="5"/>
+    </DockPanel>
+    <DockPanel Grid.Row="3" Margin="0,0,0,7">
+      <Button DockPanel.Dock="Right" Content="Экспорт отчёта" Click="ExportClick"/>
+      <TextBlock Text="Журнал диагностики" FontWeight="SemiBold" VerticalAlignment="Center"/>
+    </DockPanel>
+    <TextBox x:Name="LogBox" Grid.Row="4" AutomationProperties.Name="Журнал диагностики" Padding="8"
+             IsReadOnly="True" IsReadOnlyCaretVisible="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
+             Background="#1D2026" Foreground="{StaticResource Text}" BorderBrush="{StaticResource Border}"/>
+  </Grid>
+</Window>
