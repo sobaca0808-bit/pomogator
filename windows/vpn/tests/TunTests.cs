@@ -3,6 +3,10 @@ using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Security;
 using System.Security.Cryptography;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+using Microsoft.Win32.SafeHandles;
 using System.Security.Cryptography.X509Certificates;
 using System.Net.Sockets;
 using System.Text.Json;
@@ -10,6 +14,34 @@ using Pomogator.Vpn;
 
 internal static class NativeTunTests
 {
+    internal static void CheckPrivilegeGuard()
+    {
+        using var user = WindowsIdentity.GetCurrent();
+        var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        var bytes = new byte[administrators.BinaryLength];
+        administrators.GetBinaryForm(bytes, 0);
+        var sid = Marshal.AllocHGlobal(bytes.Length);
+        try
+        {
+            Marshal.Copy(bytes, 0, sid, bytes.Length);
+            var deny = new SidAndAttributes { Sid = sid };
+            if (!CreateRestrictedToken(user.AccessToken, 1, 1, ref deny, 0, IntPtr.Zero, 0, IntPtr.Zero, out var restricted))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            using (restricted)
+                Require(!WindowsIdentity.RunImpersonated(restricted, TunWindows.Administrator),
+                    "TUN privilege gate accepted a restricted token.");
+        }
+        finally { Marshal.FreeHGlobal(sid); }
+    }
+
+    private struct SidAndAttributes { internal IntPtr Sid; internal uint Attributes; }
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateRestrictedToken(SafeAccessTokenHandle token, uint flags, uint disabledCount,
+        ref SidAndAttributes disabled, uint privilegeCount, IntPtr privileges, uint restrictionCount,
+        IntPtr restrictions, out SafeAccessTokenHandle result);
+
     internal static async Task Run(string executable)
     {
         if (!TunWindows.Administrator()) throw new InvalidOperationException("Isolated TUN test requires an administrator.");

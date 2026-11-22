@@ -339,6 +339,7 @@ else Console.WriteLine("SKIP Core integration: set POMOGATOR_TEST_XRAY to the pi
 if (OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable("POMOGATOR_TEST_TUN") == "1")
 {
     if (string.IsNullOrEmpty(executable)) throw new InvalidOperationException("Missing pinned Xray path for TUN CI.");
+    Test("Administrator guard rejects a Windows token with the Administrators SID disabled", NativeTunTests.CheckPrivilegeGuard);
     await NativeTunTests.Run(executable);
     passed++;
 }
