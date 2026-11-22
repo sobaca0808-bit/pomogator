@@ -11,7 +11,7 @@ using Microsoft.Win32.SafeHandles;
 
 namespace Pomogator.Vpn;
 
-internal sealed record TunRequest(string Peer, int SocksPort, string Password, bool Recover, TunBaseline Before);
+internal sealed record TunRequest(string Peer, Profile? Profile, bool Recover, TunBaseline Before);
 internal sealed record TunReply(bool Success, string Message, TunObservation? Observation = null, string? EngineNote = null);
 
 internal sealed class TunSession(TunRecovery record) : IDisposable
@@ -26,19 +26,19 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
 
     private static string PipeName(Guid id) => "PomogatorTun-" + id.ToString("N");
 
-    internal async Task StartAsync(int socksPort, string password, CancellationToken token)
+    internal async Task StartAsync(Profile profile, CancellationToken token)
     {
         if (TunWindows.OtherVpn()) throw new VpnError("Найден другой VPN или UBoost. Выберите локальный прокси либо завершите другой VPN самостоятельно.");
         if (File.Exists(LocalData.TunRecovery) || !TunWindows.Vacant(Record)) throw new VpnError("Имя или идентификатор интерфейса TUN уже занят.");
         LocalData.Save(LocalData.TunRecovery, Record);
-        await Exchange(new TunRequest(Record.Peer, socksPort, password, false, Record.Before), token);
+        await Exchange(new TunRequest(Record.Peer, profile with { Full = null }, false, Record.Before), token);
     }
 
     internal async Task RestoreAsync(CancellationToken token)
     {
         if (!TunWindows.Clean(Record))
         {
-            await Exchange(new TunRequest(Record.Peer, 0, "", true, Record.Before), token);
+            await Exchange(new TunRequest(Record.Peer, null, true, Record.Before), token);
             if (!TunWindows.Clean(Record)) throw new VpnError("Windows не подтвердила удаление интерфейса TUN.");
         }
         File.Delete(LocalData.TunRecovery);
@@ -121,6 +121,8 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
         {
             await channel.ConnectAsync(boot.Token);
             if (!GetNamedPipeServerProcessId(channel.SafePipeHandle, out var server) || server != parent) return 1;
+            using (var caller = Process.GetProcessById(parent))
+                if (!string.Equals(caller.MainModule?.FileName, Environment.ProcessPath, StringComparison.OrdinalIgnoreCase)) return 1;
             var request = await Read<TunRequest>(channel, boot.Token);
             if (!IPAddress.TryParse(request.Peer, out var peer) || peer.AddressFamily != AddressFamily.InterNetwork) return 1;
             record = LocalData.Read<TunRecovery>(LocalData.TunRecovery);
@@ -136,15 +138,15 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
                 return restored ? 0 : 1;
             }
 
-            if (request.SocksPort is < 1024 or > 65535 || request.Password.Length != 48 ||
-                !request.Password.All(Uri.IsHexDigit)) return 1;
-            if (!TunWindows.Vacant(record) || TunWindows.OtherVpn() || new WinInet().Read().InUse ||
+            if (request.Profile is not { Full: null } profile ||
+                profile.Security is not ("tls" or "reality") || profile.Id == Guid.Empty || profile.Port is < 1 or > 65535) return 1;
+            if (!TunWindows.Vacant(record) || TunWindows.OtherVpn() || SystemProxy.AnyInUse() ||
                 !TunWindows.MatchesBaseline(request.Before, TunWindows.Capture(peer)))
                 throw new VpnError("Перед запуском изменился рабочий интерфейс или появился другой VPN. Настройки не применены.");
             console = new TunConsole();
             var port = Xray.FreePort();
             launchingTun = true;
-            var config = TunConfig.Engine(id, peer, request.SocksPort, request.Password, port);
+            var config = TunConfig.Engine(id, peer, profile, port);
             // Start watching the parent before the first network change, including driver initialization.
             using var alive = CancellationTokenSource.CreateLinkedTokenSource(boot.Token);
             var eof = channel.ReadAsync(new byte[1]).AsTask();

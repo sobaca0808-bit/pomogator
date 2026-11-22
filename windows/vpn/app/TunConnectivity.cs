@@ -82,7 +82,20 @@ internal static class TunConnectivity
                     outcome = "UDP: " + Describe(answer, code);
                 }
             }
-            catch (OperationCanceledException) when (!token.IsCancellationRequested) { outcome = "истекло время ответа DNS (DNS_TIMEOUT)"; }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested)
+            {
+                outcome = "UDP: истекло время ответа DNS (DNS_TIMEOUT)";
+                try
+                {
+                    var (tcpAnswer, tcpCode) = await ReadTcp(index, destination, query, token);
+                    if (tcpAnswer == TunDnsAnswer.Resolved)
+                        return new(true, "получен IPv4-ответ по TCP после тайм-аута UDP", watch.ElapsedMilliseconds);
+                    outcome += "; TCP: " + Describe(tcpAnswer, tcpCode);
+                }
+                catch (OperationCanceledException) when (!token.IsCancellationRequested) { outcome += "; TCP: DNS_TIMEOUT"; }
+                catch (SocketException error) { outcome += "; TCP: код Windows " + error.NativeErrorCode; }
+                catch (IOException) { outcome += "; TCP: DNS_INCOMPLETE"; }
+            }
             catch (SocketException error) { outcome = "ошибка сокета Windows " + error.NativeErrorCode; }
             catch (IOException) { outcome = "неполный ответ DNS по TCP (DNS_INCOMPLETE)"; }
         }

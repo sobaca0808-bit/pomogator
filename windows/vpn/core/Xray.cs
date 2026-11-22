@@ -27,6 +27,46 @@ public sealed class Xray : IDisposable
         finally { listener.Stop(); }
     }
 
+    public static async Task<Xray> StartWithPortsAsync(string executable,
+        Func<(string Config, int Port, int[] OtherPorts)> plan, CancellationToken token,
+        Func<Process, IDisposable?> protect, Func<int, int, bool> ownsPort, Action<int>? startupExit = null,
+        Func<string, int, CancellationToken, Task<Xray>>? launch = null)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            token.ThrowIfCancellationRequested();
+            var (config, port, otherPorts) = plan();
+            var collision = 0;
+            Xray? candidate = null;
+            try
+            {
+                candidate = launch != null ? await launch(config, port, token) :
+                    await StartAsync(executable, config, port, token, protect, ownsPort, startupSeconds: 10,
+                        diagnosticLine: line =>
+                        {
+                            if (line.Contains("address already in use", StringComparison.OrdinalIgnoreCase) ||
+                                line.Contains("Only one usage of each socket address", StringComparison.OrdinalIgnoreCase))
+                                Interlocked.Exchange(ref collision, 1);
+                        }, startupExit: startupExit);
+                using var ready = CancellationTokenSource.CreateLinkedTokenSource(token);
+                ready.CancelAfter(TimeSpan.FromSeconds(3));
+                try
+                {
+                    foreach (var additional in otherPorts)
+                        while (!await candidate.IsProxyReadyAsync(additional, ready.Token))
+                            await Task.Delay(100, ready.Token);
+                }
+                catch (OperationCanceledException) when (!token.IsCancellationRequested)
+                { throw new VpnError("Xray не подтвердил один из входов локального прокси.", Check.Proxy); }
+                return candidate;
+            }
+            catch (VpnError error) when (attempt < 3 && !token.IsCancellationRequested &&
+                (error.FailedCheck == Check.Proxy || Volatile.Read(ref collision) != 0))
+            { candidate?.Dispose(); }
+            catch { candidate?.Dispose(); throw; }
+        }
+    }
+
     public static async Task<Xray> StartAsync(string executable, string config, int port, CancellationToken token,
         Func<Process, IDisposable?>? protect = null, Func<int, int, bool>? ownsPort = null, Action? started = null, bool inheritConsole = false, int startupSeconds = 6,
         Action<string>? diagnosticLine = null, Action<int>? startupExit = null)

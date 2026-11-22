@@ -46,7 +46,7 @@ public partial class MainWindow : Window
     private CancellationTokenSource? health;
     private DateTimeOffset? lastCheck;
     private long nextHealthCheck;
-    private bool busy, storageReady, closeRequested, verifying, measuring;
+    private bool busy, storageReady, closeRequested, verifying, manualVerification, measuring;
 
     public MainWindow()
     {
@@ -208,7 +208,7 @@ public partial class MainWindow : Window
         Paste.IsEnabled = Import.IsEnabled = Subscribe.IsEnabled = editable && storageReady;
         Rename.IsEnabled = Remove.IsEnabled = Paste.IsEnabled && selected != null;
         Latency.IsEnabled = selected != null && !measuring && !busy;
-        Verify.IsEnabled = connected && !verifying;
+        Verify.IsEnabled = connected && !manualVerification;
         SelectedServer.Text = selected?.DisplayName ?? "Выберите сервер";
         EmptyServers.Visibility = ProfilesList.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
@@ -278,12 +278,11 @@ public partial class MainWindow : Window
             Detail.Text = "Проверка TCP-порта VPN-сервера…";
             IPAddress? peer = null;
             TunRecovery? recovery = null;
-            string? bridgePassword = null;
             if (tunMode)
             {
                 if (!TunWindows.SupportsWindows)
                     throw new VpnError("Для этого режима нужна Windows 10 22H2 x64 или новее.");
-                if (TunWindows.OtherVpn() || new WinInet().Read().InUse)
+                if (TunWindows.OtherVpn() || SystemProxy.AnyInUse())
                     throw new VpnError("Обнаружен другой VPN, UBoost или активный системный прокси. Выберите локальный прокси или завершите другой клиент самостоятельно.");
                 using var dnsDeadline = CancellationTokenSource.CreateLinkedTokenSource(source.Token);
                 dnsDeadline.CancelAfter(TimeSpan.FromSeconds(5));
@@ -298,7 +297,6 @@ public partial class MainWindow : Window
                 if (peer == null) throw new VpnError("У VPN-сервера нет пригодного IPv4-адреса для TUN.");
                 recovery = new TunRecovery(Guid.NewGuid(), peer.ToString(), TunWindows.Capture(peer),
                     TunConfig.Routes(peer));
-                bridgePassword = Convert.ToHexString(RandomNumberGenerator.GetBytes(24));
             }
             var latency = await Xray.CheckServerAsync(peer == null ? profile : profile with { Host = peer.ToString() }, source.Token);
             LatencyText.Text = $"Задержка TCP до сервера: {Math.Round(latency.TotalMilliseconds)} мс.";
@@ -307,25 +305,21 @@ public partial class MainWindow : Window
             stage = Check.Xray;
             var path = Path.Combine(AppContext.BaseDirectory, "xray.exe");
             if (!File.Exists(path)) throw new VpnError("В комплекте отсутствует xray.exe. Распакуйте архив полностью.");
-            var port = Xray.FreePort();
-            checkPort = tunMode || profile.Full == null ? port : DistinctPort(port);
-            socksPort = tunMode || profile.Full?.SocksTag != null ? DistinctPort(port, checkPort) : null;
-            var config = tunMode ? TunConfig.Bridge(profile, peer!, port, socksPort!.Value, bridgePassword!) :
-                XrayConfig.Create(profile, port, checkPort, socksPort);
             if (tunMode) tunStage = "запуск Xray для выбранного VLESS";
             Detail.Text = "Запуск Xray…";
-            core = await Xray.StartAsync(path, config, port, source.Token,
-                WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback, () =>
-                {
-                    Connection.Record(Check.Xray, CheckResult.Passed);
-                    AddLog("Процесс Xray запущен.");
-                    stage = Check.Proxy;
-                    if (tunMode) tunStage = "проверка локальных портов Xray";
-                    Detail.Text = "Проверка входов локального прокси…";
-                }, startupExit: tunMode ? code => tunEngineNote = BridgeExit(code) : null);
-            if (checkPort != port && !await core.IsProxyReadyAsync(checkPort, source.Token) ||
-                socksPort is { } socks && !await core.IsProxyReadyAsync(socks, source.Token))
-                throw new VpnError("Xray не открыл один из локальных портов профиля.");
+            int port = 0;
+            core = await Xray.StartWithPortsAsync(path, () =>
+            {
+                port = Xray.FreePort();
+                checkPort = tunMode || profile.Full == null ? port : DistinctPort(port);
+                socksPort = !tunMode && profile.Full?.SocksTag != null ? DistinctPort(port, checkPort) : null;
+                var config = tunMode ? XrayConfig.Create(TunConfig.Pinned(profile, peer!), port) :
+                    XrayConfig.Create(profile, port, checkPort, socksPort);
+                return (config, port, new int?[] { checkPort, socksPort }.OfType<int>().Distinct().ToArray());
+            }, source.Token, WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback,
+                startupExit: tunMode ? code => tunEngineNote = BridgeExit(code) : null);
+            Connection.Record(Check.Xray, CheckResult.Passed);
+            AddLog("Процесс Xray запущен.");
             Connection.Record(Check.Proxy, CheckResult.Passed);
             AddLog("Локальные порты принадлежат Xray и принимают подключения.");
 
@@ -334,9 +328,12 @@ public partial class MainWindow : Window
             if (recovery != null)
             {
                 tunStage = "запуск Wintun и подтверждение параметров Windows";
+                using (var preflight = Xray.ThroughProxy(checkPort))
+                    if (await InternetHealth.ProbeAsync(preflight, source.Token) == null)
+                        throw new VpnError("HTTPS через выбранный VLESS недоступен до включения TUN.");
                 Detail.Text = "Ожидание интерфейса, IPv4-адреса, маршрутов и DNS Wintun…";
                 tun = new TunSession(recovery);
-                try { await tun.StartAsync(socksPort!.Value, bridgePassword!, source.Token); }
+                try { await tun.StartAsync(profile, source.Token); }
                 finally
                 {
                     tunEngineNote = tun.EngineNote;
@@ -397,8 +394,10 @@ public partial class MainWindow : Window
             stage = null;
             if (systemMode)
             {
-                proxy.Enable(port);
-                AddLog("Системный прокси включён для текущего пользователя.");
+                proxy.Enable(checkPort);
+                Detail.Text = "Проверяем HTTPS через системный прокси Windows…";
+                await SystemProxy.VerifyAsync(checkPort, source.Token);
+                AddLog("Системный прокси подтверждён запросом Windows и сверкой выходного IP. Chrome проверяется отдельно.");
             }
             health = new CancellationTokenSource();
             ScheduleHealth(healthPolicy.Observe(true));
@@ -522,7 +521,7 @@ public partial class MainWindow : Window
         try
         {
             var tunneling = tun != null;
-            using var routed = NetworkProbeClient();
+            using var routed = Connection.SystemProxy ? SystemProxy.Client(checkPort) : NetworkProbeClient();
             using var proxied = tunneling ? Xray.ThroughProxy(checkPort) : null;
             var routedQuery = InternetHealth.ExternalIpAsync(routed, token);
             var comparable = proxied != null ? await InternetHealth.ExternalIpAsync(proxied, token) : null;
@@ -594,6 +593,11 @@ public partial class MainWindow : Window
                     return;
                 }
             }
+            if (proxy.ScopeChanged)
+            {
+                Stop(true, "Активное подключение Windows изменилось. Подключитесь заново для проверки системного прокси.");
+                return;
+            }
             if (proxy.ReleaseIfChanged())
             {
                 Connection.ReleaseSystemProxy();
@@ -623,7 +627,8 @@ public partial class MainWindow : Window
         var socks = socksPort;
         var failedStage = Check.Xray;
         verifying = true;
-        Verify.Content = "Проверяется…";
+        manualVerification = manual;
+        if (manual) Verify.Content = "Проверяется…";
         Render();
         try
         {
@@ -669,7 +674,7 @@ public partial class MainWindow : Window
             }
             else
             {
-                using var http = NetworkProbeClient();
+                using var http = Connection.SystemProxy ? SystemProxy.Client(checkPort) : NetworkProbeClient();
                 result = await InternetHealth.ProbeAsync(http, token);
             }
             if (token.IsCancellationRequested || core != process) return;
@@ -703,7 +708,8 @@ public partial class MainWindow : Window
         finally
         {
             verifying = false;
-            Verify.Content = "Проверить соединение";
+            manualVerification = false;
+            if (manual) Verify.Content = "Проверить соединение";
             if (!closeRequested) Render();
         }
     }
@@ -912,7 +918,7 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog(this) != true) return;
         try
         {
-            var header = new[] { "ПОМОГАТОР VPN 0.3.1", Status.Text, CoreCheck.Text, ProxyCheck.Text, TrafficCheck.Text,
+            var header = new[] { "ПОМОГАТОР VPN 0.3.2", Status.Text, CoreCheck.Text, ProxyCheck.Text, TrafficCheck.Text,
                 SystemCheck.Text, TunCheck.Text, CheckedAt.Text, "" };
             var observations = tunObservation?.Lines() ?? Enumerable.Empty<string>();
             var probes = tunChecks?.Lines() ?? Enumerable.Empty<string>();

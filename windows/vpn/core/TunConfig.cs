@@ -47,29 +47,19 @@ public static class TunConfig
 
     private static ulong Number(IPAddress ip) => BinaryPrimitives.ReadUInt32BigEndian(ip.GetAddressBytes());
 
-    public static string Bridge(Profile profile, IPAddress peer, int http, int socks, string password)
+    public static Profile Pinned(Profile profile, IPAddress peer)
     {
         var options = new Dictionary<string, string>(profile.Options);
         if (profile.Security == "tls" && profile.Option("sni") == "") options["sni"] = profile.Host;
-        var pinned = profile with { Host = peer.ToString(), Options = options, Full = null };
-        return JsonSerializer.Serialize(new {
-            log = new { loglevel = "none" },
-            inbounds = new object[] {
-                new { listen = "127.0.0.1", port = http, protocol = "http" },
-                new { listen = "127.0.0.1", port = socks, protocol = "socks", settings = new {
-                    auth = "password", accounts = new[] { new { user = "pomogator", pass = password } },
-                    udp = true, ip = "127.0.0.1"
-                } }
-            },
-            outbounds = new[] { XrayConfig.Outbound(pinned, "vpn") }
-        });
+        return profile with { Host = peer.ToString(), Options = options, Full = null };
     }
 
-    public static string Engine(Guid id, IPAddress peer, int socks, string password, int readiness) =>
-        CreateEngine(id, Routes(peer), new[] { "allexceptlan", "[::/0]:all", "misconfigtun" }, socks, password, readiness);
+    public static string Engine(Guid id, IPAddress peer, Profile profile, int readiness) =>
+        CreateEngine(id, Routes(peer), new[] { "allexceptlan", "[::/0]:all", "misconfigtun" },
+            XrayConfig.Outbound(Pinned(profile, peer), "vpn"), readiness);
 
-    // CI runs a real TUN against documentation addresses only, without any other traffic affected.
-    internal static string CreateEngine(Guid id, string[] routes, string[] filters, int socks, string password, int readiness, string resolver = Resolver) =>
+    // CI runs a real TUN against documentation addresses only.
+    internal static string CreateEngine(Guid id, string[] routes, string[] filters, object outbound, int readiness, string resolver = Resolver) =>
         JsonSerializer.Serialize(new {
             log = new { loglevel = "error" },
             inbounds = new object[] {
@@ -82,9 +72,7 @@ public static class TunConfig
                 new { listen = "127.0.0.1", port = readiness, protocol = "http", tag = "readiness" }
             },
             outbounds = new object[] {
-                new { tag = "vpn", protocol = "socks", settings = new {
-                    servers = new[] { new { address = "127.0.0.1", port = socks, users = new[] { new { user = "pomogator", pass = password } } } }
-                } },
+                outbound,
                 new { tag = "block", protocol = "blackhole" }
             },
             routing = new { domainStrategy = "AsIs", rules = new object[] {

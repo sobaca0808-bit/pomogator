@@ -3,9 +3,9 @@ using System.Runtime.InteropServices;
 
 namespace Pomogator.Vpn;
 
-internal sealed class WinInet : IProxySettings
+internal sealed class WinInet(string? connection = null) : IProxySettings
 {
-    // INTERNET_OPTION_PER_CONNECTION_OPTION with a null connection applies to LAN only.
+    // A null connection selects LAN. A RAS entry selects only that entry's proxy settings.
     private const uint PerConnectionOption = 75;
     private const uint Flags = 1, Server = 2, Bypass = 3, Pac = 4, FlagsUi = 10;
 
@@ -44,6 +44,7 @@ internal sealed class WinInet : IProxySettings
                 if (pointer != IntPtr.Zero) GlobalFree(pointer);
             }
             Marshal.FreeHGlobal(list.Options);
+            Marshal.FreeHGlobal(list.Connection);
         }
     }
 
@@ -63,13 +64,14 @@ internal sealed class WinInet : IProxySettings
         finally
         {
             Marshal.FreeHGlobal(list.Options);
+            Marshal.FreeHGlobal(list.Connection);
             Marshal.FreeHGlobal(server);
         }
     }
 
-    private static OptionList Build(Option[] options)
+    private OptionList Build(Option[] options)
     {
-        var list = new OptionList { Size = (uint)Marshal.SizeOf<OptionList>(), Count = (uint)options.Length,
+        var list = new OptionList { Connection = Marshal.StringToHGlobalUni(connection), Size = (uint)Marshal.SizeOf<OptionList>(), Count = (uint)options.Length,
             Options = Marshal.AllocHGlobal(Marshal.SizeOf<Option>() * options.Length) };
         for (var i = 0; i < options.Length; i++) Marshal.StructureToPtr(options[i], At(list, i), false);
         return list;

@@ -166,6 +166,7 @@ Test("Leave proxy changes from another program untouched", () => {
 
 if (OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable("POMOGATOR_TEST_WININET") == "1")
 {
+    Assert(RasProxyScope.Active() == null); // CI has no dial-up connections.
     var windows = new WinInet();
     var initial = windows.Read();
     Assert(!initial.InUse);
@@ -178,6 +179,23 @@ if (OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable("POMOGATOR
     passed++;
 }
 
+Test("Select a single active RAS scope and refuse ambiguous proxy changes", () => {
+    Assert(RasProxyScope.Select(Array.Empty<string>()) == null);
+    Assert(RasProxyScope.Select(new[] { "Broadband", "broadband" }) == "Broadband");
+    Throws(() => RasProxyScope.Select(new[] { "Broadband", "Another connection" }));
+});
+await TestAsync("Xray chooses a fresh port with bounded retries and never retries a profile error", async () => {
+    var plans = 0;
+    var failure = await Fails(() => Xray.StartWithPortsAsync("", () => ("{}", ++plans, Array.Empty<int>()),
+        CancellationToken.None, _ => null, (_, _) => false,
+        launch: (_, _, _) => throw new VpnError("busy", Check.Proxy)));
+    Assert(plans == 3 && failure.FailedCheck == Check.Proxy);
+    plans = 0;
+    await Fails(() => Xray.StartWithPortsAsync("", () => ("{}", ++plans, Array.Empty<int>()),
+        CancellationToken.None, _ => null, (_, _) => false,
+        launch: (_, _, _) => throw new VpnError("profile", Check.Xray)));
+    Assert(plans == 1);
+});
 Test("TUN splits public IPv4 routes around the pinned peer and LAN", () => {
     var peer = IPAddress.Parse("203.0.113.71");
     var routes = TunConfig.Routes(peer).Select(IPNetwork.Parse).ToArray();
@@ -185,9 +203,12 @@ Test("TUN splits public IPv4 routes around the pinned peer and LAN", () => {
         route.Contains(IPAddress.Parse("127.0.0.1"))));
     Assert(routes.Any(route => route.Contains(IPAddress.Parse(TunConfig.Resolver))));
     Assert(routes.Any(route => route.Contains(IPAddress.Parse("203.0.113.70"))));
-    using var config = JsonDocument.Parse(TunConfig.Engine(Guid.NewGuid(), peer, 12345, new string('a', 48), 12346));
+    using var config = JsonDocument.Parse(TunConfig.Engine(Guid.NewGuid(), peer, Profiles.Parse(Base + "?security=tls"), 12346));
     var settings = config.RootElement.GetProperty("inbounds")[0].GetProperty("settings");
     Assert(settings.GetProperty("autoOutboundsInterface").GetString() == "");
+    Assert(config.RootElement.GetProperty("outbounds")[0].GetProperty("protocol").GetString() == "vless");
+    Assert(config.RootElement.GetProperty("outbounds")[0].GetProperty("settings").GetProperty("vnext")[0]
+        .GetProperty("address").GetString() == peer.ToString());
     Assert(settings.GetProperty("autoSystemWfpBlockLeak").EnumerateArray().Any(entry => entry.GetString() == "[::/0]:all"));
 });
 await TestAsync("TUN waits for a slow adapter, tentative IPv4, planned routes and delayed DNS", async () => {

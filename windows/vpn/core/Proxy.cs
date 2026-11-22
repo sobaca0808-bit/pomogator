@@ -12,7 +12,7 @@ public sealed record ProxyState(uint Flags, string Server, string Bypass, string
     internal ProxyState ForLoopback(int port) => this with { Flags = Direct | ExplicitProxy, Server = $"127.0.0.1:{port}" };
 }
 
-public sealed record ProxyRecovery(ProxyState Before, ProxyState Applied);
+public sealed record ProxyRecovery(ProxyState Before, ProxyState Applied, string? Connection = null);
 
 public enum RestoreResult { Restored, AlreadyRestored, ChangedElsewhere }
 

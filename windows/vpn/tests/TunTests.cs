@@ -78,18 +78,12 @@ internal static class NativeTunTests
         });
         using var upstream = await Xray.StartAsync(executable, upstreamConfig, upstreamPort, timeLimit.Token,
             WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback);
-        var clientPort = Xray.FreePort();
-        var socks = Distinct(clientPort);
-        var readiness = Distinct(clientPort, socks);
-        const string password = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        var readiness = Xray.FreePort();
         var client = Profiles.Parse($"vless://{id}@127.0.0.1:{upstreamPort}");
-        using var bridge = await Xray.StartAsync(executable, TunConfig.Bridge(client, IPAddress.Loopback, clientPort, socks, password),
-            clientPort, timeLimit.Token, WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback);
-
-        // This test is intentionally not a default-route test. The runner's connection and DNS are left on its original interface.
+        // Exercise the production shape: Wintun forwards directly to the selected VLESS.
         using var console = new TunConsole();
-        var fixture = TunConfig.CreateEngine(fixtureId, fixtureRoutes,
-            new[] { "[2001:db8:9::/48]:all" }, socks, password, readiness, dnsTarget);
+        var fixture = TunConfig.CreateEngine(fixtureId, fixtureRoutes, new[] { "[2001:db8:9::/48]:all" },
+            XrayConfig.Outbound(client, "vpn"), readiness, dnsTarget);
         var seenIndex = 0;
         Process? child = null;
         IDisposable Track(Process process) { child = process; return WindowsLifetime.Attach(process); }
@@ -204,13 +198,6 @@ internal static class NativeTunTests
         redirect = "127.0.0.1:" + port,
         finalRules = new[] { new { action = "allow", ip = new[] { "127.0.0.1/32" } } }
     } };
-
-    private static int Distinct(params int[] used)
-    {
-        int port;
-        do { port = Xray.FreePort(); } while (used.Contains(port));
-        return port;
-    }
 
     private static async Task AnswerTcp(TcpListener listener, X509Certificate2 certificate, CancellationToken token)
     {
