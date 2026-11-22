@@ -139,26 +139,45 @@ internal static class TunWindows
     internal static async Task<bool> Recover(TunRecovery record, Action<string>? diagnostic = null)
     {
         if (Clean(record)) return true;
-        var adapter = Find(record.Id);
-        // An unrecognized device or foreign additions are left for manual inspection.
-        if (adapter == null) return Refuse("adapter-not-visible");
-        var props = adapter.GetIPProperties();
-        if (props.UnicastAddresses.Any(a => !a.Address.IsIPv6LinkLocal && a.Address.ToString() != TunConfig.Address &&
-                !a.Address.ToString().StartsWith("169.254.", StringComparison.Ordinal)) ||
-            props.DnsAddresses.Any(a => a.ToString() != record.InstalledDns)) return Refuse("unrecognized-address-or-dns");
-        var routes = await ReadRoutes(Index(adapter));
-        if (routes == null) return Refuse("could-not-read-routes");
-        var allowed = (record.InstalledRoutes ?? TunConfig.Routes(IPAddress.Parse(record.Peer))).Concat(new[] {
-            TunConfig.Address + "/32", "198.18.240.0/30", "198.18.240.3/32", "255.255.255.255/32",
-            "224.0.0.0/4", "ff00::/8", "fe80::/64", "169.254.0.0/16"
-        }).ToHashSet();
-        if (routes.Any(route => !allowed.Contains(route) && !(route.StartsWith("fe80:", StringComparison.OrdinalIgnoreCase) &&
-            route.EndsWith("/128", StringComparison.Ordinal)))) return Refuse("unrecognized-route");
-        using var registry = Registry.LocalMachine.OpenSubKey(ConnectionKey(record.Id));
-        var pnp = registry?.GetValue("PnpInstanceID") as string;
+        string? alias;
+        string? pnp;
+        using (var registry = Registry.LocalMachine.OpenSubKey(ConnectionKey(record.Id)))
+        {
+            alias = registry?.GetValue("Name") as string;
+            pnp = registry?.GetValue("PnpInstanceID") as string;
+        }
         if (pnp == null || !(pnp.StartsWith("SWD\\WINTUN\\", StringComparison.OrdinalIgnoreCase) ||
-            pnp.StartsWith("ROOT\\WINTUN\\", StringComparison.OrdinalIgnoreCase))) return Refuse("unrecognized-device-instance");
+            pnp.StartsWith("ROOT\\WINTUN\\", StringComparison.OrdinalIgnoreCase)) ||
+            !string.Equals(alias, TunConfig.Adapter(record.Id), StringComparison.Ordinal))
+            return Refuse("unrecognized-device-instance");
 
+        var adapter = Find(record.Id);
+        if (adapter == null)
+        {
+            // After a hard crash a non-present Wintun can remain registered while IP Helper has no interface.
+            // Verify it is non-present via PnP before removing the exact owned devnode.
+            var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(pnp));
+            var command = "$ErrorActionPreference='Stop'; $instance=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" +
+                encoded + "')); $devices=@(Get-PnpDevice -Class Net -PresentOnly | Where-Object InstanceId -eq $instance); $devices.Count";
+            var present = await PowerShell(command);
+            if (present?.Exit != 0 || present.Value.Output.Trim() != "0")
+                return Refuse("device-visible-to-pnp-only");
+        }
+        else
+        {
+            var props = adapter.GetIPProperties();
+            if (props.UnicastAddresses.Any(a => !a.Address.IsIPv6LinkLocal && a.Address.ToString() != TunConfig.Address &&
+                    !a.Address.ToString().StartsWith("169.254.", StringComparison.Ordinal)) ||
+                props.DnsAddresses.Any(a => a.ToString() != record.InstalledDns)) return Refuse("unrecognized-address-or-dns");
+            var routes = await ReadRoutes(Index(adapter));
+            if (routes == null) return Refuse("could-not-read-routes");
+            var allowed = (record.InstalledRoutes ?? TunConfig.Routes(IPAddress.Parse(record.Peer))).Concat(new[] {
+                TunConfig.Address + "/32", "198.18.240.0/30", "198.18.240.3/32", "255.255.255.255/32",
+                "224.0.0.0/4", "ff00::/8", "fe80::/64", "169.254.0.0/16"
+            }).ToHashSet();
+            if (routes.Any(route => !allowed.Contains(route) && !(route.StartsWith("fe80:", StringComparison.OrdinalIgnoreCase) &&
+                route.EndsWith("/128", StringComparison.Ordinal)))) return Refuse("unrecognized-route");
+        }
         var result = await Run(Path.Combine(Environment.SystemDirectory, "pnputil.exe"), "/remove-device", pnp);
         if (result?.Exit != 0) return Refuse("device-remove-failed");
         return await WaitClean(record, TimeSpan.FromSeconds(5)) || Refuse("device-still-present");
@@ -184,11 +203,13 @@ internal static class TunWindows
     {
         if (index <= 0) return null;
         var command = "$ErrorActionPreference='Stop'; Get-NetRoute -InterfaceIndex " + index + " | Select-Object -ExpandProperty DestinationPrefix";
-        var payload = Convert.ToBase64String(Encoding.Unicode.GetBytes(command));
-        var result = await Run(Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
-            "-NoProfile", "-NonInteractive", "-EncodedCommand", payload);
+        var result = await PowerShell(command);
         return result?.Exit == 0 ? result.Value.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) : null;
     }
+
+    private static Task<(int Exit, string Output)?> PowerShell(string command) =>
+        Run(Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
+            "-NoProfile", "-NonInteractive", "-EncodedCommand", Convert.ToBase64String(Encoding.Unicode.GetBytes(command)));
 
     private static async Task<(int Exit, string Output)?> Run(string executable, params string[] args)
     {
