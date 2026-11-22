@@ -227,7 +227,11 @@ internal static class NativeTunTests
     {
         while (!token.IsCancellationRequested)
         {
-            var packet = await listener.ReceiveAsync(token);
+            UdpReceiveResult packet;
+            try { packet = await listener.ReceiveAsync(token); }
+            // The failed attempt may close its UDP socket while Windows still has a DNS reply queued.
+            // WinSock reports the resulting ICMP port-unreachable on the listener's next receive.
+            catch (SocketException error) when (error.SocketErrorCode == SocketError.ConnectionReset) { continue; }
             var response = packet.Buffer.Length > 12 ? DnsAnswer(packet.Buffer) : packet.Buffer;
             await listener.SendAsync(response, packet.RemoteEndPoint, token);
             echoed();
