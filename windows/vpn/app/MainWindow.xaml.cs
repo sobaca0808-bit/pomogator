@@ -355,6 +355,15 @@ public partial class MainWindow : Window
                     tunStage = tunChecks.FailedStage;
                     throw new VpnError(tunChecks.Failure);
                 }
+                tunStage = "повторное подтверждение интерфейса и маршрутов после проверки трафика";
+                var finalObservation = TunWindows.Observe(recovery);
+                if (finalObservation.Failure is { } readinessFailure)
+                {
+                    tunObservation = finalObservation with { WaitedMilliseconds = tunObservation?.WaitedMilliseconds ?? 0 };
+                    throw new VpnError(readinessFailure);
+                }
+                if (!TunWindows.Same(recovery.Before, TunWindows.Capture(peer!)))
+                    throw new VpnError("Состояние исходного интерфейса изменилось во время проверки TUN.");
                 tunStatus = "TUN: интерфейс, маршруты, системный DNS и HTTPS через Wintun подтверждены. IPv6 блокируется.";
                 peerHost = profile.Host;
                 nextPeerCheck = Environment.TickCount64 + 120000;
@@ -408,7 +417,12 @@ public partial class MainWindow : Window
         {
             if (((error as VpnError)?.FailedCheck ?? stage) is { } failed) Connection.Record(failed, CheckResult.Failed);
             lastCheck = DateTimeOffset.Now;
-            if (tunMode) tunEnd = Explain(error);
+            if (tunMode)
+            {
+                if (tun is { } session && !session.Running)
+                    tunEngineNote = await session.ReadEngineStop() ?? tunEngineNote;
+                tunEnd = Explain(error);
+            }
             Stop(true, Explain(error));
         }
         finally
@@ -482,7 +496,7 @@ public partial class MainWindow : Window
             try
             {
                 var current = TunWindows.Capture(IPAddress.Parse(record.Peer));
-                tunStatus = TunWindows.Same(record.Before, current) && current.InternetRoute == record.Before.InternetRoute
+                tunStatus = TunWindows.MatchesBaseline(record.Before, current)
                     ? "TUN: интерфейс и собственные маршруты удалены. Исходные маршруты и DNS подтверждены."
                     : "TUN: интерфейс удалён. Состояние рабочей сети отличается от исходного.";
             }
@@ -566,7 +580,7 @@ public partial class MainWindow : Window
                 if (!active.Running || !found.Ready ||
                     !TunWindows.Same(active.Record.Before, TunWindows.Capture(IPAddress.Parse(active.Record.Peer))))
                 {
-                    tunObservation = found;
+                    tunObservation = found with { WaitedMilliseconds = tunObservation?.WaitedMilliseconds ?? 0 };
                     var helperStopped = !active.Running;
                     tunStage = helperStopped ? "контроль работы Xray TUN" : "контроль интерфейса, DNS и маршрутов";
                     if (helperStopped)

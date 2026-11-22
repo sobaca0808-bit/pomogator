@@ -274,6 +274,9 @@ Test("TUN detects overlay and UBoost, while PPPoE is a valid uplink", () => {
     var before = new TunBaseline(9, "synthetic", new[] { "192.0.2.2" }, new[] { "192.0.2.53" }, 9);
     Assert(!TunWindows.Same(before, before with { Uplink = 10 }));
     Assert(!TunWindows.Same(before, before with { Addresses = new[] { "192.0.2.3" } }));
+    Assert(TunWindows.MatchesBaseline(before, before with { PublicRoute = 9 })); // Older DPAPI records omit PublicRoute.
+    Assert(!TunWindows.MatchesBaseline(before with { PublicRoute = 9 }, before with { PublicRoute = 42 }));
+    Assert(!TunWindows.MatchesBaseline(before, before with { InternetRoute = 42 }));
 });
 Test("Crash recovery rejects a foreign route gateway, metric or destination", () => {
     var planned = new HashSet<string> { "198.51.100.53/32" };

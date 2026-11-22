@@ -64,7 +64,7 @@ internal static class NativeTunTests
         var httpPort = ((IPEndPoint)httpDestination.LocalEndpoint).Port;
         using var udpDestination = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
         var udpPort = ((IPEndPoint)udpDestination.Client.LocalEndPoint!).Port;
-        using var timeLimit = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+        using var timeLimit = new CancellationTokenSource(TimeSpan.FromSeconds(65));
 
         var upstreamPort = Xray.FreePort();
         var upstreamConfig = JsonSerializer.Serialize(new {
@@ -93,6 +93,23 @@ internal static class NativeTunTests
         var seenIndex = 0;
         Process? child = null;
         IDisposable Track(Process process) { child = process; return WindowsLifetime.Attach(process); }
+
+        using (var failed = await Xray.StartAsync(executable, fixture, readiness, timeLimit.Token, Track,
+            WindowsLifetime.OwnsLoopback, inheritConsole: true, startupSeconds: 24))
+        {
+            try
+            {
+                var missing = IPAddress.Parse("198.51.100.70");
+                var observation = await TunReadiness.Wait(() => TunWindows.Observe(recovery, missing), () => failed.Running,
+                    TimeSpan.FromSeconds(2), TimeSpan.FromMilliseconds(150), timeLimit.Token);
+                Require(!observation.Ready && observation.Failure!.Contains("контрольный HTTPS") &&
+                    observation.AddressReady && observation.DnsReady, "Route failure did not identify the failed stage.");
+            }
+            finally { failed.RequestGracefulStop(console.Signal); }
+        }
+        Require(await TunWindows.WaitClean(recovery, TimeSpan.FromSeconds(5)) &&
+            TunWindows.MatchesBaseline(snapshot, TunWindows.Capture(peer)),
+            "Failed readiness did not restore the initial network before a retry.");
 
         using (var tunnel = await Xray.StartAsync(executable, fixture, readiness, timeLimit.Token, Track,
             WindowsLifetime.OwnsLoopback, inheritConsole: true, startupSeconds: 24))
@@ -160,7 +177,7 @@ internal static class NativeTunTests
 
         Require(await TunWindows.WaitClean(recovery, TimeSpan.FromSeconds(5)), "Normal stop left the Wintun device.");
         Require(TunWindows.Index(web) == beforeWeb && TunWindows.Index(dns) == beforeDns &&
-            TunWindows.Same(snapshot, TunWindows.Capture(peer)), "Initial routes or DNS differ after stop.");
+            TunWindows.MatchesBaseline(snapshot, TunWindows.Capture(peer)), "Initial routes or DNS differ after stop.");
         Require(seenIndex != 0, "No TUN interface was observed.");
 
         using (var crashed = await Xray.StartAsync(executable, fixture, readiness, timeLimit.Token, Track,
@@ -179,7 +196,7 @@ internal static class NativeTunTests
             Require(clean, "Could not clean the adapter left by an abrupt exit: " + diagnostic);
         }
         Require(TunWindows.Index(web) == beforeWeb && TunWindows.Index(dns) == beforeDns &&
-            TunWindows.Same(snapshot, TunWindows.Capture(peer)), "Initial routes or DNS differ after crash recovery.");
+            TunWindows.MatchesBaseline(snapshot, TunWindows.Capture(peer)), "Initial routes or DNS differ after crash recovery.");
         Console.WriteLine("PASS Native Wintun: staged readiness, HTTPS and DNS through VLESS, rejected foreign route, graceful and crash restoration");
     }
 

@@ -13,7 +13,7 @@ using Microsoft.Win32;
 
 namespace Pomogator.Vpn;
 
-internal sealed record TunBaseline(int Uplink, string UplinkId, string[] Addresses, string[] Dns, int InternetRoute);
+internal sealed record TunBaseline(int Uplink, string UplinkId, string[] Addresses, string[] Dns, int InternetRoute, int? PublicRoute = null);
 internal sealed record TunRecovery(Guid Id, string Peer, TunBaseline Before, string[]? InstalledRoutes = null,
     string InstalledDns = TunConfig.Resolver);
 
@@ -59,12 +59,16 @@ internal static class TunWindows
         var props = adapter.GetIPProperties();
         return new TunBaseline(upstream, adapter.Id, props.UnicastAddresses.Select(item => item.Address.ToString())
             .Order().ToArray(), props.DnsAddresses.Select(ip => ip.ToString()).Order().ToArray(),
-            Index(IPAddress.Parse(TunConfig.Resolver)));
+            Index(IPAddress.Parse(TunConfig.Resolver)), Index(IPAddress.Parse(TunConfig.InternetProbe)));
     }
 
     internal static bool Same(TunBaseline expected, TunBaseline actual) =>
         expected.Uplink == actual.Uplink && expected.UplinkId == actual.UplinkId &&
         expected.Addresses.SequenceEqual(actual.Addresses) && expected.Dns.SequenceEqual(actual.Dns);
+
+    internal static bool MatchesBaseline(TunBaseline expected, TunBaseline actual) =>
+        Same(expected, actual) && expected.InternetRoute == actual.InternetRoute &&
+        (expected.PublicRoute == null || expected.PublicRoute == actual.PublicRoute);
 
     internal static NetworkInterface? Find(Guid id) => NetworkInterface.GetAllNetworkInterfaces().FirstOrDefault(
         adapter => adapter.Name == TunConfig.Adapter(id) && Guid.TryParse(adapter.Id, out var guid) && guid == TunConfig.AdapterId(id));

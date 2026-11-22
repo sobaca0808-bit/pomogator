@@ -115,6 +115,7 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
         Xray? engine = null;
         TunConsole? console = null;
         TunObservation? observation = null;
+        bool launchingTun = false;
         var diagnostic = new TunEngineDiagnostic();
         try
         {
@@ -124,7 +125,7 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
             if (!IPAddress.TryParse(request.Peer, out var peer) || peer.AddressFamily != AddressFamily.InterNetwork) return 1;
             record = LocalData.Read<TunRecovery>(LocalData.TunRecovery);
             if (record == null || record.Id != id || record.Peer != peer.ToString() ||
-                !TunWindows.Same(record.Before, request.Before) || record.InstalledDns != TunConfig.Resolver ||
+                !TunWindows.MatchesBaseline(record.Before, request.Before) || record.InstalledDns != TunConfig.Resolver ||
                 record.InstalledRoutes != null && !record.InstalledRoutes.SequenceEqual(TunConfig.Routes(peer))) return 1;
             if (request.Recover)
             {
@@ -138,10 +139,11 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
             if (request.SocksPort is < 1024 or > 65535 || request.Password.Length != 48 ||
                 !request.Password.All(Uri.IsHexDigit)) return 1;
             if (!TunWindows.Vacant(record) || TunWindows.OtherVpn() || new WinInet().Read().InUse ||
-                !TunWindows.Same(request.Before, TunWindows.Capture(peer)))
+                !TunWindows.MatchesBaseline(request.Before, TunWindows.Capture(peer)))
                 throw new VpnError("Перед запуском изменился рабочий интерфейс или появился другой VPN. Настройки не применены.");
             console = new TunConsole();
             var port = Xray.FreePort();
+            launchingTun = true;
             var config = TunConfig.Engine(id, peer, request.SocksPort, request.Password, port);
             // Start watching the parent before the first network change, including driver initialization.
             using var alive = CancellationTokenSource.CreateLinkedTokenSource(boot.Token);
@@ -175,8 +177,12 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
             try
             {
                 if (channel.IsConnected)
-                    await Send(channel, new TunReply(false, error is VpnError ? error.Message :
-                        "Windows отклонила TUN. Код 0x" + error.HResult.ToString("X8") + ".", observation, diagnostic.Description), boot.Token);
+                {
+                    var message = launchingTun && engine == null && error is VpnError ?
+                        "Ядро Xray не завершило запуск Wintun. Подробности в отчёте." :
+                        error is VpnError ? error.Message : "Windows отклонила TUN. Код 0x" + error.HResult.ToString("X8") + ".";
+                    await Send(channel, new TunReply(false, message, observation, diagnostic.Description), boot.Token);
+                }
             }
             catch { }
             return 1;
