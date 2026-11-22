@@ -109,7 +109,6 @@ namespace PomogatorWifi
         private TableLayoutPanel Footer()
         {
             var row = Columns(0, 0, 66);
-            row.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             var setup = Theme.Button("Настроить сеть", (_, __) => OpenSettings());
             var diagnostics = Theme.Button("Диагностика", (_, __) => OpenDiagnostics());
             setup.Margin = new Padding(0, 7, 7, 11);
@@ -135,6 +134,7 @@ namespace PomogatorWifi
         {
             var table = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = widths.Length, RowCount = 1,
                 BackColor = Color.Transparent, Margin = Padding.Empty };
+            table.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             foreach (var width in widths) table.ColumnStyles.Add(width == 0 ? new ColumnStyle(SizeType.Percent, 100) : new ColumnStyle(SizeType.Absolute, width));
             return table;
         }

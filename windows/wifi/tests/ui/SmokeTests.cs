@@ -168,6 +168,7 @@ internal static class SmokeTests
                 if (child is Button button)
                 {
                     Require(button.Width >= 29 && button.Height >= 23, "usable button size");
+                    Require(button.Parent.ClientRectangle.Contains(button.Bounds), "button fully visible within its panel");
                     if (button.Text.Length > 0)
                         Require(button.Width >= TextRenderer.MeasureText(button.Text, button.Font).Width, "complete label " + button.Text);
                     var screen = button.PointToScreen(new Point(0, button.Height - 1));
