@@ -1,5 +1,7 @@
 using System.ComponentModel;
 using System.Net;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Pomogator.Vpn;
@@ -15,13 +17,14 @@ internal sealed class TunSocketDiagnostic(IPAddress peer, int port, bool rawTran
         @"\b(?:dial|read|write) (?:tcp[46]?|udp[46]?) (?:(?:" + Endpoint + @")->)?(?<target>" + Endpoint + @")(?![\d.])",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     private static readonly Regex NativeCode = new(
-        @"\b(?:errno|winsock|socket error|wsa(?:error)?)\s*[:= ]\s*(?<code>100\d\d)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        @"\b(?:errno|winsock|socket error|wsa(?:error)?|winapi error)\s*[:= #]\s*(?<code>100\d\d)\b",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     private static readonly int[] Winsock = [10013, 10022, 10024, 10035, 10048, 10049, 10050, 10051, 10052, 10053, 10054,
         10055, 10057, 10060, 10061, 10064, 10065];
     private static readonly (int Code, string Message)[] Localized = OperatingSystem.IsWindows() ?
-        Winsock.Select(code => (Code: code, Message: new Win32Exception(code).Message.Trim().TrimEnd('.')))
+        Winsock.SelectMany(WindowsMessages).Distinct()
             .Where(entry => entry.Message.Length > 12).GroupBy(entry => entry.Message, StringComparer.OrdinalIgnoreCase)
-            .Where(group => group.Count() == 1).Select(group => group.Single()).ToArray() : [];
+            .Where(group => group.Select(entry => entry.Code).Distinct().Count() == 1).Select(group => group.First()).ToArray() : [];
 
     private readonly Dictionary<uint, Flow> flows = new();
     private readonly Dictionary<string, int> events = new();
@@ -140,9 +143,27 @@ internal sealed class TunSocketDiagnostic(IPAddress peer, int port, bool rawTran
         return flows[id] = new Flow();
     }
 
-    private string Destination(string literal) =>
-        IPEndPoint.TryParse(literal, out var target) ? target.Address.Equals(peer) && target.Port == port ?
-            "IP:порт VPN-сервера" : "другой IP:порт" : "назначение не подтверждено";
+    private string Destination(string literal)
+    {
+        if (!IPEndPoint.TryParse(literal, out var target)) return "назначение не подтверждено";
+        if (target.Address.Equals(peer) && target.Port == port) return "IP:порт VPN-сервера";
+        if (target.Port == 443 && target.Address.ToString() == TunConfig.InternetProbe) return "контрольный HTTPS-адрес";
+        if (target.Port == 53 && target.Address.ToString() == TunConfig.Resolver) return "DNS-адрес Wintun";
+        return IPAddress.IsLoopback(target.Address) ? "другой loopback IP:порт" : "другой IP:порт";
+    }
+
+    private static IEnumerable<(int Code, string Message)> WindowsMessages(int code)
+    {
+        // The Go runtime requests en-US first, even on a localized Windows installation.
+        var buffer = new StringBuilder(300);
+        if (FormatMessage(0x3200, IntPtr.Zero, (uint)code, 0x0409, buffer, buffer.Capacity, IntPtr.Zero) != 0)
+            yield return (code, buffer.ToString().Trim().TrimEnd('.'));
+        yield return (code, new Win32Exception(code).Message.Trim().TrimEnd('.'));
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "FormatMessageW", CharSet = CharSet.Unicode)]
+    private static extern uint FormatMessage(uint flags, IntPtr source, uint code, uint language, StringBuilder buffer,
+        int size, IntPtr arguments);
 
     private void Add(string label)
     {

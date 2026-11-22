@@ -375,7 +375,7 @@ Test("Correlate known socket destinations and separate raw TCP, TLS and VLESS fa
     events.Read("[Info] [192] transport/internet/tcp: dialing TCP to tcp:203.0.113.71:443");
     events.Read("[Info] [193] app/dispatcher: Hit route rule: [pmt-wintun-probe] so taking detour [vpn] for [tcp:1.1.1.1:443]");
     events.Read("[Info] [192] app/proxyman/outbound: failed to process outbound traffic > proxy/vless/outbound: failed to find an available destination > [transport/internet/tcp: failed to dial to dest > dial tcp 192.0.2.31:0->203.0.113.71:443: connectex: WinSock 10061]");
-    events.Read("[Info] [193] app/proxyman/outbound: failed to process outbound traffic > proxy/vless/outbound: failed to find an available destination > [read tcp 192.0.2.31:35158->203.0.113.8:1443: wsarecv: WinSock 10054]");
+    events.Read("[Info] [193] app/proxyman/outbound: failed to process outbound traffic > proxy/vless/outbound: failed to find an available destination > [read tcp 192.0.2.31:35158->203.0.113.8:1443: wsarecv: winapi error #10054]");
     events.Read("[Info] app/dispatcher: Hit route rule: [pmt-doh-vless] so taking detour [vpn] for [tcp:dns.quad9.net:443]");
     events.Read("[Info] app/proxyman/outbound: failed to process outbound traffic > proxy/vless/outbound: failed to decode response header > EOF");
     events.Read("[Error] app/dns: failed to retrieve response for fixture-secret");
