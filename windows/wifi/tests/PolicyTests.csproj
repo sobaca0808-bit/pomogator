@@ -15,5 +15,6 @@
     <Compile Include="../Session.cs" Link="Session.cs" />
     <Compile Include="../HostedTarget.cs" Link="HostedTarget.cs" />
     <Compile Include="../HostedNetwork.cs" Link="HostedNetwork.cs" />
+    <Compile Include="../ClientObservation.cs" Link="ClientObservation.cs" />
   </ItemGroup>
 </Project>

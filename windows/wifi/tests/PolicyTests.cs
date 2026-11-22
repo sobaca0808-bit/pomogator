@@ -15,6 +15,66 @@ var ethernet = new Connection { Id = Guid.NewGuid(), Name = "Обычный Ethe
 var second = new Connection { Id = Guid.NewGuid(), Name = "Второй PPPoE", Media = MediaType.Pppoe, Status = ConnectionStatus.Connected };
 var connections = new List<Connection> { ethernet, source, target };
 var tests = new (string Name, Action Run)[] {
+    ("Distinguish an active point with zero clients, WPA2, IPv4 and ICS", () => {
+        var observation = new ClientObservation();
+        observation.Sample(HostedNetwork.State.Active, target.Id, 0, ClientIpv4.Unknown);
+        Check(observation.Lines().Any(line => line.Contains("Hosted Network запущена")));
+        Check(observation.Lines().Any(line => line.Contains("не подтвердила аутентификацию")));
+        Check(observation.Lines().Any(line => line.StartsWith("ICS") && line.Contains("после аутентификации")));
+        observation.Sample(HostedNetwork.State.Active, target.Id, 1, ClientIpv4.AwaitingEvidence);
+        Check(observation.Lines().Any(line => line.Contains("видела аутентифицированного")));
+        Check(observation.Lines().Any(line => line.Contains("адрес клиента не подтверждён")));
+        observation.Sample(HostedNetwork.State.Active, target.Id, 1, ClientIpv4.Reachable);
+        Check(observation.Lines().Any(line => line.Contains("DHCP отдельно не подтверждена")));
+        observation.Sample(HostedNetwork.State.Active, second.Id, 0, ClientIpv4.Unknown);
+        Check(observation.Lines().Any(line => line.Contains("адаптер сменился")));
+        Check(observation.Lines().Any(line => line.Contains("не подтвердила аутентификацию")));
+    }),
+    ("Read documented WLAN peer notification layouts without retaining peer identifiers", () => {
+        var data = Marshal.AllocHGlobal(28);
+        try
+        {
+            for (var i = 0; i < 28; i++) Marshal.WriteByte(data, i, 0);
+            for (var i = 0; i < 6; i++) Marshal.WriteByte(data, 12 + i, 0xAA);
+            Marshal.WriteInt32(data, 20, 1);
+            Marshal.WriteInt32(data, 24, 20);
+            Check(HostedTraceEvent.Read(target.Id, HostedTraceEvent.PeerChange, 27, data) == null);
+            var item = HostedTraceEvent.Read(target.Id, HostedTraceEvent.PeerChange, 28, data);
+            Check(item.PeerAuthenticated && item.Reason == 20 && !item.Line().Contains("AA-AA"));
+            var observation = new ClientObservation();
+            observation.Sample(HostedNetwork.State.Active, target.Id, 0, ClientIpv4.Unknown);
+            observation.Observe(item);
+            Check(observation.Lines().Any(line => line.Contains("видела аутентифицированного")));
+            Check(observation.Lines().Any(line => line.Contains("адрес клиента не подтверждён")));
+            Marshal.WriteInt32(data, 20, 0);
+            Check(!HostedTraceEvent.Read(target.Id, HostedTraceEvent.PeerChange, 28, data).PeerAuthenticated);
+        }
+        finally { Marshal.FreeHGlobal(data); }
+    }),
+    ("Correlate IPv4 evidence only with reachable current peers on the hosted adapter", () => {
+        var table = Marshal.AllocHGlobal(96);
+        try
+        {
+            for (var i = 0; i < 96; i++) Marshal.WriteByte(table, i, 0);
+            var row = IntPtr.Add(table, 8);
+            Marshal.WriteInt32(table, 1);
+            Marshal.WriteInt16(row, 2);
+            Marshal.WriteByte(row, 4, 169);
+            Marshal.WriteByte(row, 5, 254);
+            Marshal.WriteInt32(row, 28, 7);
+            Marshal.WriteInt32(row, 40, 42);
+            Marshal.WriteInt32(row, 72, 6);
+            Marshal.WriteInt32(row, 76, 5);
+            Check(ClientObservation.ReadIpv4Table(table, 8, new ulong[] { 42 }) == ClientIpv4.AwaitingEvidence);
+            Check(ClientObservation.ReadIpv4Table(table, 7, new ulong[] { 43 }) == ClientIpv4.AwaitingEvidence);
+            Check(ClientObservation.ReadIpv4Table(table, 7, new ulong[] { 42 }) == ClientIpv4.LinkLocal);
+            Marshal.WriteByte(row, 4, 192);
+            Check(ClientObservation.ReadIpv4Table(table, 7, new ulong[] { 42 }) == ClientIpv4.Reachable);
+            Marshal.WriteInt32(row, 76, 4); // stale neighbor
+            Check(ClientObservation.ReadIpv4Table(table, 7, new ulong[] { 42 }) == ClientIpv4.AwaitingEvidence);
+        }
+        finally { Marshal.FreeHGlobal(table); }
+    }),
     ("Match Windows SDK COM interface GUIDs, vtable slots and marshaling", () => {
         CheckCom<INetSharingManager>("C08956B7-1CD3-11D1-B1C5-00805FC1270E", ComInterfaceType.InterfaceIsDual,
             "GetSharingInstalled", "_VtblGap1_2", "GetConfiguration", "GetEveryConnection", "GetConnectionProps");

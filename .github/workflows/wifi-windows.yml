@@ -2,7 +2,7 @@ name: ПОМОГАТОР Wi-Fi · Windows x64
 
 on:
   push:
-    branches: [wifi-v0.2.0]
+    branches: [wifi-v0.2.0, wifi-client-diagnostics]
   workflow_dispatch:
 
 permissions:
@@ -43,11 +43,11 @@ jobs:
             Set-Content bundle/SHA256.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: PomogatorWifi-0.2.3-win-x64
+          name: PomogatorWifi-0.2.4-win-x64
           path: bundle/
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
-          name: PomogatorWifi-0.2.3-screenshots
+          name: PomogatorWifi-0.2.4-screenshots
           path: screenshots/
           if-no-files-found: error
