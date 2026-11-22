@@ -2,6 +2,7 @@ using System;
 using System.Drawing;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace PomogatorWifi
 {
@@ -44,7 +45,11 @@ namespace PomogatorWifi
             Controls.Add(root);
             ConfigureTray();
             timer.Tick += async (_, __) => await Poll();
-            if (!testing) Shown += async (_, __) => await Startup();
+            if (!testing)
+            {
+                Shown += async (_, __) => await Startup();
+                SystemEvents.PowerModeChanged += PowerModeChanged;
+            }
             Present(report);
         }
 
@@ -74,7 +79,7 @@ namespace PomogatorWifi
             var center = Columns(0, 146, 0);
             power.Dock = DockStyle.Fill;
             power.Margin = new Padding(0, 1, 0, 0);
-            power.Click += async (_, __) => await TogglePower();
+            power.Click += async (_, __) => await TogglePower("window");
             center.Controls.Add(power, 1, 0);
             phaseText.TextAlign = ContentAlignment.MiddleCenter;
             description.TextAlign = ContentAlignment.TopCenter;
@@ -115,7 +120,7 @@ namespace PomogatorWifi
             diagnostics.Margin = new Padding(1, 7, 7, 11);
             row.Controls.Add(setup, 0, 0);
             row.Controls.Add(diagnostics, 1, 0);
-            var version = Theme.Label("v0.2.0", 9, Theme.Muted);
+            var version = Theme.Label("v0.2.1", 9, Theme.Muted);
             version.TextAlign = ContentAlignment.MiddleRight;
             row.Controls.Add(version, 2, 0);
             return row;
@@ -147,7 +152,7 @@ namespace PomogatorWifi
             menu.Items.Add(trayPower);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("Выход", null, (_, __) => { if (!busy) { exiting = true; Close(); } });
-            trayPower.Click += async (_, __) => await TogglePower();
+            trayPower.Click += async (_, __) => await TogglePower("tray");
             tray.ContextMenuStrip = menu;
             tray.DoubleClick += (_, __) => ShowWindow();
             tray.Visible = !testing;
@@ -180,6 +185,7 @@ namespace PomogatorWifi
         {
             if (disposing)
             {
+                if (!testing) SystemEvents.PowerModeChanged -= PowerModeChanged;
                 timer.Dispose();
                 tray.Visible = false;
                 tray.ContextMenuStrip?.Dispose();
@@ -191,6 +197,8 @@ namespace PomogatorWifi
 
         internal void Present(WifiReport value, WifiPhase? transient = null)
         {
+            if (!testing && report.Phase != value.Phase)
+                Local.Log("wifi_phase_changed", $"from={report.Phase} to={value.Phase}");
             report = value;
             shown = transient ?? value.Phase;
             var state = Title(shown);
@@ -206,7 +214,8 @@ namespace PomogatorWifi
                 value.Phase == WifiPhase.Off ? "—" : "Недоступно";
             power.Phase = shown;
             power.Enabled = !busy && (value.Phase == WifiPhase.Off || value.Phase == WifiPhase.Owned);
-            power.AccessibleName = value.Phase == WifiPhase.Owned ? "Выключить Wi-Fi" : "Включить Wi-Fi";
+            power.AccessibleName = value.Phase == WifiPhase.Owned ? "Выключить Wi-Fi" :
+                value.Phase == WifiPhase.Off && value.Owner != Guid.Empty ? "Восстановить Wi-Fi" : "Включить Wi-Fi";
             trayState.Text = "Wi-Fi: " + state;
             trayPower.Text = power.AccessibleName;
             trayPower.Enabled = power.Enabled;
@@ -253,6 +262,7 @@ namespace PomogatorWifi
             {
                 case WifiPhase.Owned: return "Wi-Fi включён";
                 case WifiPhase.External: return "Внешняя точка работает";
+                case WifiPhase.Unconfirmed: return "Уточняем управление Wi-Fi";
                 case WifiPhase.Starting: return "Включение Wi-Fi";
                 case WifiPhase.Stopping: return "Отключение Wi-Fi";
                 case WifiPhase.Error: return "Требуется внимание";
@@ -270,9 +280,8 @@ namespace PomogatorWifi
             {
                 case WifiPhase.Owned: return report.Sharing == SharingState.Verified ? "Точка под управлением ПОМОГАТОРА." :
                     "Точка работает. Общий доступ можно проверить в диагностике.";
-                case WifiPhase.External: return report.Mechanism == "Hosted Network" ?
-                    "Для перехода остановите Hosted Network там, где включили." :
-                    "Проверьте «Мобильный хот-спот» в настройках Windows.";
+                case WifiPhase.External: return "Точка продолжает работать вне управления ПОМОГАТОРА.";
+                case WifiPhase.Unconfirmed: return "Ждём подтверждения сеанса. Настройки раздачи сохранены.";
                 case WifiPhase.Starting: return "Проверяем подключение и запускаем точку доступа.";
                 case WifiPhase.Stopping: return "Завершаем сеанс ПОМОГАТОРА.";
                 case WifiPhase.Unavailable: return report.HasWifi == false ? "Подключите USB Wi-Fi-адаптер и откройте диагностику." :
@@ -288,10 +297,10 @@ namespace PomogatorWifi
         private async Task<WifiReport> Read()
         {
             if (reading == null || reading.IsCompleted) reading = NetworkReading.OnSta(NetworkReading.Read);
-            if (await Task.WhenAny(reading, Task.Delay(6500)) != reading)
+            if (await Task.WhenAny(reading, Task.Delay(7500)) != reading)
             {
                 Local.Log("network_read_timeout");
-                return new WifiReport { Phase = WifiPhase.Unavailable, Mechanism = "Истекло время проверки Windows" };
+                return new WifiReport { Phase = WifiPhase.Unconfirmed, Mechanism = "Истекло время проверки Windows" };
             }
             return await reading;
         }
@@ -309,8 +318,8 @@ namespace PomogatorWifi
                 if (WifiRules.AutoStart(settings.AutoWifi, current.Phase,
                     current.Owner != Guid.Empty || !string.IsNullOrEmpty(settings.Password)))
                 {
-                    if (current.Owner == Guid.Empty) await Start(true);
-                    else await Recover(current.Owner);
+                    if (current.Owner == Guid.Empty) await Start(true, "automation");
+                    else await Recover(current.Owner, "automation", true);
                     Present(await Read());
                 }
             }
@@ -325,6 +334,21 @@ namespace PomogatorWifi
             internetChecked = DateTime.UtcNow;
         }
 
+        private void PowerModeChanged(object sender, PowerModeChangedEventArgs args)
+        {
+            if (args.Mode != PowerModes.Resume || IsDisposed || !IsHandleCreated) return;
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    if (!settings.AutoRestore || report.Owner == Guid.Empty) return;
+                    recovery.Resumed(report.Owner);
+                    _ = Poll();
+                }));
+            }
+            catch (InvalidOperationException) { }
+        }
+
         private async Task Poll()
         {
             if (busy || polling) return;
@@ -335,14 +359,15 @@ namespace PomogatorWifi
                 if (busy || IsDisposed) return;
                 Present(current, message == null ? null : (WifiPhase?)WifiPhase.Error);
                 var upstream = current.Pppoe == false || internetWasAvailable && internet == false ? false : current.Pppoe;
-                if (recovery.Observe(settings.AutoRestore, current.Owner != Guid.Empty, upstream))
+                if (current.Phase != WifiPhase.Unconfirmed &&
+                    recovery.Observe(settings.AutoRestore, current.Owner, upstream, current.Phase == WifiPhase.Off || current.CanRepair))
                 {
                     await Execute(async () =>
                     {
                         if (current.Phase == WifiPhase.Off)
                         {
                             Present(current, WifiPhase.Starting);
-                            await Recover(current.Owner);
+                            await Recover(current.Owner, "automation", true);
                             current = await Read();
                             Present(current);
                         }
@@ -363,47 +388,60 @@ namespace PomogatorWifi
             finally { polling = false; }
         }
 
-        private async Task TogglePower()
+        private async Task TogglePower(string origin)
         {
             if (busy || !power.Enabled) return;
-            if (report.Phase == WifiPhase.Off && report.Owner == Guid.Empty && string.IsNullOrEmpty(settings.Password)) { OpenSettings(); return; }
+            var requested = report;
+            if (requested.Phase == WifiPhase.Off && requested.Owner == Guid.Empty && string.IsNullOrEmpty(settings.Password)) { OpenSettings(); return; }
             await Execute(async () =>
             {
                 var current = await Read();
                 Present(current);
-                if (current.Phase == WifiPhase.Off && current.Owner != Guid.Empty)
+                if (!WifiRules.SamePowerIntent(requested.Phase, requested.Owner, requested.Adapter,
+                    current.Phase, current.Owner, current.Adapter))
+                    throw new WifiError("Состояние точки изменилось. Проверьте его перед повторным нажатием.");
+
+                if (requested.Phase == WifiPhase.Owned) await Stop(current, origin);
+                else if (requested.Owner == Guid.Empty) await Start(false, origin);
+                else
                 {
                     Present(current, WifiPhase.Starting);
-                    await Recover(current.Owner);
+                    await Recover(current.Owner, origin, false);
                 }
-                else if (current.Phase == WifiPhase.Off) await Start(false);
-                else if (current.Phase == WifiPhase.Owned) await Stop(current);
             });
         }
 
-        private static async Task Recover(Guid owner)
+        private static async Task Recover(Guid owner, string origin, bool automatic)
         {
-            var result = await NetworkReading.OnSta(() => PomogatorWifi.Owner.Request(new OwnerRequest { Command = "recover", Owner = owner }));
+            var result = await NetworkReading.OnSta(() => PomogatorWifi.Owner.Request(new OwnerRequest
+                { Command = "recover", Owner = owner, Origin = origin, Automatic = automatic }));
             if (result == null || !result.Active || result.Owner != owner || result.Error != null)
                 throw new WifiError(result?.Error ?? "Windows не подтвердила восстановление точки Wi-Fi. Откройте диагностику.");
         }
 
-        private async Task Start(bool automatic)
+        private async Task Start(bool automatic, string origin)
         {
             Present(report, WifiPhase.Starting);
             var check = ReadInternet();
             await check;
-            var start = await NetworkReading.OnSta(() => PomogatorWifi.Owner.Start(settings.Ssid, settings.Password, automatic));
+            var start = await NetworkReading.OnSta(() => PomogatorWifi.Owner.Start(settings.Ssid, settings.Password, automatic, origin));
             if (!start.Active || start.Error != null) throw new WifiError(start.Error ?? "Windows не подтвердила запуск Wi-Fi.");
             for (var attempt = 0; attempt < 8; attempt++)
             {
                 var current = await Read();
+                Present(current);
+                if (current.Phase == WifiPhase.Unconfirmed)
+                {
+                    await Task.Delay(300);
+                    continue;
+                }
                 if (current.Phase != WifiPhase.Owned || current.Owner != start.Owner)
                     throw new WifiError("Windows не подтвердила, что точка остаётся включённой.");
-                Present(current);
                 if (automatic || current.Candidate != null || current.Sharing == SharingState.Verified || current.Pppoe != true) break;
                 await Task.Delay(300);
             }
+            if (report.Phase != WifiPhase.Owned || report.Owner != start.Owner)
+                throw new WifiError("Windows пока не подтверждает управление точкой Wi-Fi.");
             if (!automatic && report.Candidate != null) await AskSharing();
         }
 
@@ -418,7 +456,7 @@ namespace PomogatorWifi
             if (!result.Success) throw new WifiError(result.Message);
         }
 
-        private async Task Stop(WifiReport current)
+        private async Task Stop(WifiReport current, string origin)
         {
             if (current.OwnedLease != null)
             {
@@ -433,7 +471,7 @@ namespace PomogatorWifi
                     throw new WifiError(restored.Message);
             }
             Present(current, WifiPhase.Stopping);
-            var result = await NetworkReading.OnSta(() => PomogatorWifi.Owner.Request(new OwnerRequest { Command = "stop", Owner = current.Owner }));
+            var result = await NetworkReading.OnSta(() => PomogatorWifi.Owner.Request(new OwnerRequest { Command = "stop", Owner = current.Owner, Adapter = current.Adapter, Origin = origin }));
             if (result == null || result.Error != null || result.Owner != Guid.Empty)
                 throw new WifiError(result?.Error ?? "Windows не подтвердила завершение сеанса.");
         }
@@ -450,10 +488,11 @@ namespace PomogatorWifi
             {
                 if (!IsDisposed)
                 {
-                    try { report = await Read(); }
+                    var current = report;
+                    try { current = await Read(); }
                     catch (Exception error) { Failed(error); }
                     busy = false;
-                    if (!IsDisposed) Present(report, message == null ? null : (WifiPhase?)WifiPhase.Error);
+                    if (!IsDisposed) Present(current, message == null ? null : (WifiPhase?)WifiPhase.Error);
                 }
             }
         }

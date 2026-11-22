@@ -123,35 +123,29 @@ namespace PomogatorWifi
             SafeProcessHandle process, int flags, StringBuilder path, ref int length);
     }
 
-    public sealed class OwnerRequest
-    {
-        public string Command { get; set; }
-        public Guid Owner { get; set; }
-        public string Ssid { get; set; }
-        public string Password { get; set; }
-        public bool Automatic { get; set; }
-    }
-
-    public sealed class OwnerReply
-    {
-        public Guid Owner { get; set; }
-        public Guid Adapter { get; set; }
-        public bool Active { get; set; }
-        public string Error { get; set; }
-    }
-
     internal static class Owner
     {
         private static string Name => "PomogatorWifi.Owner." + Wire.UserSession;
+        private static string GuardName => @"Local\PomogatorWifi.Owner." + Wire.UserSession;
 
-        internal static OwnerReply Request(OwnerRequest request, int connectMs = 450)
+        internal static bool Exists()
         {
-            using (var pipe = new NamedPipeClientStream(".", Name, PipeDirection.InOut, PipeOptions.Asynchronous))
+            if (!Mutex.TryOpenExisting(GuardName, out var guard)) return false;
+            guard.Dispose();
+            return true;
+        }
+
+        internal static OwnerReply Request(OwnerRequest request, int connectMs = 700) =>
+            Exchange(Name, request, connectMs, pipe => Wire.ValidatePeer(pipe, true));
+
+        internal static OwnerReply Exchange(string name, OwnerRequest request, int connectMs, Func<PipeStream, bool> verify)
+        {
+            using (var pipe = new NamedPipeClientStream(".", name, PipeDirection.InOut, PipeOptions.Asynchronous))
             {
                 try { pipe.Connect(connectMs); }
                 catch (TimeoutException) { return null; }
-                if (!Wire.ValidatePeer(pipe, true)) throw new WifiError("Другой экземпляр программы держит сеанс. Откройте ту же копию утилиты.");
-                using (var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(8)))
+                if (!verify(pipe)) throw new WifiError("Сеанс принадлежит другой копии программы.");
+                using (var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
                 {
                     Wire.Write(pipe, request, deadline.Token).GetAwaiter().GetResult();
                     return Wire.Read<OwnerReply>(pipe, deadline.Token).GetAwaiter().GetResult();
@@ -159,88 +153,87 @@ namespace PomogatorWifi
             }
         }
 
-        internal static OwnerReply Start(string ssid, string password, bool automatic)
+        internal static OwnerReply Start(string ssid, string password, bool automatic, string origin)
         {
-            if (Request(new OwnerRequest { Command = "status" }, 120) == null)
+            if (!Exists())
                 using (Process.Start(new ProcessStartInfo(Wire.Executable, "--wifi-owner") { UseShellExecute = false, CreateNoWindow = true })) { }
-            return Request(new OwnerRequest { Command = "start", Ssid = ssid, Password = password, Automatic = automatic }, 3500)
+            return Request(new OwnerRequest { Command = "start", Ssid = ssid, Password = password, Automatic = automatic, Origin = origin }, 3500)
                 ?? throw new WifiError("Не удалось связаться с помощником точки доступа.");
         }
 
         internal static int Serve()
         {
-            using (var guard = new Mutex(true, @"Local\PomogatorWifi.Owner." + Wire.UserSession, out var first))
+            using (var guard = new Mutex(true, GuardName, out var first))
             {
                 if (!first) return 0;
-                using (var wlan = new HostedNetwork())
+                using (var wlan = new HostedNetwork(monitor: true))
                 {
-                    var token = Guid.Empty;
-                    string ssid = null, password = null;
-                    var idle = Stopwatch.StartNew();
-                    while (token != Guid.Empty || idle.Elapsed < TimeSpan.FromSeconds(15))
+                    var session = new OwnerSession(wlan.Query, () => wlan.Interruptions, () => wlan.InterruptionReason,
+                        (ssid, password, automatic) => StartChecked(wlan, ssid, password, automatic), wlan.Stop, Local.Log);
+                    try { ServeTransport(Name, session, pipe => Wire.ValidatePeer(pipe, false), Local.Log); }
+                    finally
                     {
-                        using (var pipe = Wire.Server(Name))
-                        using (var connect = new CancellationTokenSource(TimeSpan.FromSeconds(2)))
-                        {
-                            try { pipe.WaitForConnectionAsync(connect.Token).GetAwaiter().GetResult(); }
-                            catch (Exception error) when (error is OperationCanceledException || error is IOException) { continue; }
-                            if (!Wire.ValidatePeer(pipe, false)) continue;
-                            using (var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(6)))
-                            {
-                                OwnerReply reply;
-                                var command = "";
-                                try
-                                {
-                                    var request = Wire.Read<OwnerRequest>(pipe, deadline.Token).GetAwaiter().GetResult();
-                                    command = request.Command;
-                                    if (command == "start")
-                                    {
-                                        if (token != Guid.Empty) throw new WifiError("У ПОМОГАТОРА уже есть сеанс точки доступа.");
-                                        StartChecked(wlan, request.Ssid, request.Password, request.Automatic);
-                                        ssid = request.Ssid;
-                                        password = request.Password;
-                                        token = Guid.NewGuid();
-                                        Local.Log("hosted_started");
-                                    }
-                                    else if (command == "stop" || command == "recover")
-                                    {
-                                        if (request.Owner == Guid.Empty || request.Owner != token)
-                                            throw new WifiError("Сеанс точки доступа изменился.");
-                                        if (command == "stop")
-                                        {
-                                            wlan.Stop();
-                                            token = Guid.Empty;
-                                            password = null;
-                                            idle.Restart();
-                                            Local.Log("hosted_released");
-                                        }
-                                        else if (wlan.Query(out _) == HostedNetwork.State.Idle)
-                                        {
-                                            wlan.Stop();
-                                            StartChecked(wlan, ssid, password, true);
-                                            Local.Log("hosted_recovered");
-                                        }
-                                    }
-                                    else if (command != "status") throw new WifiError("Неизвестная операция.");
-                                    var state = wlan.Query(out var adapter);
-                                    reply = new OwnerReply { Owner = token, Adapter = adapter,
-                                        Active = token != Guid.Empty && wlan.Started && state == HostedNetwork.State.Active };
-                                }
-                                catch (Exception error)
-                                {
-                                    Local.LogError("wlan_operation_failed", error);
-                                    if (error is WifiError) Local.Log("wlan_detail", error.Message);
-                                    reply = new OwnerReply { Error = error is WifiError && !error.Message.Contains("(WLAN ") ? error.Message : "Windows не завершила операцию Wi-Fi. Подробности в диагностике." };
-                                }
-                                try { Wire.Write(pipe, reply, deadline.Token).GetAwaiter().GetResult(); }
-                                catch (Exception error) when (error is IOException || error is OperationCanceledException) { }
-                                if (command == "stop" && token == Guid.Empty) return 0;
-                            }
-                        }
+                        if (session.Retained) Local.Log("hosted_handle_closing", "source=helper_exit");
                     }
                 }
             }
             return 0;
+        }
+
+        internal static void ServeTransport(string name, OwnerSession session, Func<PipeStream, bool> verify,
+            Action<string, string> log)
+        {
+            var idle = Stopwatch.StartNew();
+            // Keep the server instance available across polls and GUI restarts. A pipe fault never expires an owned session.
+            while (!session.Stopping && (session.Retained || idle.Elapsed < TimeSpan.FromSeconds(15)))
+            {
+                try
+                {
+                    using (var pipe = Wire.Server(name))
+                        while (!session.Stopping && (session.Retained || idle.Elapsed < TimeSpan.FromSeconds(15)))
+                        {
+                            using (var wait = new CancellationTokenSource(TimeSpan.FromSeconds(1)))
+                            {
+                                try { pipe.WaitForConnectionAsync(wait.Token).GetAwaiter().GetResult(); }
+                                catch (OperationCanceledException)
+                                {
+                                    if (session.Retained) session.Observe();
+                                    continue;
+                                }
+                            }
+                            try
+                            {
+                                if (!verify(pipe)) continue;
+                                using (var limit = new CancellationTokenSource(TimeSpan.FromSeconds(4)))
+                                {
+                                    OwnerReply reply;
+                                    try
+                                    {
+                                        var request = Wire.Read<OwnerRequest>(pipe, limit.Token).GetAwaiter().GetResult();
+                                        reply = session.Handle(request);
+                                    }
+                                    catch (Exception error)
+                                    {
+                                        log("wlan_operation_failed", error is WifiError ? error.Message : error.GetType().Name);
+                                        reply = session.Observe();
+                                        reply.Error = error is WifiError && !(error is WlanFailure) ? error.Message :
+                                            "Windows не завершила операцию Wi-Fi. Подробности в диагностике.";
+                                    }
+                                    Wire.Write(pipe, reply, limit.Token).GetAwaiter().GetResult();
+                                }
+                            }
+                            catch (Exception error) when (error is IOException || error is OperationCanceledException)
+                            { log("hosted_pipe_interrupted", error.GetType().Name); }
+                            finally { pipe.Disconnect(); }
+                        }
+                }
+                catch (Exception error) when (error is IOException || error is UnauthorizedAccessException || error is InvalidOperationException)
+                {
+                    log("hosted_pipe_unavailable", error.GetType().Name);
+                    if (session.Retained) session.Observe();
+                    Thread.Sleep(250);
+                }
+            }
         }
 
         private static void StartChecked(HostedNetwork wlan, string ssid, string password, bool automatic)

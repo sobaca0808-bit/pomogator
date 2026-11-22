@@ -1,9 +1,12 @@
 using System;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
 using PomogatorWifi;
@@ -22,6 +25,7 @@ internal static class SmokeTests
         CheckStartupRegistry();
         CheckTray();
         CheckWindowStates();
+        CheckOwnerTransport();
         RenderScreens(results);
         return 0;
     }
@@ -114,7 +118,60 @@ internal static class SmokeTests
         }
         var checks = DiagnosticsWindow.Summarize(Demo(WifiPhase.External), true);
         Require(checks.Contains("внешний сеанс") && checks.Contains("подтверждены Windows"), "external session diagnostics");
-        Console.WriteLine("PASS Russian status presentation and power control for all seven states");
+        Console.WriteLine("PASS Russian status presentation and power control for all eight states");
+    }
+
+    private static void CheckOwnerTransport()
+    {
+        var adapter = Guid.NewGuid();
+        var running = HostedNetwork.State.Idle;
+        var stops = 0;
+        var name = "PomogatorWifi.Test." + Guid.NewGuid().ToString("N");
+        HostedNetwork.State Query(out Guid id) { id = adapter; return running; }
+        var session = new OwnerSession(Query, () => 0L, () => 0,
+            (ssid, key, automatic) => { running = HostedNetwork.State.Active; },
+            () => { stops++; running = HostedNetwork.State.Idle; return new HostedRelease(0, 0); },
+            (code, details) => { });
+        var process = Task.Run(() => Owner.ServeTransport(name, session, pipe => true, (code, details) => { }));
+        OwnerReply Send(OwnerRequest command) => Owner.Exchange(name, command, 4000, pipe => true);
+
+        var start = Send(new OwnerRequest { Command = "start", Origin = "window" });
+        Require(start != null && start.Active, "pipe startup");
+        using (var initial = new WifiWindow(testing: true))
+        {
+            initial.Present(Demo(WifiPhase.Owned));
+            initial.Show();
+            Application.DoEvents();
+            initial.SetTrayPreference(true);
+            initial.Close();
+            Require(!initial.Visible && !initial.IsDisposed, "first GUI in tray");
+            initial.SetTrayPreference(false);
+            initial.Close();
+        }
+
+        // No UI has the pipe open and no status traffic keeps the session alive.
+        var elapsed = Stopwatch.StartNew();
+        Thread.Sleep(TimeSpan.FromSeconds(61));
+        var refreshed = Send(new OwnerRequest { Command = "status" });
+        Require(refreshed != null && refreshed.Active && refreshed.Owner == start.Owner && elapsed.Elapsed.TotalSeconds >= 60,
+            "same owned Windows pipe session after more than 60 seconds");
+        using (var reopened = new WifiWindow(testing: true))
+        {
+            reopened.Present(Demo(WifiPhase.Unconfirmed));
+            Require(!reopened.CanToggle, "no action while ownership is unknown");
+            reopened.Present(Demo(WifiPhase.Owned));
+            Require(reopened.CanToggle, "OFF enabled after refresh with the same session");
+        }
+
+        // Check that a disconnected client has no effect on the running session.
+        using (var abandoned = new System.IO.Pipes.NamedPipeClientStream(".", name, System.IO.Pipes.PipeDirection.InOut))
+            abandoned.Connect(4000);
+        refreshed = Send(new OwnerRequest { Command = "status" });
+        Require(refreshed != null && refreshed.Active && refreshed.Owner == start.Owner, "pipe survives disconnected client");
+        var stopped = Send(new OwnerRequest { Command = "stop", Owner = start.Owner, Adapter = adapter, Origin = "tray" });
+        Require(stopped != null && stopped.Owner == Guid.Empty && !stopped.Active && stops == 1, "explicit OFF from tray");
+        Require(process.Wait(4000), "helper transport completed after OFF");
+        Console.WriteLine("PASS live Windows named pipe: start, tray/close, 61 seconds idle, reopen, refresh, disconnected client, OFF");
     }
 
     private static void RenderScreens(string output)

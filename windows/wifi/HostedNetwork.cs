@@ -1,6 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 
 namespace PomogatorWifi
 {
@@ -9,7 +10,26 @@ namespace PomogatorWifi
         internal enum State { Unavailable, Idle, Active }
         private IntPtr handle;
         private bool started;
-        internal bool Started { get { return started; } }
+        private readonly NotificationCallback notification;
+        private long interrupted;
+        private int lastReason;
+        internal long Interruptions => Interlocked.Read(ref interrupted);
+        internal int InterruptionReason => Volatile.Read(ref lastReason);
+
+        private const uint HostedNotifications = 0x80;
+        private const uint HostedStateChange = 0x1000;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NotificationData
+        {
+            internal uint Source, Code;
+            internal Guid Interface;
+            internal uint Size;
+            internal IntPtr Data;
+        }
+
+        [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+        private delegate void NotificationCallback(ref NotificationData data, IntPtr context);
 
         [StructLayout(LayoutKind.Sequential)]
         private struct StatusHeader
@@ -30,10 +50,31 @@ namespace PomogatorWifi
             internal uint MaxPeers;
         }
 
-        internal HostedNetwork()
+        internal HostedNetwork(bool monitor = false)
         {
-            uint version;
-            Check(WlanOpenHandle(2, IntPtr.Zero, out version, out handle), 0);
+            Check(WlanOpenHandle(2, IntPtr.Zero, out _, out handle), 0);
+            if (!monitor) return;
+            notification = OnNotification;
+            try
+            {
+                Check(WlanRegisterNotification(handle, HostedNotifications, false, notification, IntPtr.Zero,
+                    IntPtr.Zero, out _), 0);
+            }
+            catch
+            {
+                Dispose();
+                throw;
+            }
+        }
+
+        private void OnNotification(ref NotificationData data, IntPtr context)
+        {
+            if (data.Source != HostedNotifications || data.Code != HostedStateChange || data.Size < 12 ||
+                data.Data == IntPtr.Zero) return;
+            if (Marshal.ReadInt32(data.Data) != (int)State.Active ||
+                Marshal.ReadInt32(data.Data, 4) == (int)State.Active) return;
+            Volatile.Write(ref lastReason, Marshal.ReadInt32(data.Data, 8));
+            Interlocked.Increment(ref interrupted);
         }
 
         internal State Query(out Guid adapter) => Query(out adapter, out _);
@@ -108,14 +149,15 @@ namespace PomogatorWifi
             finally { WlanFreeMemory(buffer); }
         }
 
-        internal void Stop()
+        internal HostedRelease Stop()
         {
-            if (!started) return;
+            if (!started) return new HostedRelease(0, 10);
             uint reason;
             var result = WlanHostedNetworkStopUsing(handle, out reason, IntPtr.Zero);
             // Windows can end the session first, for example after unplugging the adapter.
             if (result != 0 && reason != 10) Check(result, reason);
             started = false;
+            return new HostedRelease(result, reason);
         }
 
         internal static string Explain(uint code, uint reason)
@@ -132,13 +174,14 @@ namespace PomogatorWifi
         private static void Check(uint code, uint reason)
         {
             if (code != 0)
-                throw new WifiError(string.Format("{0} (WLAN {1}, причина {2})", Explain(code, reason), code, reason));
+                throw new WlanFailure(code, reason);
         }
 
         public void Dispose()
         {
             if (handle == IntPtr.Zero) return;
             WlanCloseHandle(handle, IntPtr.Zero);
+            GC.KeepAlive(notification);
             handle = IntPtr.Zero;
             started = false;
         }
@@ -164,8 +207,17 @@ namespace PomogatorWifi
             [MarshalAs(UnmanagedType.Bool)] bool passphrase, [MarshalAs(UnmanagedType.Bool)] bool persistent,
             out uint reason, IntPtr reserved);
         [DllImport("wlanapi.dll")]
+        private static extern uint WlanRegisterNotification(IntPtr client, uint source, [MarshalAs(UnmanagedType.Bool)] bool ignoreDuplicate,
+            NotificationCallback callback, IntPtr context, IntPtr reserved, out uint previous);
+        [DllImport("wlanapi.dll")]
         private static extern uint WlanHostedNetworkStartUsing(IntPtr client, out uint reason, IntPtr reserved);
         [DllImport("wlanapi.dll")]
         private static extern uint WlanHostedNetworkStopUsing(IntPtr client, out uint reason, IntPtr reserved);
+    }
+
+    internal sealed class WlanFailure : WifiError
+    {
+        internal WlanFailure(uint code, uint reason)
+            : base(string.Format("{0} (WLAN {1}, причина {2})", HostedNetwork.Explain(code, reason), code, reason)) { }
     }
 }

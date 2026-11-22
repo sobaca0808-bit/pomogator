@@ -7,6 +7,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="ui/**/*.cs" />
+    <Compile Include="../OwnerSession.cs" Link="OwnerSession.cs" />
     <Compile Include="../WifiState.cs" Link="WifiState.cs" />
     <Compile Include="../Ics.cs" Link="Ics.cs" />
     <Compile Include="../IcsInterop.cs" Link="IcsInterop.cs" />

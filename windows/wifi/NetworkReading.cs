@@ -92,12 +92,14 @@ namespace PomogatorWifi
         {
             var report = new WifiReport { Mobile = MobileHotspot.Read() };
             var hosted = HostedNetwork.State.Unavailable;
+            var wlanKnown = false;
             try
             {
                 using (var wlan = new HostedNetwork())
                 {
                     report.HasWifi = wlan.HasWifi();
                     hosted = wlan.Query(out report.Adapter, out var peers);
+                    wlanKnown = true;
                     if (hosted == HostedNetwork.State.Active)
                     {
                         report.Peers = peers;
@@ -108,16 +110,40 @@ namespace PomogatorWifi
             catch (Exception error) { Once("wlan_read_failed", error is WifiError ? error.Message : error.GetType().Name); }
 
             var ownsActive = false;
+            var ownerKnown = true;
             try
             {
-                var owner = Owner.Request(new OwnerRequest { Command = "status" }, 180);
-                if (owner != null)
+                if (Owner.Exists())
                 {
-                    report.Owner = owner.Owner;
-                    ownsActive = owner.Owner != Guid.Empty && owner.Active && owner.Adapter == report.Adapter;
+                    var owner = Owner.Request(new OwnerRequest { Command = "status" }, 850);
+                    if (owner == null || owner.Error != null || !owner.WindowsState.HasValue)
+                    {
+                        ownerKnown = false;
+                        Once("owner_status_unconfirmed", owner == null ? "no_response" : "no_verified_state");
+                    }
+                    else
+                    {
+                        var ownerState = (HostedNetwork.State)owner.WindowsState.Value;
+                        // Windows can change state between the two reads. Use the helper's latest atomic observation.
+                        if (!wlanKnown || ownerState != hosted || owner.Adapter != report.Adapter)
+                        {
+                            report.Peers = null;
+                            report.Ssid = null;
+                        }
+                        hosted = ownerState;
+                        wlanKnown = true;
+                        report.Adapter = owner.Adapter;
+                        ownsActive = owner.Owner != Guid.Empty && owner.Active;
+                        if (ownsActive || hosted != HostedNetwork.State.Active)
+                            report.Owner = owner.Owner;
+                    }
                 }
             }
-            catch (Exception error) { Once("owner_read_failed", error.GetType().Name); }
+            catch (Exception error)
+            {
+                ownerKnown = false;
+                Once("owner_read_failed", error.GetType().Name);
+            }
             try { report.Lease = Local.Load<SharingLease>(Local.LeasePath); }
             catch (Exception error)
             {
@@ -128,7 +154,7 @@ namespace PomogatorWifi
             using (var snapshot = TryIcs())
             {
                 bool wifiDirect = snapshot != null && WifiDirect(snapshot);
-                report.Phase = WifiRules.Phase(report.HasWifi.HasValue, hosted, ownsActive, report.Mobile, wifiDirect);
+                report.Phase = WifiRules.Phase(wlanKnown, hosted, ownsActive, report.Mobile, wifiDirect, ownerKnown);
                 report.Mechanism = hosted == HostedNetwork.State.Active ? "Hosted Network" :
                     report.Phase == WifiPhase.External ? "Мобильный хот-спот / Wi-Fi Direct" :
                     hosted == HostedNetwork.State.Idle ? "Hosted Network доступна" :

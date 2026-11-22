@@ -251,6 +251,87 @@ var tests = new (string Name, Action Run)[] {
         Check(system.Writes.Count == writes + 1);
         Check(system.Writes.Last() == "enable Private");
     }),
+    ("Keep an owned handle across refreshes and require an explicit OFF for the same adapter", () => {
+        var radio = new RadioFixture();
+        var initial = radio.Start();
+        Check(initial.Active && initial.Owner != Guid.Empty);
+        for (var i = 0; i < 50; i++)
+        {
+            var status = radio.Session.Handle(new OwnerRequest { Command = "status" });
+            Check(status.Active && status.Owner == initial.Owner && status.Adapter == initial.Adapter);
+        }
+        Check(radio.Stops == 0 && radio.Session.Retained);
+        Reject(() => radio.Session.Handle(new OwnerRequest { Command = "stop", Owner = initial.Owner, Adapter = initial.Adapter }));
+        Reject(() => radio.Session.Handle(new OwnerRequest { Command = "stop", Owner = initial.Owner, Adapter = initial.Adapter, Origin = "automation" }));
+        Reject(() => radio.Session.Handle(new OwnerRequest { Command = "stop", Owner = initial.Owner, Adapter = Guid.NewGuid(), Origin = "window" }));
+        Check(radio.Stops == 0);
+        var stopped = radio.Off(initial);
+        Check(radio.Stops == 1 && !radio.Session.Retained && radio.Session.Stopping && stopped.Owner == Guid.Empty);
+        Check(radio.Events.Any(e => e.Contains("hosted_released source=window win32=0 reason=0 state=1")));
+    }),
+    ("A late refresh cannot reverse the button intent or substitute a different Wi-Fi session", () => {
+        Check(WifiRules.SamePowerIntent(WifiPhase.Owned, source.Id, target.Id, WifiPhase.Owned, source.Id, target.Id));
+        Check(!WifiRules.SamePowerIntent(WifiPhase.Off, Guid.Empty, Guid.Empty, WifiPhase.Owned, source.Id, target.Id));
+        Check(!WifiRules.SamePowerIntent(WifiPhase.Owned, source.Id, target.Id, WifiPhase.Off, source.Id, target.Id));
+        Check(!WifiRules.SamePowerIntent(WifiPhase.Owned, source.Id, target.Id, WifiPhase.Owned, target.Id, target.Id));
+        Check(!WifiRules.SamePowerIntent(WifiPhase.Owned, source.Id, target.Id, WifiPhase.Owned, source.Id, source.Id));
+        Check(WifiRules.Phase(true, HostedNetwork.State.Active, false, MobilePhase.Off, false, false) == WifiPhase.Unconfirmed);
+        Check(WifiRules.Phase(true, HostedNetwork.State.Active, false, MobilePhase.Off, false) == WifiPhase.External);
+    }),
+    ("An unrelated reference can keep the access point active after releasing only our own", () => {
+        var radio = new RadioFixture();
+        var ours = radio.Start();
+        radio.OtherReference = true;
+        var after = radio.Off(ours);
+        Check(after.WindowsState == (int)HostedNetwork.State.Active && !after.Active && after.Owner == Guid.Empty);
+        Check(radio.Stops == 1 && radio.Events.Any(item => item.Contains("hosted_released") && item.Contains("state=2")));
+        Reject(() => radio.Off(ours));
+        Check(radio.Stops == 1);
+    }),
+    ("A same-GUID access point restarted by Windows or another client stays unowned", () => {
+        var radio = new RadioFixture();
+        var ours = radio.Start();
+        radio.Gone++;
+        var external = radio.Session.Observe();
+        Check(external.Owner == ours.Owner && external.Adapter == ours.Adapter && !external.Active);
+        Reject(() => radio.Off(ours));
+        Reject(() => radio.Recover(ours));
+        Check(radio.Stops == 0 && radio.Events.Any(item => item.Contains("windows_notification reason=13")));
+    }),
+    ("Resume only an idle point belonging to the retained token after sleep", () => {
+        var radio = new RadioFixture();
+        var ours = radio.Start();
+        radio.State = HostedNetwork.State.Idle;
+        radio.Gone++;
+        Check(!radio.Session.Observe().Active);
+        var resumed = radio.Recover(ours);
+        Check(resumed.Active && resumed.Owner == ours.Owner && resumed.Adapter == ours.Adapter);
+        Check(radio.Off(resumed).Owner == Guid.Empty);
+
+        var edge = new RecoveryEdge();
+        edge.Resumed(ours.Owner);
+        Check(!edge.Observe(true, ours.Owner, null, true));
+        Check(!edge.Observe(true, ours.Owner, true, false));
+        Check(edge.Observe(true, ours.Owner, true, true));
+        Check(!edge.Observe(true, ours.Owner, true, true));
+        edge.Resumed(ours.Owner);
+        Check(!edge.Observe(true, Guid.NewGuid(), true, true));
+    }),
+    ("A failed WLAN read or stop preserves the token and does not claim that the point stopped", () => {
+        var radio = new RadioFixture();
+        var ours = radio.Start();
+        radio.FailRead = true;
+        var unknown = radio.Session.Observe();
+        Check(unknown.Owner == ours.Owner && unknown.WindowsState == null && unknown.Error != null);
+        Reject(() => radio.Off(ours));
+        radio.FailRead = false;
+        radio.FailStop = true;
+        Reject(() => radio.Off(ours));
+        Check(radio.Session.Observe().Active && radio.Stops == 0 && !radio.Events.Any(item => item.Contains("hosted_released")));
+        radio.FailStop = false;
+        Check(radio.Off(ours).Owner == Guid.Empty && radio.Stops == 1);
+        Check(radio.Events.Any(item => item.Contains("hosted_status_restored")));
+    }),
     ("Validate SSID in UTF-8 bytes and passphrase in printable ASCII", () => {
         Check(Policy.EncodeSsid(new string('Ж', 16)).Length == 32);
         Reject(() => Policy.EncodeSsid(new string('Ж', 17)));
@@ -413,4 +494,43 @@ sealed class FixtureProps(FixtureConnection connection, string name, MediaType m
     public int GetStatus() => (int)Status;
     public int GetMediaType() => (int)Media;
     public uint GetCharacteristics() => (uint)Flags;
+}
+
+internal sealed class RadioFixture
+{
+    internal HostedNetwork.State State = HostedNetwork.State.Idle;
+    internal long Gone;
+    internal bool OtherReference, FailRead, FailStop;
+    internal int Stops;
+    internal readonly Guid Adapter = Guid.NewGuid();
+    internal readonly List<string> Events = new();
+    internal readonly OwnerSession Session;
+
+    internal RadioFixture()
+    {
+        Session = new OwnerSession(Query, () => Gone, () => 13, (name, password, automatic) => {
+            if (State != HostedNetwork.State.Idle) throw new WifiError("Busy");
+            State = HostedNetwork.State.Active;
+        }, () => {
+            if (FailStop) throw new WlanFailure(5, 5);
+            Stops++;
+            State = OtherReference ? HostedNetwork.State.Active : HostedNetwork.State.Idle;
+            return new HostedRelease(0, 0);
+        }, (code, detail) => Events.Add(code + " " + detail));
+    }
+
+    private HostedNetwork.State Query(out Guid adapter)
+    {
+        if (FailRead) throw new WlanFailure(31, 0);
+        adapter = Adapter;
+        return State;
+    }
+
+    internal OwnerReply Start() => Session.Handle(new OwnerRequest { Command = "start", Origin = "window" });
+    internal OwnerReply Off(OwnerReply owner) => Session.Handle(new OwnerRequest {
+        Command = "stop", Owner = owner.Owner, Adapter = owner.Adapter, Origin = "window"
+    });
+    internal OwnerReply Recover(OwnerReply owner) => Session.Handle(new OwnerRequest {
+        Command = "recover", Owner = owner.Owner, Origin = "automation", Automatic = true
+    });
 }

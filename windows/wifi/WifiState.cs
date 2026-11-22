@@ -4,17 +4,25 @@ using System.Reflection;
 
 namespace PomogatorWifi
 {
-    internal enum WifiPhase { Off, Starting, Owned, External, Stopping, Unavailable, Error }
+    internal enum WifiPhase { Off, Starting, Owned, External, Stopping, Unavailable, Error, Unconfirmed }
     internal enum MobilePhase { Unknown, Off, On, Transition }
 
     internal static class WifiRules
     {
         internal static WifiPhase Phase(bool known, HostedNetwork.State hosted, bool owns,
-            MobilePhase mobile, bool sharedWifiDirect)
+            MobilePhase mobile, bool sharedWifiDirect, bool ownerKnown = true)
         {
+            if (!ownerKnown) return WifiPhase.Unconfirmed;
             if (hosted == HostedNetwork.State.Active) return owns ? WifiPhase.Owned : WifiPhase.External;
             if (mobile == MobilePhase.On || mobile == MobilePhase.Transition || sharedWifiDirect) return WifiPhase.External;
             return !known || hosted == HostedNetwork.State.Unavailable ? WifiPhase.Unavailable : WifiPhase.Off;
+        }
+
+        internal static bool SamePowerIntent(WifiPhase before, Guid owner, Guid adapter,
+            WifiPhase current, Guid currentOwner, Guid currentAdapter)
+        {
+            if (before != current || owner != currentOwner) return false;
+            return before == WifiPhase.Off || before == WifiPhase.Owned && adapter != Guid.Empty && adapter == currentAdapter;
         }
 
         internal static bool AutoStart(bool enabled, WifiPhase wifi, bool hasPassword) =>
@@ -26,6 +34,25 @@ namespace PomogatorWifi
     internal sealed class RecoveryEdge
     {
         private bool wasOffline;
+        private Guid resumedOwner, observedOwner;
+        private DateTime resumeDeadline;
+
+        internal void Resumed(Guid owner)
+        {
+            resumedOwner = owner;
+            resumeDeadline = DateTime.UtcNow.AddSeconds(45);
+        }
+
+        internal bool Observe(bool enabled, Guid owner, bool? sourceConnected, bool needsRecovery)
+        {
+            if (observedOwner != owner) wasOffline = false;
+            observedOwner = owner;
+            var restored = Observe(enabled, owner != Guid.Empty, sourceConnected);
+            var shouldResume = enabled && owner != Guid.Empty && owner == resumedOwner &&
+                DateTime.UtcNow < resumeDeadline && sourceConnected == true && needsRecovery;
+            if (!enabled || restored || shouldResume) resumedOwner = Guid.Empty;
+            return restored || shouldResume;
+        }
 
         internal bool Observe(bool enabled, bool owned, bool? sourceConnected)
         {

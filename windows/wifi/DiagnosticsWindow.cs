@@ -52,7 +52,8 @@ namespace PomogatorWifi
         internal static string Summarize(WifiReport state, bool? online)
         {
             var point = state.Phase == WifiPhase.Owned || state.Phase == WifiPhase.External ? "Работает" :
-                state.Phase == WifiPhase.Unavailable ? "Недоступно" : "Требует внимания";
+                state.Phase == WifiPhase.Unavailable ? "Недоступно" :
+                state.Phase == WifiPhase.Unconfirmed ? "Не удалось проверить" : "Требует внимания";
             var detected = state.Sharing == SharingState.Verified ? "Работает · роли подтверждены Windows" :
                 state.Sharing == SharingState.Unknown ? "Не удалось проверить" : "Требует внимания · " + WifiWindow.SharingText(state.Sharing);
             return "Wi-Fi-адаптер — " + Verdict(state.HasWifi, "Недоступно") + Environment.NewLine +
@@ -116,7 +117,7 @@ namespace PomogatorWifi
                 if (picker.ShowDialog(this) != DialogResult.OK) return;
                 try
                 {
-                    File.WriteAllText(picker.FileName, "ПОМОГАТОР Wi-Fi 0.2.0 · " + DateTimeOffset.Now.ToString("O") +
+                    File.WriteAllText(picker.FileName, "ПОМОГАТОР Wi-Fi 0.2.1 · " + DateTimeOffset.Now.ToString("O") +
                         Environment.NewLine + checks.Text + Environment.NewLine + Environment.NewLine + log.Text, Encoding.UTF8);
                 }
                 catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)

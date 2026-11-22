@@ -5,7 +5,7 @@ using System.Text;
 
 namespace PomogatorWifi
 {
-    internal sealed class WifiError : Exception
+    internal class WifiError : Exception
     {
         internal WifiError(string message) : base(message) { }
     }
