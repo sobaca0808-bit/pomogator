@@ -76,8 +76,9 @@ internal static class NativeTunTests
         var upstreamReady = Xray.FreePort();
         while (upstreamReady == upstreamPort) upstreamReady = Xray.FreePort();
         const string upstreamHost = "vless-fixture.test";
-        using var upstreamCertificate = CreateCertificate(upstreamHost);
-        using var upstreamKey = upstreamCertificate.GetRSAPrivateKey()!;
+        using var upstreamKey = RSA.Create(2048);
+        var keyPem = upstreamKey.ExportRSAPrivateKeyPem().Split('\n');
+        using var upstreamCertificate = CreateCertificate(upstreamHost, upstreamKey);
         var upstreamConfig = JsonSerializer.Serialize(new {
             log = new { loglevel = "none" },
             inbounds = new object[] {
@@ -86,7 +87,7 @@ internal static class NativeTunTests
                     settings = new { clients = new[] { new { id } }, decryption = "none" },
                     streamSettings = new { network = "raw", security = "tls", tlsSettings = new {
                         certificates = new[] { new { certificate = upstreamCertificate.ExportCertificatePem().Split('\n'),
-                            key = upstreamKey.ExportRSAPrivateKeyPem().Split('\n') } }
+                            key = keyPem } }
                     } }
                 }
             },
@@ -342,13 +343,17 @@ internal static class NativeTunTests
     private static X509Certificate2 CreateCertificate(string host)
     {
         using var key = RSA.Create(2048);
+        return CreateCertificate(host, key);
+    }
+
+    private static X509Certificate2 CreateCertificate(string host, RSA key)
+    {
         var request = new CertificateRequest("CN=" + host, key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
         var subject = new SubjectAlternativeNameBuilder();
         subject.AddDnsName(host);
         request.CertificateExtensions.Add(subject.Build());
         using var generated = request.CreateSelfSigned(DateTimeOffset.Now.AddMinutes(-1), DateTimeOffset.Now.AddMinutes(10));
-        return new X509Certificate2(generated.Export(X509ContentType.Pfx), (string?)null,
-            X509KeyStorageFlags.UserKeySet | X509KeyStorageFlags.Exportable);
+        return new X509Certificate2(generated.Export(X509ContentType.Pfx), (string?)null, X509KeyStorageFlags.UserKeySet);
     }
 
     private static readonly string[] ControlLogMarkers = ["request to Method [CONNECT]", "pmt-control-vless",
