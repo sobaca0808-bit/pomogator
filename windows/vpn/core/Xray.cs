@@ -27,10 +27,10 @@ public sealed class Xray : IDisposable
     }
 
     public static async Task<Xray> StartAsync(string executable, string config, int port, CancellationToken token,
-        Func<Process, IDisposable?>? protect = null, Func<int, int, bool>? ownsPort = null, Action? started = null)
+        Func<Process, IDisposable?>? protect = null, Func<int, int, bool>? ownsPort = null, Action? started = null, bool inheritConsole = false, int startupSeconds = 6)
     {
         var info = new ProcessStartInfo(executable) {
-            UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true,
+            UseShellExecute = false, CreateNoWindow = !inheritConsole, RedirectStandardInput = true,
             RedirectStandardOutput = true, RedirectStandardError = true,
             StandardInputEncoding = new UTF8Encoding(false),
             WorkingDirectory = Path.GetDirectoryName(Path.GetFullPath(executable))!
@@ -56,7 +56,7 @@ public sealed class Xray : IDisposable
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
             using var startup = CancellationTokenSource.CreateLinkedTokenSource(token);
-            startup.CancelAfter(TimeSpan.FromSeconds(6));
+            startup.CancelAfter(TimeSpan.FromSeconds(startupSeconds));
             await process.StandardInput.WriteAsync(config.AsMemory(), startup.Token);
             await process.StandardInput.FlushAsync(startup.Token);
             process.StandardInput.Close();
@@ -72,7 +72,7 @@ public sealed class Xray : IDisposable
         catch (OperationCanceledException) when (!token.IsCancellationRequested)
         {
             result.Dispose();
-            throw new VpnError("За 6 секунд ядро не открыло локальный прокси.", Check.Proxy);
+            throw new VpnError($"За {startupSeconds} секунд ядро не открыло локальный порт.", Check.Proxy);
         }
         catch (IOException)
         {
@@ -150,6 +150,13 @@ public sealed class Xray : IDisposable
         using var socket = new TcpClient();
         try { await socket.ConnectAsync(IPAddress.Loopback, port, token); return true; }
         catch (SocketException) { return false; }
+    }
+
+    public void RequestGracefulStop(Action signal)
+    {
+        if (!Running) return;
+        signal();
+        process.WaitForExit(5000);
     }
 
     public void Dispose()

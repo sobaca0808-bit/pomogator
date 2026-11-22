@@ -1,7 +1,10 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
+using System.Net;
 using System.Net.Http;
+using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows;
@@ -25,7 +28,13 @@ public partial class MainWindow : Window
     private readonly SystemProxy proxy = new();
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromSeconds(1) };
     private readonly Queue<string> journal = new();
-    private static readonly TimeSpan HealthInterval = TimeSpan.FromSeconds(30);
+    private HealthPolicy healthPolicy = new();
+    private TunSession? tun;
+    private long nextPeerCheck;
+    private string? peerHost;
+    private bool startingTun;
+    private string tunStatus = "TUN: выключен.";
+    private string ipStatus = "Внешний IP: ожидает проверки.";
     private Xray? core;
     private int checkPort;
     private int? socksPort;
@@ -49,7 +58,7 @@ public partial class MainWindow : Window
         timer.Tick += Monitor;
     }
 
-    private void Ready(object sender, RoutedEventArgs e)
+    private async void Ready(object sender, RoutedEventArgs e)
     {
         if (Tray != null) return;
         Tray = new TrayIcon(() => Dispatcher.BeginInvoke(ShowFromTray),
@@ -65,10 +74,36 @@ public partial class MainWindow : Window
             "Есть запись предыдущего сеанса. Восстановить исходный системный прокси, если текущие параметры всё ещё совпадают с настройками ПОМОГАТОР?",
             Title, MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No) == MessageBoxResult.Yes)
             RestoreProxy(fromDisk: true);
+        if (File.Exists(LocalData.TunRecovery))
+        {
+            try
+            {
+                var recovery = LocalData.Read<TunRecovery>(LocalData.TunRecovery)
+                    ?? throw new VpnError("Запись восстановления TUN повреждена.");
+                if (TunWindows.Clean(recovery))
+                {
+                    File.Delete(LocalData.TunRecovery);
+                    AddLog("После предыдущего сеанса интерфейс TUN отсутствует.");
+                }
+                else if (MessageBox.Show(this,
+                    "Остался интерфейс предыдущего сеанса TUN. Проверить его и удалить только при совпадении с записью ПОМОГАТОР?",
+                    Title, MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No) == MessageBoxResult.Yes)
+                {
+                    busy = true;
+                    Render();
+                    using var previous = new TunSession(recovery);
+                    await previous.RestoreAsync(CancellationToken.None);
+                    AddLog("Предыдущий интерфейс TUN удалён.");
+                }
+            }
+            catch (Exception error) { ReportProblem(Explain(error)); }
+            finally { busy = false; }
+        }
         try { LaunchWithWindows.IsChecked = Startup.Enabled; }
         catch { AddLog("Windows не позволила прочитать настройку автозапуска."); }
         timer.Start();
         Render();
+        if (closeRequested) { Close(); return; }
         if (StartInTray) Hide();
     }
 
@@ -149,17 +184,23 @@ public partial class MainWindow : Window
             rendered = phase;
         }
 
-        var connected = phase == Phase.Connected;
+        var connected = Connection.Active;
         var editable = !busy && !connected && phase != Phase.Disconnecting;
         var selected = Servers.SelectedItem as Profile;
         ActionLabel.Text = phase switch {
-            Phase.Connecting => "Отменить", Phase.Connected => "Отключиться",
+            Phase.Connecting => "Отменить", Phase.Connected or Phase.Unstable => "Отключиться",
             Phase.Disconnecting => "Отключение…", Phase.Error => "Повторить попытку", _ => "Подключиться"
         };
         AutomationProperties.SetName(Connect, ActionLabel.Text);
         Connect.IsEnabled = (phase == Phase.Connecting && operation != null) || connected || editable && selected != null;
         Servers.IsEnabled = Modes.IsEnabled = editable;
         SystemMode.IsEnabled = !proxy.HasRecovery;
+        TunMode.IsEnabled = TunWindows.SupportsWindows && !File.Exists(LocalData.TunRecovery) && !proxy.HasRecovery;
+        ModeHint.Text = connected || phase is Phase.Connecting or Phase.Disconnecting
+            ? "Для смены режима сначала отключите VPN."
+            : File.Exists(LocalData.TunRecovery) ? "Ожидается восстановление предыдущего TUN. Перезапустите приложение для проверки."
+            : !TunWindows.SupportsWindows ? "Для TUN нужна Windows 10 22H2 x64 или новее." : "";
+        if (!TunMode.IsEnabled && editable && TunMode.IsChecked == true) LocalMode.IsChecked = true;
         if (!SystemMode.IsEnabled && editable && SystemMode.IsChecked == true) LocalMode.IsChecked = true;
         Paste.IsEnabled = Import.IsEnabled = Subscribe.IsEnabled = editable && storageReady;
         Rename.IsEnabled = Remove.IsEnabled = Paste.IsEnabled && selected != null;
@@ -168,8 +209,9 @@ public partial class MainWindow : Window
         SelectedServer.Text = selected?.DisplayName ?? "Выберите сервер";
         EmptyServers.Visibility = ProfilesList.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
-        var mode = phase == Phase.Connected ? Connection.SystemProxy : SystemMode.IsChecked == true;
-        var modeText = mode ? "Системный прокси Windows" : "Локальный прокси";
+        var mode = connected ? Connection.SystemProxy : SystemMode.IsChecked == true;
+        var modeText = tun != null || startingTun || !connected && TunMode.IsChecked == true ? "VPN-туннель TUN" :
+            mode ? "Системный прокси Windows" : "Локальный прокси";
         var protocol = selected == null ? "" : "VLESS · " + Transport(selected.Transport) +
             (selected.Security == "none" ? " (тестовый)" : " · " + selected.Security.ToUpperInvariant()) + "  |  ";
         ConnectionMeta.Text = protocol + modeText + (Connection.ConnectedAt is { } active
@@ -178,6 +220,8 @@ public partial class MainWindow : Window
         ProxyCheck.Text = CheckText("Локальный прокси", Check.Proxy);
         TrafficCheck.Text = CheckText("HTTPS через VLESS", Check.Https);
         SystemCheck.Text = "Системный прокси: " + (Connection.SystemProxy ? "включён" : proxy.Active ? "требует проверки" : "выключен");
+        TunCheck.Text = tunStatus;
+        ExternalCheck.Text = ipStatus;
         CheckedAt.Text = (lastCheck ?? Connection.ConnectedAt) is { } stamp ? "Последняя проверка: " + stamp.ToLocalTime().ToString("HH:mm:ss") : "Проверок ещё не было.";
     }
 
@@ -199,23 +243,56 @@ public partial class MainWindow : Window
             operation?.Cancel();
             return;
         }
-        if (Connection.Phase == Phase.Connected) { await StopFromUi(); return; }
+        if (Connection.Active) { await StopFromUi(); return; }
         if (busy || Servers.SelectedItem is not Profile profile) return;
 
         var systemMode = SystemMode.IsChecked == true;
         if (systemMode && MessageBox.Show(this,
             "Включить системный прокси после подтверждения VPN? Исходные параметры WinINet будут сохранены для восстановления.",
             Title, MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No) != MessageBoxResult.Yes) return;
+        var tunMode = TunMode.IsChecked == true;
+        if (tunMode && MessageBox.Show(this,
+            "Запустить TUN с правами администратора? Wintun создаст временный интерфейс, маршруты IPv4 и DNS на этом интерфейсе. " +
+            "IPv6 будет блокироваться до завершения. Для TUN весь публичный трафик идёт через выбранный VLESS. " +
+            "Прямые правила полного профиля применяются в режимах прокси. Во время сеанса могут быть недоступны DNS-запросы через ICS.",
+            Title, MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes) return;
         using var source = new CancellationTokenSource();
         operation = source;
         busy = true;
         lastCheck = null;
+        startingTun = tunMode;
+        ipStatus = "Внешний IP: ожидает проверки.";
+        tunStatus = tunMode ? "TUN: подготовка." : "TUN: выключен.";
+        healthPolicy = new HealthPolicy();
         Connection.Begin();
         Check? stage = null;
         try
         {
             Detail.Text = "Проверка TCP-порта VPN-сервера…";
-            var latency = await Xray.CheckServerAsync(profile, source.Token);
+            IPAddress? peer = null;
+            TunRecovery? recovery = null;
+            string? bridgePassword = null;
+            if (tunMode)
+            {
+                if (!TunWindows.SupportsWindows)
+                    throw new VpnError("Для этого режима нужна Windows 10 22H2 x64 или новее.");
+                if (TunWindows.OtherVpn() || new WinInet().Read().InUse)
+                    throw new VpnError("Обнаружен другой VPN, UBoost или активный системный прокси. Выберите локальный прокси или завершите другой клиент самостоятельно.");
+                using var dnsDeadline = CancellationTokenSource.CreateLinkedTokenSource(source.Token);
+                dnsDeadline.CancelAfter(TimeSpan.FromSeconds(5));
+                try
+                {
+                    var addresses = await Dns.GetHostAddressesAsync(profile.Host, AddressFamily.InterNetwork, dnsDeadline.Token);
+                    peer = addresses.FirstOrDefault(address => !IPAddress.IsLoopback(address) &&
+                        address.ToString() != TunConfig.Resolver && address.ToString() != "1.1.1.1");
+                }
+                catch (Exception error) when (error is SocketException or OperationCanceledException && !source.IsCancellationRequested)
+                { throw new VpnError("Не удалось получить IPv4-адрес VPN-сервера через текущий DNS."); }
+                if (peer == null) throw new VpnError("У VPN-сервера нет пригодного IPv4-адреса для TUN.");
+                recovery = new TunRecovery(Guid.NewGuid(), peer.ToString(), TunWindows.Capture(peer));
+                bridgePassword = Convert.ToHexString(RandomNumberGenerator.GetBytes(24));
+            }
+            var latency = await Xray.CheckServerAsync(peer == null ? profile : profile with { Host = peer.ToString() }, source.Token);
             LatencyText.Text = $"Задержка TCP до сервера: {Math.Round(latency.TotalMilliseconds)} мс.";
             AddLog("TCP-порт VPN-сервера доступен.");
 
@@ -223,9 +300,10 @@ public partial class MainWindow : Window
             var path = Path.Combine(AppContext.BaseDirectory, "xray.exe");
             if (!File.Exists(path)) throw new VpnError("В комплекте отсутствует xray.exe. Распакуйте архив полностью.");
             var port = Xray.FreePort();
-            checkPort = profile.Full == null ? port : DistinctPort(port);
-            socksPort = profile.Full?.SocksTag != null ? DistinctPort(port, checkPort) : null;
-            var config = XrayConfig.Create(profile, port, checkPort, socksPort);
+            checkPort = tunMode || profile.Full == null ? port : DistinctPort(port);
+            socksPort = tunMode || profile.Full?.SocksTag != null ? DistinctPort(port, checkPort) : null;
+            var config = tunMode ? TunConfig.Bridge(profile, peer!, port, socksPort!.Value, bridgePassword!) :
+                XrayConfig.Create(profile, port, checkPort, socksPort);
             Detail.Text = "Запуск Xray…";
             core = await Xray.StartAsync(path, config, port, source.Token,
                 WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback, () =>
@@ -241,12 +319,27 @@ public partial class MainWindow : Window
             Connection.Record(Check.Proxy, CheckResult.Passed);
             AddLog("Локальные порты принадлежат Xray и принимают подключения.");
 
+            stage = null;
+            if (recovery != null)
+            {
+                Detail.Text = "Запуск виртуального интерфейса Wintun и проверка маршрутов…";
+                tun = new TunSession(recovery);
+                await tun.StartAsync(socksPort!.Value, bridgePassword!, source.Token);
+                if (!await TunWindows.CheckDns(source.Token))
+                    throw new VpnError("Интерфейс и маршруты TUN доступны, но DNS Windows не разрешил контрольное имя.");
+                tunStatus = "TUN: интерфейс и маршруты IPv4 подтверждены. DNS разрешает имена. IPv6 блокируется.";
+                peerHost = profile.Host;
+                nextPeerCheck = Environment.TickCount64 + 120000;
+                AddLog(tunStatus);
+            }
             stage = Check.Https;
-            Detail.Text = "Контрольный HTTPS-запрос через выбранный VLESS…";
-            await Xray.VerifyAsync(checkPort, source.Token);
+            Detail.Text = "Контрольные HTTPS-запросы через выбранный VLESS…";
+            using var http = NetworkProbeClient();
+            var result = await InternetHealth.ProbeAsync(http, source.Token);
+            if (result == null) throw new VpnError("Контрольные адреса не ответили через выбранный VLESS. Доступ не подтверждён.");
             lastCheck = DateTimeOffset.Now;
             Connection.Record(Check.Https, CheckResult.Passed);
-            AddLog("HTTPS через выбранный VLESS вернул HTTP 204.");
+            AddLog($"HTTPS через выбранный VLESS подтверждён за {Math.Round(result.Value.TotalMilliseconds)} мс.");
 
             stage = Check.Xray;
             source.Token.ThrowIfCancellationRequested();
@@ -258,9 +351,11 @@ public partial class MainWindow : Window
                 AddLog("Системный прокси включён для текущего пользователя.");
             }
             health = new CancellationTokenSource();
-            nextHealthCheck = Environment.TickCount64 + (long)HealthInterval.TotalMilliseconds;
+            ScheduleHealth(healthPolicy.Observe(true));
             Connection.Confirm(lastCheck.Value, systemMode);
-            Detail.Text = $"HTTP 127.0.0.1:{port}" + (socksPort is { } sock ? $"   ·   SOCKS 127.0.0.1:{sock}" : "");
+            Detail.Text = tunMode ? "IPv4 идёт через туннель. IPv6 в этом сеансе блокируется." :
+                $"HTTP 127.0.0.1:{port}" + (socksPort is { } sock ? $"   ·   SOCKS 127.0.0.1:{sock}" : "");
+            _ = CheckExternalIp(core, health.Token);
         }
         catch (Exception) when (source.IsCancellationRequested)
         {
@@ -276,6 +371,7 @@ public partial class MainWindow : Window
         finally
         {
             operation = null;
+            startingTun = false;
             busy = false;
             Render();
             if (closeRequested) Close();
@@ -294,7 +390,7 @@ public partial class MainWindow : Window
 
     private async Task StopFromUi()
     {
-        if (Connection.Phase != Phase.Connected) return;
+        if (!Connection.Active) return;
         Connection.BeginStop();
         await Dispatcher.Yield(DispatcherPriority.Background);
         if (Connection.Phase == Phase.Disconnecting) Stop(false);
@@ -307,6 +403,7 @@ public partial class MainWindow : Window
         health?.Dispose();
         health = null;
         var restored = RestoreProxy();
+        var routeRestored = FinishTun();
         try { core?.Dispose(); }
         catch (Exception error)
         {
@@ -316,9 +413,65 @@ public partial class MainWindow : Window
         core = null;
         var detail = reason ?? (failed ? "Сеанс завершён с ошибкой." : "Сеанс завершён.");
         if (!restored) detail += " Восстановление системного прокси ожидает повторной проверки.";
-        Connection.End(failed || !restored);
+        if (!routeRestored) detail += " Восстановление TUN ожидает повторной проверки.";
+        Connection.End(failed || !restored || !routeRestored);
         Detail.Text = detail;
         AddLog(detail);
+    }
+
+    private bool FinishTun()
+    {
+        if (tun is not { } active) return true;
+        tun = null;
+        var record = active.Record;
+        try
+        {
+            active.Dispose();
+            if (!TunWindows.Clean(record))
+            {
+                tunStatus = "TUN: интерфейс остался. Запись восстановления сохранена.";
+                AddLog(tunStatus);
+                return false;
+            }
+            File.Delete(LocalData.TunRecovery);
+            var current = TunWindows.Capture(IPAddress.Parse(record.Peer));
+            tunStatus = TunWindows.Same(record.Before, current) && current.InternetRoute == record.Before.InternetRoute
+                ? "TUN: интерфейс и собственные маршруты удалены. Исходные маршруты и DNS подтверждены."
+                : "TUN: интерфейс удалён. Состояние рабочей сети отличается от исходного.";
+            AddLog(tunStatus);
+            return true;
+        }
+        catch (Exception error)
+        {
+            tunStatus = "Проверка восстановления TUN не завершена. Код " + Code(error) + ".";
+            AddLog(tunStatus);
+            return false;
+        }
+    }
+
+    private HttpClient NetworkProbeClient() => tun is { } active ? TunWindows.Http(active.Record.Id) : Xray.ThroughProxy(checkPort);
+
+    private void ScheduleHealth(TimeSpan? delay) =>
+        nextHealthCheck = delay is { } interval ? Environment.TickCount64 + (long)interval.TotalMilliseconds : long.MaxValue;
+
+    private async Task CheckExternalIp(Xray process, CancellationToken token)
+    {
+        try
+        {
+            var tunneling = tun != null;
+            using var routed = NetworkProbeClient();
+            using var proxied = tunneling ? Xray.ThroughProxy(checkPort) : null;
+            var routedQuery = InternetHealth.ExternalIpAsync(routed, token);
+            var comparable = proxied != null ? await InternetHealth.ExternalIpAsync(proxied, token) : null;
+            var ip = await routedQuery;
+            if (token.IsCancellationRequested || core != process) return;
+            ipStatus = ip == null ? "Внешний IP: сервис проверки недоступен." :
+                "Внешний IP: " + ip + (comparable == null ? "" : comparable == ip
+                    ? " · совпадает с проверкой через локальный VLESS."
+                    : " · результат через локальный VLESS отличается.");
+            Render();
+        }
+        catch (Exception) { } // Optional; never leak request details or change the session state here.
     }
 
     private bool RestoreProxy(bool fromDisk = false)
@@ -343,7 +496,7 @@ public partial class MainWindow : Window
 
     private async void Monitor(object? sender, EventArgs e)
     {
-        if (Connection.Phase != Phase.Connected || core == null) return;
+        if (!Connection.Active || core == null) return;
         if (!core.Running)
         {
             Connection.Record(Check.Xray, CheckResult.Failed);
@@ -353,15 +506,25 @@ public partial class MainWindow : Window
         }
         try
         {
+            if (tun is { } active)
+            {
+                var found = TunWindows.Observe(active.Record);
+                if (!active.Running || !found.Interface || !found.Routes || !found.Dns ||
+                    !TunWindows.Same(active.Record.Before, TunWindows.Capture(IPAddress.Parse(active.Record.Peer))))
+                {
+                    Stop(true, "Интерфейс, маршрут или DNS туннеля изменились. Повторите подключение.");
+                    return;
+                }
+            }
             if (proxy.ReleaseIfChanged())
             {
                 Connection.ReleaseSystemProxy();
                 ReportProblem("Системный прокси изменился извне. Ядро работает в локальном режиме.");
             }
         }
-        catch (Exception error) when (error is Win32Exception or IOException or UnauthorizedAccessException)
+        catch (Exception error)
         {
-            Stop(true, "Не удалось проверить системный прокси. Код " + Code(error) + ".");
+            Stop(true, "Не удалось проверить сетевые параметры. Код " + Code(error) + ".");
             return;
         }
         Render();
@@ -376,7 +539,7 @@ public partial class MainWindow : Window
 
     private async Task CheckRunningConnection(bool manual)
     {
-        if (verifying || core is not { } process || health == null || Connection.Phase != Phase.Connected) return;
+        if (verifying || core is not { } process || health == null || !Connection.Active) return;
         var token = health.Token;
         var port = checkPort;
         var socks = socksPort;
@@ -392,12 +555,50 @@ public partial class MainWindow : Window
                 port != process.Port && !await process.IsProxyReadyAsync(port, token) ||
                 socks is { } optional && !await process.IsProxyReadyAsync(optional, token))
                 throw new VpnError("Локальный прокси перестал отвечать.");
+            if (tun is { } active && Environment.TickCount64 >= nextPeerCheck)
+            {
+                nextPeerCheck = Environment.TickCount64 + 120000;
+                using var lookup = CancellationTokenSource.CreateLinkedTokenSource(token);
+                lookup.CancelAfter(TimeSpan.FromSeconds(3));
+                try
+                {
+                    var addresses = await Dns.GetHostAddressesAsync(peerHost!, AddressFamily.InterNetwork, lookup.Token);
+                    if (addresses.Length != 0 && !addresses.Select(address => address.ToString()).Contains(active.Record.Peer))
+                    {
+                        Stop(true, "IPv4-адрес сервера изменился. Подключитесь снова для безопасного обновления маршрута.");
+                        return;
+                    }
+                }
+                catch (Exception error) when (error is SocketException or OperationCanceledException)
+                { }
+            }
             failedStage = Check.Https;
-            await Xray.VerifyAsync(port, token);
+            if (token.IsCancellationRequested || core != process) return;
+            if (manual && healthPolicy.ConsecutiveFailures == 3) healthPolicy = new HealthPolicy();
+            using var http = NetworkProbeClient();
+            var result = await InternetHealth.ProbeAsync(http, token);
             if (token.IsCancellationRequested || core != process) return;
             lastCheck = DateTimeOffset.Now;
-            nextHealthCheck = Environment.TickCount64 + (long)HealthInterval.TotalMilliseconds;
-            if (manual) AddLog("Повторная проверка HTTPS через VLESS пройдена.");
+            var next = healthPolicy.Observe(result.HasValue);
+            ScheduleHealth(next);
+            var wasUnstable = Connection.Phase == Phase.Unstable;
+            Connection.ReportHealth(result.HasValue);
+            if (result is { } latency)
+            {
+                if (manual || wasUnstable) AddLog($"HTTPS через VLESS снова подтверждён за {Math.Round(latency.TotalMilliseconds)} мс.");
+                if (manual || wasUnstable) _ = CheckExternalIp(process, token);
+                if (wasUnstable) Detail.Text = tun != null ? "Доступ через туннель снова подтверждён." :
+                    $"HTTP 127.0.0.1:{process.Port}" + (socksPort is { } optionalSocks ? $"   ·   SOCKS 127.0.0.1:{optionalSocks}" : "");
+            }
+            else
+            {
+                var dnsOk = tun == null || await TunWindows.CheckDns(token);
+                if (token.IsCancellationRequested || core != process) return;
+                var failure = dnsOk ? "Контрольные адреса недоступны." : "DNS Windows не разрешил контрольное имя.";
+                Detail.Text = next == null ? failure + " Сеанс активен. Проверьте соединение вручную." :
+                    failure + $" Повтор через {next.Value.TotalSeconds:0} с.";
+                AddLog(Detail.Text);
+            }
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
         catch (Exception error)
@@ -426,7 +627,7 @@ public partial class MainWindow : Window
         }
         closeRequested = true;
         timer.Stop();
-        if (core != null || proxy.Active) Stop(false);
+        if (core != null || proxy.Active || tun != null) Stop(false);
     }
 
     private void PasteClick(object sender, RoutedEventArgs e)
@@ -619,8 +820,8 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog(this) != true) return;
         try
         {
-            var header = new[] { "ПОМОГАТОР VPN 0.2.0", Status.Text, CoreCheck.Text, ProxyCheck.Text, TrafficCheck.Text,
-                SystemCheck.Text, CheckedAt.Text, "" };
+            var header = new[] { "ПОМОГАТОР VPN 0.3.0", Status.Text, CoreCheck.Text, ProxyCheck.Text, TrafficCheck.Text,
+                SystemCheck.Text, TunCheck.Text, CheckedAt.Text, "" };
             File.WriteAllLines(dialog.FileName, header.Concat(journal), Encoding.UTF8);
         }
         catch { ReportProblem("Не удалось сохранить отчёт. Проверьте доступ к выбранной папке."); }

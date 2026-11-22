@@ -1,6 +1,6 @@
 namespace Pomogator.Vpn;
 
-public enum Phase { Disconnected, Connecting, Connected, Error, Disconnecting }
+public enum Phase { Disconnected, Connecting, Connected, Error, Disconnecting, Unstable }
 public enum Check { Xray, Proxy, Https }
 public enum CheckResult { Pending, Passed, Failed }
 
@@ -22,7 +22,7 @@ public sealed class ConnectionState
 
     public void Record(Check check, CheckResult result)
     {
-        if (Phase is not (Phase.Connecting or Phase.Connected)) return;
+        if (Phase is not (Phase.Connecting or Phase.Connected or Phase.Unstable)) return;
         checks[(int)check] = result;
         Changed?.Invoke();
     }
@@ -36,6 +36,15 @@ public sealed class ConnectionState
         Change(Phase.Connected);
     }
 
+    public bool Active => Phase is Phase.Connected or Phase.Unstable;
+
+    public void ReportHealth(bool verified)
+    {
+        if (!Active) return;
+        checks[(int)Check.Https] = verified ? CheckResult.Passed : CheckResult.Failed;
+        Change(verified ? Phase.Connected : Phase.Unstable);
+    }
+
     public void ReleaseSystemProxy()
     {
         SystemProxy = false;
@@ -44,7 +53,7 @@ public sealed class ConnectionState
 
     public void BeginStop()
     {
-        if (Phase is Phase.Connecting or Phase.Connected or Phase.Error) Change(Phase.Disconnecting);
+        if (Phase is Phase.Connecting or Phase.Connected or Phase.Unstable or Phase.Error) Change(Phase.Disconnecting);
     }
 
     public void End(bool failed)

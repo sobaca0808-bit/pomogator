@@ -178,6 +178,44 @@ if (OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable("POMOGATOR
     passed++;
 }
 
+Test("TUN splits public IPv4 routes around the pinned peer and LAN", () => {
+    var peer = IPAddress.Parse("203.0.113.71");
+    var routes = TunConfig.Routes(peer).Select(IPNetwork.Parse).ToArray();
+    Assert(!routes.Any(route => route.Contains(peer) || route.Contains(IPAddress.Parse("192.168.137.1")) ||
+        route.Contains(IPAddress.Parse("127.0.0.1"))));
+    Assert(routes.Any(route => route.Contains(IPAddress.Parse(TunConfig.Resolver))));
+    Assert(routes.Any(route => route.Contains(IPAddress.Parse("203.0.113.70"))));
+    using var config = JsonDocument.Parse(TunConfig.Engine(Guid.NewGuid(), peer, 12345, new string('a', 48), 12346));
+    var settings = config.RootElement.GetProperty("inbounds")[0].GetProperty("settings");
+    Assert(settings.GetProperty("autoOutboundsInterface").GetString() == "");
+    Assert(settings.GetProperty("autoSystemWfpBlockLeak").EnumerateArray().Any(entry => entry.GetString() == "[::/0]:all"));
+});
+Test("TUN detects overlay and UBoost, while PPPoE is a valid uplink", () => {
+    Assert(!TunWindows.Conflicts(new[] { ("PPPoE", true, System.Net.NetworkInformation.NetworkInterfaceType.Ppp) }));
+    Assert(TunWindows.Conflicts(new[] { ("UBoost", true, System.Net.NetworkInformation.NetworkInterfaceType.Ethernet) }));
+    Assert(TunWindows.Conflicts(new[] { ("Custom", true, System.Net.NetworkInformation.NetworkInterfaceType.Tunnel) }));
+    var before = new TunBaseline(9, "synthetic", new[] { "192.0.2.2" }, new[] { "192.0.2.53" }, 9);
+    Assert(!TunWindows.Same(before, before with { Uplink = 10 }));
+    Assert(!TunWindows.Same(before, before with { Addresses = new[] { "192.0.2.3" } }));
+});
+await TestAsync("Control host timeouts, outage round backoff and recovery", async () => {
+    using var http = new HttpClient(new HealthFixture(outage: false));
+    Assert(await InternetHealth.ProbeAsync(http, CancellationToken.None) != null);
+    using var down = new HttpClient(new HealthFixture(outage: true));
+    Assert(await InternetHealth.ProbeAsync(down, CancellationToken.None) == null);
+    var policy = new HealthPolicy();
+    Assert(policy.Observe(false) == TimeSpan.FromSeconds(5));
+    Assert(policy.Observe(false) == TimeSpan.FromSeconds(15));
+    Assert(policy.Observe(false) == null && policy.Observe(false) == null);
+    var state = new ConnectionState();
+    state.Begin();
+    foreach (var check in Enum.GetValues<Check>()) state.Record(check, CheckResult.Passed);
+    state.Confirm(DateTimeOffset.Now, false);
+    state.ReportHealth(false);
+    Assert(state.Active && state.Phase == Phase.Unstable && state.ConnectedAt.HasValue);
+    state.ReportHealth(true);
+    Assert(state.Phase == Phase.Connected && policy.Observe(true) == HealthPolicy.Regular);
+});
 var executable = Environment.GetEnvironmentVariable("POMOGATOR_TEST_XRAY");
 if (!string.IsNullOrWhiteSpace(executable))
 {
@@ -291,6 +329,12 @@ if (!string.IsNullOrWhiteSpace(executable))
 }
 else Console.WriteLine("SKIP Core integration: set POMOGATOR_TEST_XRAY to the pinned binary.");
 
+if (OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable("POMOGATOR_TEST_TUN") == "1")
+{
+    if (string.IsNullOrEmpty(executable)) throw new InvalidOperationException("Missing pinned Xray path for TUN CI.");
+    await NativeTunTests.Run(executable);
+    passed++;
+}
 Console.WriteLine($"{passed} checks passed.");
 
 void Test(string name, Action action)
@@ -407,5 +451,20 @@ sealed class StubHttp(params HttpResponseMessage[] messages) : HttpMessageHandle
     {
         Requests.Add(request.RequestUri!);
         return Task.FromResult(responses.Dequeue());
+    }
+}
+
+
+sealed class HealthFixture(bool outage) : HttpMessageHandler
+{
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+    {
+        if (request.RequestUri!.Host == "www.gstatic.com")
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            throw new OperationCanceledException(token);
+        }
+        if (outage) return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+        return new HttpResponseMessage(HttpStatusCode.OK);
     }
 }

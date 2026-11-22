@@ -10,6 +10,7 @@ internal static class LocalData
         Environment.SpecialFolder.LocalApplicationData), "PomogatorVpn");
     internal static string Profiles => Path.Combine(Root, "profiles.dpapi");
     internal static string Recovery => Path.Combine(Root, "proxy-recovery.dpapi");
+    internal static string TunRecovery => Path.Combine(Root, "tun-recovery.dpapi");
 
     internal static FileStream Lock()
     {

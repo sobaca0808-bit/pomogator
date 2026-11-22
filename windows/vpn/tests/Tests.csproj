@@ -3,10 +3,13 @@
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="ui/**/*.cs" />
+    <Compile Include="../app/TunWindows.cs" Link="TunWindows.cs" />
+    <Compile Include="../app/TunConsole.cs" Link="TunConsole.cs" />
     <ProjectReference Include="../core/Core.csproj" />
     <Compile Include="../app/WinInet.cs" Link="WinInet.cs" />
     <Compile Include="../app/WindowsLifetime.cs" Link="WindowsLifetime.cs" />
