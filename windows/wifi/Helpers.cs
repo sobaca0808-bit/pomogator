@@ -221,6 +221,13 @@ namespace PomogatorWifi
                                     }
                                     Wire.Write(pipe, reply, limit.Token).GetAwaiter().GetResult();
                                 }
+                                // DisconnectNamedPipe discards unread bytes. The client closes after reading the reply.
+                                using (var close = new CancellationTokenSource(TimeSpan.FromMilliseconds(750)))
+                                {
+                                    var end = new byte[1];
+                                    try { pipe.ReadAsync(end, 0, end.Length, close.Token).GetAwaiter().GetResult(); }
+                                    catch (OperationCanceledException) { }
+                                }
                             }
                             catch (Exception error) when (error is IOException || error is OperationCanceledException)
                             { log("hosted_pipe_interrupted", error.GetType().Name); }
