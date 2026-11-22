@@ -53,9 +53,10 @@ internal static class NativeTunTests
         var dns = IPAddress.Parse(dnsTarget);
         var beforeWeb = TunWindows.Index(web);
         var beforeDns = TunWindows.Index(dns);
-        var snapshot = TunWindows.Capture(web);
+        var peer = IPAddress.Parse("203.0.113.21");
+        var snapshot = TunWindows.Capture(peer);
         var fixtureRoutes = new[] { webTarget + "/32", dnsTarget + "/32" };
-        var recovery = new TunRecovery(fixtureId, webTarget, snapshot, fixtureRoutes, dnsTarget);
+        var recovery = new TunRecovery(fixtureId, peer.ToString(), snapshot, fixtureRoutes, dnsTarget);
         Require(TunWindows.Vacant(recovery), "Test adapter was not initially absent.");
 
         using var httpDestination = new TcpListener(IPAddress.Loopback, 0);
@@ -98,6 +99,9 @@ internal static class NativeTunTests
         {
             try
             {
+                var observation = await TunReadiness.Wait(() => TunWindows.Observe(recovery, web), () => tunnel.Running,
+                    TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(200), timeLimit.Token);
+                Require(observation.Ready, "Native Wintun readiness failed: " + string.Join(" | ", observation.Lines()));
                 var adapter = TunWindows.Find(fixtureId);
                 Require(adapter is { OperationalStatus: OperationalStatus.Up }, "Native Wintun adapter did not appear.");
                 seenIndex = TunWindows.Index(adapter!);
@@ -135,6 +139,14 @@ internal static class NativeTunTests
                         catch (OperationCanceledException) when (!timeLimit.IsCancellationRequested) { }
                     }
                     Require(passed, "No UDP reply crossed the tunnel; test packets echoed by VLESS server: " + echoed);
+                    var dnsProbe = await TunConnectivity.CheckResolver(dns, seenIndex, timeLimit.Token);
+                    Require(dnsProbe.Success, "Native DNS query did not pass independently of HTTPS: " + dnsProbe.Outcome);
+                    try
+                    {
+                        using var socket = TunWindows.OpenSocket(seenIndex, IPAddress.Loopback, SocketType.Stream, ProtocolType.Tcp);
+                        throw new InvalidOperationException("Probe accepted a route outside Wintun.");
+                    }
+                    catch (SocketException) { }
                 }
                 finally
                 {
@@ -148,7 +160,7 @@ internal static class NativeTunTests
 
         Require(await TunWindows.WaitClean(recovery, TimeSpan.FromSeconds(5)), "Normal stop left the Wintun device.");
         Require(TunWindows.Index(web) == beforeWeb && TunWindows.Index(dns) == beforeDns &&
-            TunWindows.Same(snapshot, TunWindows.Capture(web)), "Initial routes or DNS differ after stop.");
+            TunWindows.Same(snapshot, TunWindows.Capture(peer)), "Initial routes or DNS differ after stop.");
         Require(seenIndex != 0, "No TUN interface was observed.");
 
         using (var crashed = await Xray.StartAsync(executable, fixture, readiness, timeLimit.Token, Track,
@@ -167,8 +179,8 @@ internal static class NativeTunTests
             Require(clean, "Could not clean the adapter left by an abrupt exit: " + diagnostic);
         }
         Require(TunWindows.Index(web) == beforeWeb && TunWindows.Index(dns) == beforeDns &&
-            TunWindows.Same(snapshot, TunWindows.Capture(web)), "Initial routes or DNS differ after crash recovery.");
-        Console.WriteLine("PASS Native Wintun: Windows HTTPS (UseProxy=false), UDP, DNS/route scope, graceful restoration and process-crash recovery");
+            TunWindows.Same(snapshot, TunWindows.Capture(peer)), "Initial routes or DNS differ after crash recovery.");
+        Console.WriteLine("PASS Native Wintun: staged readiness, HTTPS and DNS through VLESS, rejected foreign route, graceful and crash restoration");
     }
 
     private static object Redirect(string tag, int port) => new { tag, protocol = "freedom", settings = new {
@@ -199,9 +211,20 @@ internal static class NativeTunTests
         while (!token.IsCancellationRequested)
         {
             var packet = await listener.ReceiveAsync(token);
-            await listener.SendAsync(packet.Buffer, packet.RemoteEndPoint, token);
+            var response = packet.Buffer.Length > 12 ? DnsAnswer(packet.Buffer) : packet.Buffer;
+            await listener.SendAsync(response, packet.RemoteEndPoint, token);
             echoed();
         }
+    }
+
+    internal static byte[] DnsAnswer(byte[] query, byte code = 0)
+    {
+        byte[] address = [0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 20, 0, 4, 198, 51, 100, 10];
+        var reply = code == 0 ? query.Concat(address).ToArray() : query.ToArray();
+        reply[2] = 0x81;
+        reply[3] = (byte)(0x80 | code);
+        reply[7] = code == 0 ? (byte)1 : (byte)0;
+        return reply;
     }
 
     private static void Require(bool value, string message)

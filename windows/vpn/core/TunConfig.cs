@@ -8,6 +8,8 @@ namespace Pomogator.Vpn;
 public static class TunConfig
 {
     public const string Address = "198.18.240.1";
+    public const int PrefixLength = 30;
+    public const string InternetProbe = "1.1.1.1";
     public const string Resolver = "9.9.9.9";
     private const string TunTag = "pomogator-tun";
 
@@ -69,11 +71,11 @@ public static class TunConfig
     // CI runs a real TUN against documentation addresses only, without any other traffic affected.
     internal static string CreateEngine(Guid id, string[] routes, string[] filters, int socks, string password, int readiness, string resolver = Resolver) =>
         JsonSerializer.Serialize(new {
-            log = new { loglevel = "none" },
+            log = new { loglevel = "error" },
             inbounds = new object[] {
                 new { protocol = "tun", tag = TunTag, port = 0, settings = new {
                     name = Adapter(id), desc = "PomogatorVpn", mtu = 1400,
-                    gateway = new[] { Address + "/30" }, dns = new[] { resolver },
+                    gateway = new[] { Address + "/" + PrefixLength }, dns = new[] { resolver },
                     autoSystemRoutingTable = routes, autoOutboundsInterface = "",
                     autoSystemWfpBlockLeak = filters
                 } },

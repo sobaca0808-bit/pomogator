@@ -30,6 +30,9 @@ public partial class MainWindow : Window
     private readonly Queue<string> journal = new();
     private HealthPolicy healthPolicy = new();
     private TunSession? tun;
+    private TunObservation? tunObservation;
+    private TunChecks? tunChecks;
+    private string? tunStage, tunEngineNote, tunEnd;
     private long nextPeerCheck;
     private string? peerHost;
     private bool startingTun;
@@ -261,6 +264,10 @@ public partial class MainWindow : Window
         busy = true;
         lastCheck = null;
         startingTun = tunMode;
+        tunObservation = null;
+        tunChecks = null;
+        tunStage = tunMode ? "подготовка и поиск рабочего маршрута" : null;
+        tunEngineNote = tunEnd = null;
         ipStatus = "Внешний IP: ожидает проверки.";
         tunStatus = tunMode ? "TUN: подготовка." : "TUN: выключен.";
         healthPolicy = new HealthPolicy();
@@ -284,7 +291,7 @@ public partial class MainWindow : Window
                 {
                     var addresses = await Dns.GetHostAddressesAsync(profile.Host, AddressFamily.InterNetwork, dnsDeadline.Token);
                     peer = addresses.FirstOrDefault(address => !IPAddress.IsLoopback(address) &&
-                        address.ToString() != TunConfig.Resolver && address.ToString() != "1.1.1.1");
+                        address.ToString() != TunConfig.Resolver && address.ToString() != TunConfig.InternetProbe);
                 }
                 catch (Exception error) when (error is SocketException or OperationCanceledException && !source.IsCancellationRequested)
                 { throw new VpnError("Не удалось получить IPv4-адрес VPN-сервера через текущий DNS."); }
@@ -305,6 +312,7 @@ public partial class MainWindow : Window
             socksPort = tunMode || profile.Full?.SocksTag != null ? DistinctPort(port, checkPort) : null;
             var config = tunMode ? TunConfig.Bridge(profile, peer!, port, socksPort!.Value, bridgePassword!) :
                 XrayConfig.Create(profile, port, checkPort, socksPort);
+            if (tunMode) tunStage = "запуск Xray для выбранного VLESS";
             Detail.Text = "Запуск Xray…";
             core = await Xray.StartAsync(path, config, port, source.Token,
                 WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback, () =>
@@ -312,8 +320,9 @@ public partial class MainWindow : Window
                     Connection.Record(Check.Xray, CheckResult.Passed);
                     AddLog("Процесс Xray запущен.");
                     stage = Check.Proxy;
+                    if (tunMode) tunStage = "проверка локальных портов Xray";
                     Detail.Text = "Проверка входов локального прокси…";
-                });
+                }, startupExit: tunMode ? code => tunEngineNote = BridgeExit(code) : null);
             if (checkPort != port && !await core.IsProxyReadyAsync(checkPort, source.Token) ||
                 socksPort is { } socks && !await core.IsProxyReadyAsync(socks, source.Token))
                 throw new VpnError("Xray не открыл один из локальных портов профиля.");
@@ -321,30 +330,61 @@ public partial class MainWindow : Window
             AddLog("Локальные порты принадлежат Xray и принимают подключения.");
 
             stage = null;
+            TimeSpan result;
             if (recovery != null)
             {
-                Detail.Text = "Запуск виртуального интерфейса Wintun и проверка маршрутов…";
+                tunStage = "запуск Wintun и подтверждение параметров Windows";
+                Detail.Text = "Ожидание интерфейса, IPv4-адреса, маршрутов и DNS Wintun…";
                 tun = new TunSession(recovery);
-                await tun.StartAsync(socksPort!.Value, bridgePassword!, source.Token);
-                if (!await TunWindows.CheckDns(source.Token))
-                    throw new VpnError("Интерфейс и маршруты TUN доступны, но DNS Windows не разрешил контрольное имя.");
-                tunStatus = "TUN: интерфейс и маршруты IPv4 подтверждены. DNS разрешает имена. IPv6 блокируется.";
+                try { await tun.StartAsync(socksPort!.Value, bridgePassword!, source.Token); }
+                finally
+                {
+                    tunEngineNote = tun.EngineNote;
+                    tunObservation = tun.Observation ?? new TunObservation(TunConfig.AdapterId(recovery.Id), TunConfig.Adapter(recovery.Id),
+                        Uplink: recovery.Before.Uplink, ExpectedDns: recovery.InstalledDns, ErrorCode: "TUN_NO_SNAPSHOT");
+                }
+                tunStatus = "TUN: параметры виртуального интерфейса подтверждены.";
+                AddLog(tunStatus);
+                tunStage = "проверка DNS и HTTPS";
+                Detail.Text = "Проверяем DNS Windows, DNS через Wintun и HTTPS через Wintun…";
+                tunChecks = await TunConnectivity.Run(recovery, source.Token);
+                Connection.Record(Check.Https, tunChecks.Https.Success ? CheckResult.Passed : CheckResult.Failed);
+                foreach (var line in tunChecks.Lines()) AddLog(line);
+                if (!tunChecks.Success)
+                {
+                    tunStage = tunChecks.FailedStage;
+                    throw new VpnError(tunChecks.Failure);
+                }
+                tunStatus = "TUN: интерфейс, маршруты, системный DNS и HTTPS через Wintun подтверждены. IPv6 блокируется.";
                 peerHost = profile.Host;
                 nextPeerCheck = Environment.TickCount64 + 120000;
-                AddLog(tunStatus);
+                result = TimeSpan.FromMilliseconds(tunChecks.Https.Milliseconds);
             }
-            stage = Check.Https;
-            Detail.Text = "Контрольные HTTPS-запросы через выбранный VLESS…";
-            using var http = NetworkProbeClient();
-            var result = await InternetHealth.ProbeAsync(http, source.Token);
-            if (result == null) throw new VpnError("Контрольные адреса не ответили через выбранный VLESS. Доступ не подтверждён.");
+            else
+            {
+                stage = Check.Https;
+                Detail.Text = "Контрольные HTTPS-запросы через выбранный VLESS…";
+                using var http = NetworkProbeClient();
+                result = await InternetHealth.ProbeAsync(http, source.Token) ??
+                    throw new VpnError("Контрольные адреса не ответили через выбранный VLESS. Доступ не подтверждён.");
+            }
             lastCheck = DateTimeOffset.Now;
             Connection.Record(Check.Https, CheckResult.Passed);
-            AddLog($"HTTPS через выбранный VLESS подтверждён за {Math.Round(result.Value.TotalMilliseconds)} мс.");
+            AddLog($"HTTPS через выбранный VLESS подтверждён за {Math.Round(result.TotalMilliseconds)} мс.");
 
             stage = Check.Xray;
             source.Token.ThrowIfCancellationRequested();
-            if (!core.Running) throw new VpnError("Xray завершился после проверки.");
+            if (!core.Running)
+            {
+                if (tunMode) tunEngineNote = BridgeExit(core.ExitCode);
+                throw new VpnError("Xray завершился после проверки.");
+            }
+            if (tun is { Running: false } closedTun)
+            {
+                tunEngineNote = await closedTun.ReadEngineStop();
+                throw new VpnError("Помощник TUN завершился после проверки трафика.");
+            }
+            if (tunMode) tunStage = "проверки запуска завершены";
             stage = null;
             if (systemMode)
             {
@@ -360,6 +400,7 @@ public partial class MainWindow : Window
         }
         catch (Exception) when (source.IsCancellationRequested)
         {
+            if (tunMode) tunEnd = "подключение отменено пользователем";
             Stop(false);
             AddLog("Подключение отменено.");
         }
@@ -367,6 +408,7 @@ public partial class MainWindow : Window
         {
             if (((error as VpnError)?.FailedCheck ?? stage) is { } failed) Connection.Record(failed, CheckResult.Failed);
             lastCheck = DateTimeOffset.Now;
+            if (tunMode) tunEnd = Explain(error);
             Stop(true, Explain(error));
         }
         finally
@@ -404,6 +446,8 @@ public partial class MainWindow : Window
         health?.Dispose();
         health = null;
         var restored = RestoreProxy();
+        if (tun != null && tunEnd == null)
+            tunEnd = reason ?? "штатная остановка по запросу пользователя";
         var routeRestored = FinishTun();
         try { core?.Dispose(); }
         catch (Exception error)
@@ -504,6 +548,11 @@ public partial class MainWindow : Window
         if (!Connection.Active || core == null) return;
         if (!core.Running)
         {
+            if (tun != null)
+            {
+                tunStage = "контроль работы Xray";
+                tunEngineNote = BridgeExit(core.ExitCode);
+            }
             Connection.Record(Check.Xray, CheckResult.Failed);
             lastCheck = DateTimeOffset.Now;
             Stop(true, "Процесс Xray завершился. Повторите подключение.");
@@ -514,10 +563,20 @@ public partial class MainWindow : Window
             if (tun is { } active)
             {
                 var found = TunWindows.Observe(active.Record);
-                if (!active.Running || !found.Interface || !found.Routes || !found.Dns ||
+                if (!active.Running || !found.Ready ||
                     !TunWindows.Same(active.Record.Before, TunWindows.Capture(IPAddress.Parse(active.Record.Peer))))
                 {
-                    Stop(true, "Интерфейс, маршрут или DNS туннеля изменились. Повторите подключение.");
+                    tunObservation = found;
+                    var helperStopped = !active.Running;
+                    tunStage = helperStopped ? "контроль работы Xray TUN" : "контроль интерфейса, DNS и маршрутов";
+                    if (helperStopped)
+                    {
+                        var reason = await active.ReadEngineStop();
+                        if (tun != active) return;
+                        tunEngineNote = reason;
+                    }
+                    Stop(true, (helperStopped ? "Помощник TUN завершился." :
+                        found.Failure ?? "Состояние исходного интерфейса изменилось.") + " Повторите подключение.");
                     return;
                 }
             }
@@ -580,14 +639,30 @@ public partial class MainWindow : Window
             failedStage = Check.Https;
             if (token.IsCancellationRequested || core != process) return;
             if (manual && healthPolicy.ConsecutiveFailures == 3) healthPolicy = new HealthPolicy();
-            using var http = NetworkProbeClient();
-            var result = await InternetHealth.ProbeAsync(http, token);
+            TimeSpan? result;
+            bool? tunHttps = null;
+            string? tunFailure = null;
+            if (tun is { } session)
+            {
+                var latest = await TunConnectivity.Run(session.Record, token);
+                if (token.IsCancellationRequested || core != process) return;
+                tunChecks = latest;
+                tunHttps = latest.Https.Success;
+                result = latest.Success ? TimeSpan.FromMilliseconds(latest.Https.Milliseconds) : null;
+                if (!latest.Success) tunFailure = latest.Failure;
+                if (manual || !latest.Success)
+                    foreach (var line in latest.Lines()) AddLog(line);
+            }
+            else
+            {
+                using var http = NetworkProbeClient();
+                result = await InternetHealth.ProbeAsync(http, token);
+            }
             if (token.IsCancellationRequested || core != process) return;
             lastCheck = DateTimeOffset.Now;
             var next = healthPolicy.Observe(result.HasValue);
-            ScheduleHealth(next);
             var wasUnstable = Connection.Phase == Phase.Unstable;
-            Connection.ReportHealth(result.HasValue);
+            Connection.ReportHealth(result.HasValue, tunHttps);
             if (result is { } latency)
             {
                 if (manual || wasUnstable) AddLog($"HTTPS через VLESS снова подтверждён за {Math.Round(latency.TotalMilliseconds)} мс.");
@@ -597,9 +672,7 @@ public partial class MainWindow : Window
             }
             else
             {
-                var dnsOk = tun == null || await TunWindows.CheckDns(token);
-                if (token.IsCancellationRequested || core != process) return;
-                var failure = dnsOk ? "Контрольные адреса недоступны." : "DNS Windows не разрешил контрольное имя.";
+                var failure = tunFailure ?? "Контрольные адреса недоступны.";
                 Detail.Text = next == null ? failure + " Сеанс активен. Проверьте соединение вручную." :
                     failure + $" Повтор через {next.Value.TotalSeconds:0} с.";
                 AddLog(Detail.Text);
@@ -825,12 +898,20 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog(this) != true) return;
         try
         {
-            var header = new[] { "ПОМОГАТОР VPN 0.3.0", Status.Text, CoreCheck.Text, ProxyCheck.Text, TrafficCheck.Text,
+            var header = new[] { "ПОМОГАТОР VPN 0.3.1", Status.Text, CoreCheck.Text, ProxyCheck.Text, TrafficCheck.Text,
                 SystemCheck.Text, TunCheck.Text, CheckedAt.Text, "" };
-            File.WriteAllLines(dialog.FileName, header.Concat(journal), Encoding.UTF8);
+            var observations = tunObservation?.Lines() ?? Enumerable.Empty<string>();
+            var probes = tunChecks?.Lines() ?? Enumerable.Empty<string>();
+            var stages = new[] { tunStage == null ? null : "Этап TUN: " + tunStage,
+                tunEnd == null ? null : "Остановка TUN: " + tunEnd, tunEngineNote }.OfType<string>();
+            File.WriteAllLines(dialog.FileName, header.Concat(stages).Concat(observations).Concat(probes).Append("").Concat(journal), Encoding.UTF8);
         }
         catch { ReportProblem("Не удалось сохранить отчёт. Проверьте доступ к выбранной папке."); }
     }
+
+    private static string BridgeExit(int? exitCode) => exitCode is { } code ?
+        $"Xray для VLESS завершился с кодом {code}. Причина завершения ядром не подтверждена." :
+        "Xray для VLESS завершился. Код выхода недоступен.";
 
     private static string Explain(Exception error) => error is VpnError ? error.Message
         : "Windows или ядро отклонили операцию. Код " + Code(error) + ".";

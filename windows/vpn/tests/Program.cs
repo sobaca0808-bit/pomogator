@@ -190,6 +190,83 @@ Test("TUN splits public IPv4 routes around the pinned peer and LAN", () => {
     Assert(settings.GetProperty("autoOutboundsInterface").GetString() == "");
     Assert(settings.GetProperty("autoSystemWfpBlockLeak").EnumerateArray().Any(entry => entry.GetString() == "[::/0]:all"));
 });
+await TestAsync("TUN waits for a slow adapter, tentative IPv4, planned routes and delayed DNS", async () => {
+    var expected = new TunObservation(Guid.NewGuid(), "fixture", Uplink: 7, ExpectedDns: TunConfig.Resolver);
+    var up = expected with { Status = System.Net.NetworkInformation.OperationalStatus.Up, Index = 42 };
+    var ipv4 = up with { AddressState = "Preferred", AddressReady = true };
+    var routed = ipv4 with { PeerRoute = 7, ResolverRoute = 42, InternetRoute = 42 };
+    var ready = routed with { Dns = new[] { TunConfig.Resolver } };
+    var samples = new Queue<TunObservation>(new[] { expected, up, up with { AddressState = "Tentative" }, ipv4, routed, ready });
+    var result = await TunReadiness.Wait(samples.Dequeue, () => true, TimeSpan.FromSeconds(2),
+        TimeSpan.FromMilliseconds(6), CancellationToken.None);
+    Assert(samples.Count == 0 && result.Ready && result.WaitedMilliseconds > 0);
+    Assert(result.Lines().Any(line => line.Contains(result.Id.ToString())));
+
+    var wrongRoute = ready with { PeerRoute = 42 };
+    Assert(wrongRoute.Failure!.Contains("к VPN-серверу"));
+    var timedOut = await TunReadiness.Wait(() => wrongRoute, () => true, TimeSpan.FromMilliseconds(20),
+        TimeSpan.FromMilliseconds(5), CancellationToken.None);
+    Assert(!timedOut.Ready && timedOut.WaitedMilliseconds >= 19);
+    Assert((ready with { ResolverRoute = 7 }).Failure!.Contains("контрольный DNS"));
+    Assert((ready with { InternetRoute = 7 }).Failure!.Contains("контрольный HTTPS"));
+    Assert((ready with { Dns = Array.Empty<string>() }).Failure!.Contains("назначение DNS"));
+    var exited = await TunReadiness.Wait(() => up, () => false, TimeSpan.FromSeconds(2),
+        TimeSpan.FromMilliseconds(10), CancellationToken.None);
+    Assert(exited.ErrorCode == "TUN_XRAY_EXITED" && exited.Failure!.Contains("Ядро TUN завершилось"));
+    var restarted = await TunReadiness.Wait(() => ready, () => true, TimeSpan.FromSeconds(1),
+        TimeSpan.FromMilliseconds(10), CancellationToken.None);
+    Assert(restarted.Ready);
+    using var cancellation = new CancellationTokenSource();
+    cancellation.Cancel();
+    try
+    {
+        await TunReadiness.Wait(() => up, () => true, TimeSpan.FromSeconds(1), TimeSpan.FromMilliseconds(10), cancellation.Token);
+        throw new InvalidOperationException("Wintun wait ignored cancellation.");
+    }
+    catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+});
+Test("TUN reports DNS RCODE and rejects unrelated, malformed, or empty answers", () => {
+    var request = TunDns.Query(TunConnectivity.ControlName);
+    var reply = NativeTunTests.DnsAnswer(request);
+    Assert(TunDns.Read(request, reply, out var ok) == TunDnsAnswer.Resolved && ok == 0);
+    var nxdomain = NativeTunTests.DnsAnswer(request, 3);
+    Assert(TunDns.Read(request, nxdomain, out var error) == TunDnsAnswer.ServerError && error == 3);
+    var truncated = request.ToArray();
+    truncated[2] = 0x83;
+    Assert(TunDns.Read(request, truncated, out _) == TunDnsAnswer.Truncated);
+    truncated[2] = 0x81;
+    Assert(TunDns.Read(request, truncated, out _) == TunDnsAnswer.NoAddress);
+    Assert(TunDns.Read(request, reply.AsSpan(0, reply.Length - 1), out _) == TunDnsAnswer.Invalid);
+    reply[0] ^= 1;
+    Assert(TunDns.Read(request, reply, out _) == TunDnsAnswer.Invalid);
+    Assert(TunDns.Read(request, NativeTunTests.DnsAnswer(TunDns.Query("example.com")), out _) == TunDnsAnswer.Invalid);
+});
+Test("TUN cannot report ready with failed DNS even when IPv4 HTTPS is verified", () => {
+    var pass = new TunProbe(true, "fixture", 1);
+    var fail = new TunProbe(false, "DNS_TIMEOUT", 3000);
+    var system = new TunChecks(pass, fail, pass);
+    var direct = new TunChecks(fail, pass, pass);
+    Assert(!system.Success && system.FailedStage == "системное разрешение DNS");
+    Assert(!direct.Success && direct.FailedStage == "запрос к DNS на Wintun");
+    Assert(system.Lines().Any(line => line.Contains("DNS_TIMEOUT")));
+    var state = new ConnectionState();
+    state.Begin();
+    foreach (var check in Enum.GetValues<Check>()) state.Record(check, CheckResult.Passed);
+    state.Confirm(DateTimeOffset.Now, false);
+    state.ReportHealth(system.Success, system.Https.Success);
+    Assert(state.Phase == Phase.Unstable && state.Result(Check.Https) == CheckResult.Passed);
+    state.ReportHealth(true, true);
+    Assert(state.Phase == Phase.Connected);
+});
+Test("Only classified Xray diagnostics and its exit code can appear in the TUN report", () => {
+    var diagnostic = new TunEngineDiagnostic();
+    diagnostic.Read("fixture-secret-vless://ignored");
+    Assert(diagnostic.Description == null);
+    diagnostic.Read("fixture-secret unable to set routes other-credential");
+    diagnostic.Exited(23);
+    Assert(diagnostic.Description!.Contains("23") && diagnostic.Description.Contains("установка маршрутов") &&
+        !diagnostic.Description.Contains("fixture-secret") && !diagnostic.Description.Contains("other-credential"));
+});
 Test("TUN detects overlay and UBoost, while PPPoE is a valid uplink", () => {
     Assert(!TunWindows.Conflicts(new[] { ("PPPoE", true, System.Net.NetworkInformation.NetworkInterfaceType.Ppp) }));
     Assert(TunWindows.Conflicts(new[] { ("UBoost", true, System.Net.NetworkInformation.NetworkInterfaceType.Ethernet) }));

@@ -12,12 +12,15 @@ using Microsoft.Win32.SafeHandles;
 namespace Pomogator.Vpn;
 
 internal sealed record TunRequest(string Peer, int SocksPort, string Password, bool Recover, TunBaseline Before);
-internal sealed record TunReply(bool Success, string Message);
+internal sealed record TunReply(bool Success, string Message, TunObservation? Observation = null, string? EngineNote = null);
 
 internal sealed class TunSession(TunRecovery record) : IDisposable
 {
     private Process? helper;
     private NamedPipeServerStream? pipe;
+    private Task<string?>? stopNotice;
+    internal TunObservation? Observation { get; private set; }
+    internal string? EngineNote { get; private set; }
     internal TunRecovery Record { get; } = record;
     internal bool Running => helper is { HasExited: false };
 
@@ -58,7 +61,7 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
         { throw new VpnError("Запрос прав администратора для TUN отменён."); }
 
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
-        deadline.CancelAfter(TimeSpan.FromSeconds(35));
+        deadline.CancelAfter(TimeSpan.FromSeconds(44));
         try
         {
             var pending = pipe.WaitForConnectionAsync(deadline.Token);
@@ -69,10 +72,27 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
                 throw new VpnError("Windows не подтвердила личность помощника TUN.");
             await Send(pipe, request, deadline.Token);
             var reply = await Read<TunReply>(pipe, deadline.Token);
+            Observation = reply.Observation;
+            EngineNote = reply.EngineNote;
             if (!reply.Success) throw new VpnError(reply.Message);
+            if (!request.Recover) stopNotice = ReadStop(pipe);
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested)
-        { throw new VpnError("Интерфейс TUN не подтвердил запуск за 35 секунд."); }
+        { throw new VpnError("Помощник TUN не ответил за 44 секунды."); }
+    }
+
+    private static async Task<string?> ReadStop(Stream channel)
+    {
+        try { return (await Read<TunReply>(channel, CancellationToken.None)).EngineNote; }
+        catch (Exception error) when (error is IOException or ObjectDisposedException or OperationCanceledException or JsonException)
+        { return null; }
+    }
+
+    internal async Task<string?> ReadEngineStop()
+    {
+        if (stopNotice is { } pending && await Task.WhenAny(pending, Task.Delay(250)) == pending)
+            return await pending ?? EngineNote;
+        return EngineNote;
     }
 
     public void Dispose()
@@ -90,10 +110,12 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
     {
         if (!TunWindows.Administrator() || !TunWindows.SupportsWindows) return 1;
         using var channel = new NamedPipeClientStream(".", PipeName(id), PipeDirection.InOut, PipeOptions.Asynchronous);
-        using var boot = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        using var boot = new CancellationTokenSource(TimeSpan.FromSeconds(41));
         TunRecovery? record = null;
         Xray? engine = null;
         TunConsole? console = null;
+        TunObservation? observation = null;
+        var diagnostic = new TunEngineDiagnostic();
         try
         {
             await channel.ConnectAsync(boot.Token);
@@ -125,14 +147,27 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
             using var alive = CancellationTokenSource.CreateLinkedTokenSource(boot.Token);
             var eof = channel.ReadAsync(new byte[1]).AsTask();
             var start = Xray.StartAsync(Path.Combine(AppContext.BaseDirectory, "xray.exe"), config, port,
-                alive.Token, WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback, inheritConsole: true, startupSeconds: 24);
+                alive.Token, WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback, inheritConsole: true, startupSeconds: 24,
+                diagnosticLine: diagnostic.Read, startupExit: diagnostic.Exited);
             if (await Task.WhenAny(start, eof) == eof) alive.Cancel();
             engine = await start;
-            var observation = TunWindows.Observe(record);
-            if (!observation.Interface || !observation.Routes || !observation.Dns)
-                throw new VpnError("Windows не подтвердила интерфейс, маршруты или DNS туннеля.");
-            await Send(channel, new TunReply(true, ""), boot.Token);
-            while (engine.Running && !eof.IsCompleted) await Task.WhenAny(eof, Task.Delay(500));
+            var wait = TunReadiness.Wait(() => observation = TunWindows.Observe(record), () => engine.Running,
+                TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(300), alive.Token);
+            if (await Task.WhenAny(wait, eof) == eof) alive.Cancel();
+            observation = await wait;
+            if (observation.Failure is { } failure)
+            {
+                if (engine.ExitCode is { } code) diagnostic.Exited(code);
+                throw new VpnError(failure);
+            }
+            await Send(channel, new TunReply(true, "", observation), boot.Token);
+            while (engine.Running && !eof.IsCompleted) await Task.WhenAny(eof, Task.Delay(250));
+            if (!eof.IsCompleted && engine.ExitCode is { } exit)
+            {
+                diagnostic.Exited(exit);
+                using var notice = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                await Send(channel, new TunReply(false, "", EngineNote: diagnostic.Description), notice.Token);
+            }
             return 0;
         }
         catch (Exception error)
@@ -141,7 +176,7 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
             {
                 if (channel.IsConnected)
                     await Send(channel, new TunReply(false, error is VpnError ? error.Message :
-                        "Windows отклонила TUN. Код 0x" + error.HResult.ToString("X8") + "."), boot.Token);
+                        "Windows отклонила TUN. Код 0x" + error.HResult.ToString("X8") + ".", observation, diagnostic.Description), boot.Token);
             }
             catch { }
             return 1;

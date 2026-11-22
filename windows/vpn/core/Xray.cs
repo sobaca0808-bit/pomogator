@@ -14,6 +14,7 @@ public sealed class Xray : IDisposable
     private readonly Func<int, int, bool>? ownsPort;
     public int Port { get; }
     public bool Running => !disposed && !process.HasExited;
+    public int? ExitCode => !disposed && process.HasExited ? process.ExitCode : null;
 
     private Xray(Process process, int port, Func<int, int, bool>? ownsPort)
     { this.process = process; Port = port; this.ownsPort = ownsPort; }
@@ -27,7 +28,8 @@ public sealed class Xray : IDisposable
     }
 
     public static async Task<Xray> StartAsync(string executable, string config, int port, CancellationToken token,
-        Func<Process, IDisposable?>? protect = null, Func<int, int, bool>? ownsPort = null, Action? started = null, bool inheritConsole = false, int startupSeconds = 6)
+        Func<Process, IDisposable?>? protect = null, Func<int, int, bool>? ownsPort = null, Action? started = null, bool inheritConsole = false, int startupSeconds = 6,
+        Action<string>? diagnosticLine = null, Action<int>? startupExit = null)
     {
         var info = new ProcessStartInfo(executable) {
             UseShellExecute = false, CreateNoWindow = !inheritConsole, RedirectStandardInput = true,
@@ -53,6 +55,11 @@ public sealed class Xray : IDisposable
         {
             result.lifetime = protect?.Invoke(process);
             started?.Invoke();
+            if (diagnosticLine != null)
+            {
+                process.OutputDataReceived += (_, e) => { if (e.Data is { } line) diagnosticLine(line); };
+                process.ErrorDataReceived += (_, e) => { if (e.Data is { } line) diagnosticLine(line); };
+            }
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
             using var startup = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -64,7 +71,10 @@ public sealed class Xray : IDisposable
             while (true)
             {
                 if (!result.Running)
+                {
+                    RecordExit();
                     throw new VpnError("Ядро отклонило профиль или завершило запуск. Проверьте параметры TLS, REALITY и транспорта.", Check.Xray);
+                }
                 if (await result.IsProxyReadyAsync(port, startup.Token)) return result;
                 await Task.Delay(100, startup.Token);
             }
@@ -76,6 +86,7 @@ public sealed class Xray : IDisposable
         }
         catch (IOException)
         {
+            RecordExit();
             result.Dispose();
             throw new VpnError("Ядро завершилось до загрузки профиля.", Check.Xray);
         }
@@ -83,6 +94,12 @@ public sealed class Xray : IDisposable
         {
             result.Dispose();
             throw;
+        }
+
+        void RecordExit()
+        {
+            if (startupExit == null || result.ExitCode is not { } code) return;
+            startupExit(code);
         }
     }
 

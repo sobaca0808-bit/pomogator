@@ -38,10 +38,10 @@ public sealed class ConnectionState
 
     public bool Active => Phase is Phase.Connected or Phase.Unstable;
 
-    public void ReportHealth(bool verified)
+    public void ReportHealth(bool verified, bool? https = null)
     {
         if (!Active) return;
-        checks[(int)Check.Https] = verified ? CheckResult.Passed : CheckResult.Failed;
+        checks[(int)Check.Https] = (https ?? verified) ? CheckResult.Passed : CheckResult.Failed;
         Change(verified ? Phase.Connected : Phase.Unstable);
     }
 
