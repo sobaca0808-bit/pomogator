@@ -10,6 +10,10 @@ public static class TunConfig
     public const string Address = "198.18.240.1";
     public const int PrefixLength = 30;
     public const string InternetProbe = "1.1.1.1";
+    public const string InternetProbeHost = "cloudflare-dns.com";
+    private const string DnsUpstream = "https://dns.quad9.net/dns-query";
+    private const string DnsIngress = "pmt-doh";
+    private const string DnsOutbound = "pmt-dns";
     public const string Resolver = "9.9.9.9";
     private const string TunTag = "pomogator-tun";
 
@@ -54,14 +58,44 @@ public static class TunConfig
         return profile with { Host = peer.ToString(), Options = options, Full = null };
     }
 
-    public static string Engine(Guid id, IPAddress peer, Profile profile, int readiness) =>
+    public static string Engine(Guid id, IPAddress peer, Profile profile, int readiness, int diagnosticsPort = 0) =>
         CreateEngine(id, Routes(peer), new[] { "allexceptlan", "[::/0]:all", "misconfigtun" },
-            XrayConfig.Outbound(Pinned(profile, peer), "vpn"), readiness);
+            XrayConfig.Outbound(Pinned(profile, peer), "vpn"), readiness,
+            diagnosticsPort: diagnosticsPort > 0 ? diagnosticsPort : null, dnsOverHttps: DnsUpstream);
 
-    // CI runs a real TUN against documentation addresses only.
-    internal static string CreateEngine(Guid id, string[] routes, string[] filters, object outbound, int readiness, string resolver = Resolver) =>
-        JsonSerializer.Serialize(new {
+    // Production and native CI use the same TUN, routing and optional StatsService.
+    internal static string CreateEngine(Guid id, string[] routes, string[] filters, object outbound, int readiness,
+        string resolver = Resolver, int? diagnosticsPort = null, string? dnsOverHttps = null)
+    {
+        var outbounds = new List<object> { outbound, new { tag = "block", protocol = "blackhole" } };
+        var rules = new List<object> {
+            new { type = "field", inboundTag = new[] { "readiness" }, outboundTag = "block" },
+            new { type = "field", ip = new[] { "::/0" }, outboundTag = "block" }
+        };
+        if (dnsOverHttps != null)
+        {
+            // A and AAAA use Xray's routed DoH client. Remaining record types keep the VLESS path too.
+            outbounds.Add(new { tag = DnsOutbound, protocol = "dns", settings = new {
+                rules = new object[] { new { action = "hijack", qType = "1,28" }, new { action = "direct" } }
+            }, streamSettings = new { sockopt = new { dialerProxy = "vpn" } } });
+            rules.Insert(0, new { type = "field", inboundTag = new[] { DnsIngress }, outboundTag = "vpn" });
+            rules.Add(new { type = "field", inboundTag = new[] { TunTag }, ip = new[] { resolver },
+                port = "53", network = "tcp,udp", outboundTag = DnsOutbound });
+        }
+        rules.Add(new { type = "field", inboundTag = new[] { TunTag }, outboundTag = "vpn" });
+        object? stats = diagnosticsPort.HasValue ? new { } : null;
+        object? policy = diagnosticsPort.HasValue ? new { system = new {
+            statsInboundUplink = true, statsInboundDownlink = true, statsOutboundUplink = true, statsOutboundDownlink = true
+        } } : null;
+        return JsonSerializer.Serialize(new {
             log = new { loglevel = "error" },
+            dns = dnsOverHttps == null ? null : new {
+                tag = DnsIngress, servers = new[] { dnsOverHttps }, disableFallback = true
+            },
+            stats,
+            policy,
+            api = diagnosticsPort.HasValue ? new { tag = "pmt-tun-stats", listen = "127.0.0.1:" + diagnosticsPort.Value,
+                services = new[] { "StatsService" } } : null,
             inbounds = new object[] {
                 new { protocol = "tun", tag = TunTag, port = 0, settings = new {
                     name = Adapter(id), desc = "PomogatorVpn", mtu = 1400,
@@ -71,13 +105,8 @@ public static class TunConfig
                 } },
                 new { listen = "127.0.0.1", port = readiness, protocol = "http", tag = "readiness" }
             },
-            outbounds = new object[] {
-                outbound,
-                new { tag = "block", protocol = "blackhole" }
-            },
-            routing = new { domainStrategy = "AsIs", rules = new object[] {
-                new { type = "field", inboundTag = new[] { "readiness" }, outboundTag = "block" },
-                new { type = "field", ip = new[] { "::/0" }, outboundTag = "block" }
-            } }
-        });
+            outbounds,
+            routing = new { domainStrategy = "AsIs", rules }
+        }, new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull });
+    }
 }

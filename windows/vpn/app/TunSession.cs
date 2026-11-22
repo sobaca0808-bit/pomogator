@@ -12,7 +12,8 @@ using Microsoft.Win32.SafeHandles;
 namespace Pomogator.Vpn;
 
 internal sealed record TunRequest(string Peer, Profile? Profile, bool Recover, TunBaseline Before);
-internal sealed record TunReply(bool Success, string Message, TunObservation? Observation = null, string? EngineNote = null);
+internal sealed record TunReply(bool Success, string Message, TunObservation? Observation = null, string? EngineNote = null,
+    int DiagnosticsPort = 0, int EnginePid = 0);
 
 internal sealed class TunSession(TunRecovery record) : IDisposable
 {
@@ -21,6 +22,8 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
     private Task<string?>? stopNotice;
     internal TunObservation? Observation { get; private set; }
     internal string? EngineNote { get; private set; }
+    internal int DiagnosticsPort { get; private set; }
+    internal int EnginePid { get; private set; }
     internal TunRecovery Record { get; } = record;
     internal bool Running => helper is { HasExited: false };
 
@@ -74,6 +77,8 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
             var reply = await Read<TunReply>(pipe, deadline.Token);
             Observation = reply.Observation;
             EngineNote = reply.EngineNote;
+            DiagnosticsPort = reply.DiagnosticsPort;
+            EnginePid = reply.EnginePid;
             if (!reply.Success) throw new VpnError(reply.Message);
             if (!request.Recover) stopNotice = ReadStop(pipe);
         }
@@ -145,8 +150,10 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
                 throw new VpnError("Перед запуском изменился рабочий интерфейс или появился другой VPN. Настройки не применены.");
             console = new TunConsole();
             var port = Xray.FreePort();
+            int diagnosticsPort;
+            do { diagnosticsPort = Xray.FreePort(); } while (diagnosticsPort == port);
             launchingTun = true;
-            var config = TunConfig.Engine(id, peer, profile, port);
+            var config = TunConfig.Engine(id, peer, profile, port, diagnosticsPort);
             // Start watching the parent before the first network change, including driver initialization.
             using var alive = CancellationTokenSource.CreateLinkedTokenSource(boot.Token);
             var eof = channel.ReadAsync(new byte[1]).AsTask();
@@ -164,7 +171,7 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
                 if (engine.ExitCode is { } code) diagnostic.Exited(code);
                 throw new VpnError(failure);
             }
-            await Send(channel, new TunReply(true, "", observation), boot.Token);
+            await Send(channel, new TunReply(true, "", observation, DiagnosticsPort: diagnosticsPort, EnginePid: engine.ProcessId), boot.Token);
             while (engine.Running && !eof.IsCompleted) await Task.WhenAny(eof, Task.Delay(250));
             if (!eof.IsCompleted && engine.ExitCode is { } exit)
             {

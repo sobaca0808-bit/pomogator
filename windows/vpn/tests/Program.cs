@@ -289,6 +289,40 @@ Test("Only classified Xray diagnostics and its exit code can appear in the TUN r
     Assert(diagnostic.Description!.Contains("23") && diagnostic.Description.Contains("установка маршрутов") &&
         !diagnostic.Description.Contains("fixture-secret") && !diagnostic.Description.Contains("other-credential"));
 });
+Test("Production TUN routes encrypted DNS and keeps telemetry on loopback", () => {
+    using var config = JsonDocument.Parse(TunConfig.Engine(Guid.NewGuid(), IPAddress.Parse("203.0.113.71"),
+        Profiles.Parse(Base + "?security=tls"), 34002, 34003));
+    var root = config.RootElement;
+    Assert(root.GetProperty("dns").GetProperty("servers")[0].GetString() == "https://dns.quad9.net/dns-query");
+    Assert(root.GetProperty("dns").GetProperty("disableFallback").GetBoolean());
+    Assert(root.GetProperty("api").GetProperty("listen").GetString() == "127.0.0.1:34003");
+    Assert(root.GetProperty("api").GetProperty("services")[0].GetString() == "StatsService");
+    var rules = root.GetProperty("routing").GetProperty("rules").EnumerateArray().ToArray();
+    Assert(rules[0].GetProperty("inboundTag")[0].GetString() == root.GetProperty("dns").GetProperty("tag").GetString());
+    Assert(rules[0].GetProperty("outboundTag").GetString() == "vpn");
+    Assert(rules.Any(rule => rule.TryGetProperty("port", out var port) && port.GetString() == "53" &&
+        rule.GetProperty("network").GetString() == "tcp,udp"));
+    var dns = root.GetProperty("outbounds").EnumerateArray().Single(item => item.GetProperty("protocol").GetString() == "dns");
+    Assert(dns.GetProperty("streamSettings").GetProperty("sockopt").GetProperty("dialerProxy").GetString() == "vpn");
+});
+Test("Report Windows packets separately from Xray bytes and preserve unknown/reset", () => {
+    const string json = """
+        {"stat":[{"name":"inbound>>>pomogator-tun>>>traffic>>>uplink","value":"31"},
+        {"name":"inbound>>>pomogator-tun>>>traffic>>>downlink"},
+        {"name":"outbound>>>vpn>>>traffic>>>uplink","value":70},
+        {"name":"outbound>>>vpn>>>traffic>>>downlink","value":"4"},
+        {"name":"unrelated","value":833}]}
+        """;
+    var parsed = TunXrayCounters.Parse(json);
+    Assert(parsed == new TunXraySample(31, 0, 70, 4));
+    Assert(TunXrayCounters.Parse("""{"stat":[]}""") == null);
+    var before = new TunTrafficSample(new TunPacketSample(9, 10, 5, 2, 0, 0), new TunXraySample(3, 0, 4, 0));
+    var after = new TunTrafficSample(new TunPacketSample(11, 10, 4, 2, 0, 0), parsed);
+    var lines = after.Describe("DNS", before).ToArray();
+    Assert(lines.Any(line => line.Contains("Windows → Wintun: 2") && line.Contains("н/д/0")));
+    Assert(lines.Any(line => line.Contains("байты полезной нагрузки Xray TUN ↑/↓: 28/0")));
+    Assert(lines.Any(line => line.Contains("возврат полезной нагрузки")));
+});
 Test("TUN detects overlay and UBoost, while PPPoE is a valid uplink", () => {
     Assert(!TunWindows.Conflicts(new[] { ("PPPoE", true, System.Net.NetworkInformation.NetworkInterfaceType.Ppp) }));
     Assert(TunWindows.Conflicts(new[] { ("UBoost", true, System.Net.NetworkInformation.NetworkInterfaceType.Ethernet) }));
@@ -338,7 +372,9 @@ if (!string.IsNullOrWhiteSpace(executable))
     }) await CheckConfiguration(executable, profile);
     var advanced = Profiles.ParseList(EasyGo("server.example", 443, Id, RealityKey), keepRouting: true).Single();
     await CheckConfiguration(executable, advanced);
-    Console.WriteLine("PASS Pinned Xray validates transports and full EasyGo configuration");
+    var tunConfig = TunConfig.Engine(Guid.NewGuid(), IPAddress.Parse("203.0.113.71"), advanced, 34010, 34011);
+    await CheckConfiguration(executable, advanced, tunConfig);
+    Console.WriteLine("PASS Pinned Xray validates transports, full EasyGo and TUN DoH/StatsService configuration");
     passed++;
 
     await TestAsync("Classify a core startup failure separately from a proxy failure", async () => {
@@ -511,7 +547,7 @@ static VpnError Throws(Action action)
     throw new InvalidOperationException("Expected validation error.");
 }
 
-static async Task CheckConfiguration(string executable, Profile profile)
+static async Task CheckConfiguration(string executable, Profile profile, string? config = null)
 {
     using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(8));
     var info = new ProcessStartInfo(executable) {
@@ -524,7 +560,7 @@ static async Task CheckConfiguration(string executable, Profile profile)
     var stderr = process.StandardError.ReadToEndAsync(deadline.Token);
     try
     {
-        await process.StandardInput.WriteAsync(XrayConfig.Create(profile, 34000, 34001, 34002));
+        await process.StandardInput.WriteAsync(config ?? XrayConfig.Create(profile, 34000, 34001, 34002));
         process.StandardInput.Close();
         await process.WaitForExitAsync(deadline.Token);
         await Task.WhenAll(stdout, stderr);

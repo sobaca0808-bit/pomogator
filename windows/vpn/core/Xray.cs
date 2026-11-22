@@ -13,6 +13,7 @@ public sealed class Xray : IDisposable
     private bool disposed;
     private readonly Func<int, int, bool>? ownsPort;
     public int Port { get; }
+    public int ProcessId => process.Id;
     public bool Running => !disposed && !process.HasExited;
     public int? ExitCode => !disposed && process.HasExited ? process.ExitCode : null;
 

@@ -116,7 +116,8 @@ internal static class TunWindows
         catch { socket.Dispose(); throw; }
     }
 
-    internal static HttpClient Http(Guid id, RemoteCertificateValidationCallback? validation = null)
+    internal static HttpClient Http(Guid id, RemoteCertificateValidationCallback? validation = null,
+        string? requiredHost = null, IPAddress? pinnedAddress = null)
     {
         var adapter = Find(id) ?? throw new VpnError("Интерфейс TUN пропал.");
         var adapterIndex = Index(adapter);
@@ -124,7 +125,8 @@ internal static class TunWindows
         if (validation != null) handler.SslOptions.RemoteCertificateValidationCallback = validation;
         handler.ConnectCallback = async (context, token) =>
         {
-            var addresses = IPAddress.TryParse(context.DnsEndPoint.Host, out var literal) &&
+            var addresses = pinnedAddress != null && string.Equals(requiredHost, context.DnsEndPoint.Host, StringComparison.OrdinalIgnoreCase)
+                ? new[] { pinnedAddress } : IPAddress.TryParse(context.DnsEndPoint.Host, out var literal) &&
                 literal.AddressFamily == AddressFamily.InterNetwork ? new[] { literal } :
                 await Dns.GetHostAddressesAsync(context.DnsEndPoint.Host, AddressFamily.InterNetwork, token);
             foreach (var ip in addresses)
