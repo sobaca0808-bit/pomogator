@@ -35,16 +35,21 @@ internal static class RasProxyScope
             }
             if (result != 0) throw new VpnError("Не удалось определить активное подключение Windows (RAS " + result + ").");
             return Select(Enumerable.Range(0, count).Select(i => Marshal.PtrToStructure<Connection>(
-                IntPtr.Add(buffer, i * size)).Entry));
+                IntPtr.Add(buffer, i * size))).Select(entry => (entry.Entry, entry.DeviceType)));
         }
         finally { Marshal.FreeHGlobal(buffer); }
     }
 
-    internal static string? Select(IEnumerable<string> entries)
+    internal static string? Select(IEnumerable<(string Name, string Type)> entries)
     {
-        var names = entries.Where(entry => !string.IsNullOrWhiteSpace(entry)).Distinct(StringComparer.OrdinalIgnoreCase).Take(2).ToArray();
-        if (names.Length > 1) throw new VpnError("Windows сообщает о нескольких активных подключениях RAS. Безопасный выбор системного прокси невозможен.");
-        return names.SingleOrDefault();
+        var connections = entries.DistinctBy(entry => entry.Name, StringComparer.OrdinalIgnoreCase).Take(2).ToArray();
+        if (connections.Length > 1) throw new VpnError("Windows сообщает о нескольких активных подключениях RAS. Безопасный выбор системного прокси невозможен.");
+        if (connections.Length == 0) return null;
+        var connection = connections[0];
+        if (string.IsNullOrWhiteSpace(connection.Name) ||
+            !string.Equals(connection.Type, "PPPoE", StringComparison.OrdinalIgnoreCase))
+            throw new VpnError("Активное подключение RAS нельзя подтвердить как PPPoE. Можно использовать локальный прокси.");
+        return connection.Name;
     }
 
     [DllImport("rasapi32.dll", EntryPoint = "RasEnumConnectionsW")]

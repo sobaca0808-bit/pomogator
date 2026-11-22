@@ -180,9 +180,10 @@ if (OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable("POMOGATOR
 }
 
 Test("Select a single active RAS scope and refuse ambiguous proxy changes", () => {
-    Assert(RasProxyScope.Select(Array.Empty<string>()) == null);
-    Assert(RasProxyScope.Select(new[] { "Broadband", "broadband" }) == "Broadband");
-    Throws(() => RasProxyScope.Select(new[] { "Broadband", "Another connection" }));
+    Assert(RasProxyScope.Select(Array.Empty<(string, string)>()) == null);
+    Assert(RasProxyScope.Select(new[] { ("Broadband", "PPPoE"), ("broadband", "pppoe") }) == "Broadband");
+    Throws(() => RasProxyScope.Select(new[] { ("Broadband", "PPPoE"), ("Another connection", "PPPoE") }));
+    Throws(() => RasProxyScope.Select(new[] { ("Other VPN", "vpn") }));
 });
 await TestAsync("Xray chooses a fresh port with bounded retries and never retries a profile error", async () => {
     var plans = 0;
