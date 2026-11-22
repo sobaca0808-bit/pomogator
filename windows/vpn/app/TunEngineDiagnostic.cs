@@ -26,7 +26,7 @@ internal sealed class TunEngineDiagnostic
 
     internal void Read(string line)
     {
-        if (System.Text.RegularExpressions.Regex.IsMatch(line, @"Xray \d+\.\d+\.\d+ started\s*$"))
+        if (line.Contains("core: Xray ", StringComparison.Ordinal) && line.EndsWith(" started", StringComparison.Ordinal))
             Interlocked.Exchange(ref started, 1);
         var known = line.Contains("unable to set routes", StringComparison.OrdinalIgnoreCase) ? "установка маршрутов" :
             line.Contains("unable to set ips", StringComparison.OrdinalIgnoreCase) ? "назначение IPv4" :
