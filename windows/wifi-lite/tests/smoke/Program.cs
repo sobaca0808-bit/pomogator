@@ -13,6 +13,9 @@ internal static class Smoke
         {
             Require(first && Program.PreviousRunning(), "original owner marker detection");
         }
+        using (var previous = new Mutex(false, @"Local\PomogatorWifi.UI." + Program.SessionKey, out var opened))
+        using (var lite = new Mutex(false, Program.WindowMarker, out var created))
+            Require(opened && !created, "original window and Lite exclude each other");
         using (var form = new LiteWindow(new HostedSession(() => new Wlan(), () => false), new IcsProbe()))
         {
             var table = form.Controls.OfType<TableLayoutPanel>().Single();

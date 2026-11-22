@@ -9,6 +9,7 @@ namespace PomogatorWifiLite
     internal static class Program
     {
         private const string Title = "ПОМОГАТОР Wi-Fi Lite";
+        internal static string WindowMarker => @"Local\PomogatorWifi.UI." + SessionKey;
         internal static string SessionKey
         {
             get
@@ -22,7 +23,7 @@ namespace PomogatorWifiLite
         internal static bool PreviousRunning()
         {
             // The owner can outlive the visible window in the original application.
-            if (Mutex.TryOpenExisting(@"LocalPomogatorWifi.Owner." + SessionKey, out var owner))
+            if (Mutex.TryOpenExisting(@"Local\PomogatorWifi.Owner." + SessionKey, out var owner))
             {
                 owner.Dispose();
                 return true;
@@ -38,7 +39,7 @@ namespace PomogatorWifiLite
             try
             {
                 // Reserve the original window marker as well so it cannot open while Lite is running.
-                using (var windowGuard = new Mutex(false, @"LocalPomogatorWifi.UI." + SessionKey, out var first))
+                using (var windowGuard = new Mutex(false, WindowMarker, out var first))
                 {
                     if (!first || PreviousRunning())
                     {
