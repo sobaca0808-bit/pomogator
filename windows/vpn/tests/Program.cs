@@ -198,6 +198,13 @@ Test("TUN detects overlay and UBoost, while PPPoE is a valid uplink", () => {
     Assert(!TunWindows.Same(before, before with { Uplink = 10 }));
     Assert(!TunWindows.Same(before, before with { Addresses = new[] { "192.0.2.3" } }));
 });
+Test("Crash recovery rejects a foreign route gateway, metric or destination", () => {
+    var planned = new HashSet<string> { "198.51.100.53/32" };
+    Assert(TunWindows.OwnRoute("198.51.100.53/32|0.0.0.0|0", planned));
+    Assert(!TunWindows.OwnRoute("198.51.100.53/32|192.0.2.1|0", planned));
+    Assert(!TunWindows.OwnRoute("198.51.100.53/32|0.0.0.0|15", planned));
+    Assert(!TunWindows.OwnRoute("203.0.113.0/24|0.0.0.0|0", planned));
+});
 await TestAsync("Control host timeouts, outage round backoff and recovery", async () => {
     using var http = new HttpClient(new HealthFixture(outage: false));
     Assert(await InternetHealth.ProbeAsync(http, CancellationToken.None) != null);
