@@ -1,0 +1,46 @@
+name: ПОМОГАТОР Wi-Fi Lite · Windows x64
+
+on:
+  push:
+    branches: [wifi-lite]
+  pull_request:
+    paths:
+      - 'windows/wifi-lite/**'
+      - '.github/workflows/wifi-lite-windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Test Hosted Network ownership and read-only ICS
+        run: dotnet run --project windows/wifi-lite/tests/PolicyTests.csproj -c Release
+      - name: Build Windows x64 and exercise the native read paths
+        shell: pwsh
+        run: |
+          dotnet build windows/wifi-lite/tests/smoke/WifiLiteSmoke.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & windows/wifi-lite/tests/smoke/bin/Release/net48/WifiLiteSmoke.exe
+          exit $LASTEXITCODE
+      - name: Package standalone EXE and guide
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory bundle
+          Copy-Item windows/wifi-lite/bin/Release/net48/PomogatorWifiLite.exe bundle/
+          Copy-Item windows/wifi-lite/README.md bundle/
+          Get-FileHash bundle/PomogatorWifiLite.exe -Algorithm SHA256 |
+            ForEach-Object { $_.Hash + '  PomogatorWifiLite.exe' } |
+            Set-Content bundle/SHA256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PomogatorWifiLite-0.1.0-win-x64
+          path: bundle/
+          if-no-files-found: error
