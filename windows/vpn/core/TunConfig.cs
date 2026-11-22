@@ -67,6 +67,12 @@ public static class TunConfig
             UplinkOutbound(peer, source, profile), readiness,
             diagnosticsPort: diagnosticsPort > 0 ? diagnosticsPort : null, dnsOverHttps: DnsUpstream, control: control, peer: peer);
 
+    public static string PreflightEngine(IPAddress peer, IPAddress source, Profile profile, int port) => JsonSerializer.Serialize(new {
+        log = new { loglevel = "none" },
+        inbounds = new[] { new { listen = "127.0.0.1", port, protocol = "http" } },
+        outbounds = new[] { UplinkOutbound(peer, source, profile) }
+    });
+
     internal static Dictionary<string, object> UplinkOutbound(IPAddress peer, IPAddress source, Profile profile)
     {
         if (source.AddressFamily != AddressFamily.InterNetwork || source.Equals(IPAddress.Any) ||
@@ -113,6 +119,9 @@ public static class TunConfig
                 ip = new[] { target + "/32" }, port = control.DestinationPort.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 network = "tcp", outboundTag = "vpn" });
             rules.Add(new { type = "field", ruleTag = "pmt-control-block", inboundTag = new[] { ControlTag }, outboundTag = "block" });
+            rules.Add(new { type = "field", ruleTag = "pmt-wintun-probe", inboundTag = new[] { TunTag },
+                ip = new[] { target + "/32" }, port = control.DestinationPort.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                network = "tcp", outboundTag = "vpn" });
         }
         if (dnsOverHttps != null)
         {
@@ -120,11 +129,11 @@ public static class TunConfig
             outbounds.Add(new { tag = DnsOutbound, protocol = "dns", settings = new {
                 rules = new object[] { new { action = "hijack", qType = "1,28" }, new { action = "direct" } }
             }, streamSettings = new { sockopt = new { dialerProxy = "vpn" } } });
-            rules.Insert(0, new { type = "field", inboundTag = new[] { DnsIngress }, outboundTag = "vpn" });
+            rules.Insert(0, new { type = "field", ruleTag = "pmt-doh-vless", inboundTag = new[] { DnsIngress }, outboundTag = "vpn" });
             rules.Add(new { type = "field", inboundTag = new[] { TunTag }, ip = new[] { resolver },
                 port = "53", network = "tcp,udp", outboundTag = DnsOutbound });
         }
-        rules.Add(new { type = "field", inboundTag = new[] { TunTag }, outboundTag = "vpn" });
+        rules.Add(new { type = "field", ruleTag = "pmt-tun-vless", inboundTag = new[] { TunTag }, outboundTag = "vpn" });
         object? stats = diagnosticsPort.HasValue ? new { } : null;
         object? policy = diagnosticsPort.HasValue ? new { system = new {
             statsInboundUplink = true, statsInboundDownlink = true, statsOutboundUplink = true, statsOutboundDownlink = true

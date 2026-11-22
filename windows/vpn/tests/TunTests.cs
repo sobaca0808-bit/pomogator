@@ -137,9 +137,11 @@ internal static class NativeTunTests
             TunWindows.MatchesBaseline(snapshot, TunWindows.Capture(peer)),
             "Failed readiness did not restore the initial network before a retry.");
 
+        var engineDiagnostic = new TunEngineDiagnostic(uplinkAddress, upstreamPort, rawTransport: true);
         using (var tunnel = await Xray.StartAsync(executable, fixture, readiness, timeLimit.Token, Track,
             WindowsLifetime.OwnsLoopback, inheritConsole: true, startupSeconds: 24, diagnosticLine: line =>
             {
+                engineDiagnostic.Read(line);
                 // Capture only fixed markers. The test needs to distinguish local CONNECT, dispatch and VLESS.
                 foreach (var marker in ControlLogMarkers)
                     if (line.Contains(marker, StringComparison.OrdinalIgnoreCase))
@@ -303,6 +305,14 @@ internal static class NativeTunTests
                         "The running TUN engine's authenticated control path did not return the VLESS response.");
                 }
                 await controlResponse;
+                const string correlated = "контроль через Xray → IP:порт VPN-сервера · внешний транспорт открыт";
+                var matchedControl = false;
+                for (var attempt = 0; attempt < 10 && !matchedControl; attempt++)
+                {
+                    matchedControl = engineDiagnostic.TakeEvents().Any(item => item.Contains(correlated));
+                    if (!matchedControl) await Task.Delay(100, timeLimit.Token);
+                }
+                Require(matchedControl, "Pinned Xray logs did not correlate CONNECT with its actual protected transport.");
                 await RejectControlDestination(control, "198.51.100.11", control.DestinationPort, httpDestination, timeLimit.Token);
                 var otherPort = control.DestinationPort == 65535 ? 65534 : control.DestinationPort + 1;
                 await RejectControlDestination(control, control.Destination, otherPort, httpDestination, timeLimit.Token);

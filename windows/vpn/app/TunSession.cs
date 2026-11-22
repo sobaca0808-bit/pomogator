@@ -184,6 +184,7 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
 
             if (request.Profile is not { Full: null } profile ||
                 profile.Security is not ("tls" or "reality") || profile.Id == Guid.Empty || profile.Port is < 1 or > 65535) return 1;
+            diagnostic = new TunEngineDiagnostic(peer, profile.Port, profile.Transport == "raw");
             if (!IPAddress.TryParse(record.Before.SourceIpv4, out var source) || !record.Before.HasSource(source))
                 throw new VpnError("Не подтверждён исходный IPv4 для подключения Xray. TUN не запущен.");
             if (!TunWindows.Vacant(record) || TunWindows.OtherVpn() || SystemProxy.AnyInUse() ||

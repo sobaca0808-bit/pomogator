@@ -56,6 +56,10 @@ internal static class TunConnectivity
     internal const string ControlName = "www.cloudflare.com";
     private const string AlternateName = "example.com";
 
+    internal static Task<TunProbe> CheckBeforeTun(int port, int pid, CancellationToken token) =>
+        PinnedHttps(validation => TunControlProbe.Client(new TunControlEndpoint(port, "", "", TunConfig.InternetProbe, 443),
+            pid, TunConfig.InternetProbeHost, validation), token);
+
     internal static async Task<TunChecks> Run(TunSession session, CancellationToken token)
     {
         var record = session.Record;
@@ -66,22 +70,8 @@ internal static class TunConnectivity
         _ = await session.SampleEvents(token); // Discard events before this diagnostic interval.
         Task<TunTrafficSample> Capture() => TunTrafficSample.Capture(record.Id, session.DiagnosticsPort, session.EnginePid, token);
 
-        var before = await Capture();
-        var direct = CheckResolver(resolver, index, token);
-        var windows = CheckWindows(token);
-        await Task.WhenAll(direct, windows);
-        var directResult = await direct;
-        var windowsResult = await windows;
-        var afterDns = await Capture();
-        lines.AddRange(afterDns.Describe("DNS", before, !directResult.Success || !windowsResult.Success));
-        await AddEngineEvents("DNS");
-
-        var pinned = await PinnedHttps(validation => TunWindows.Http(record.Id, validation,
-            TunConfig.InternetProbeHost, IPAddress.Parse(TunConfig.InternetProbe)), token);
-        var afterHttps = await Capture();
-        lines.AddRange(afterHttps.Describe("HTTPS Wintun", afterDns, !pinned.Success));
-        await AddEngineEvents("HTTPS Wintun");
-
+        var previous = await Capture();
+        // Compare the two DNS-independent probes before launching our own DNS retries.
         TunProbe? control = null;
         if (session.Control is { } endpoint)
         {
@@ -91,10 +81,26 @@ internal static class TunConnectivity
             control = await probe;
             lines.Add(trace);
             var afterControl = await Capture();
-            lines.AddRange(afterControl.Describe("HTTPS локальный вход Xray", afterHttps, explainFailure: false));
+            lines.AddRange(afterControl.Describe("HTTPS локальный вход Xray", previous, explainFailure: false));
+            previous = afterControl;
             await AddEngineEvents("HTTPS локальный вход Xray");
         }
         else lines.Add("HTTPS локальный вход Xray · помощник не подтвердил контрольный вход.");
+
+        var pinned = await PinnedHttps(validation => TunWindows.Http(record.Id, validation,
+            TunConfig.InternetProbeHost, IPAddress.Parse(TunConfig.InternetProbe)), token);
+        var afterHttps = await Capture();
+        lines.AddRange(afterHttps.Describe("HTTPS Wintun", previous, !pinned.Success));
+        await AddEngineEvents("HTTPS Wintun");
+
+        var direct = CheckResolver(resolver, index, token);
+        var windows = CheckWindows(token);
+        await Task.WhenAll(direct, windows);
+        var directResult = await direct;
+        var windowsResult = await windows;
+        var afterDns = await Capture();
+        lines.AddRange(afterDns.Describe("DNS", afterHttps, !directResult.Success || !windowsResult.Success));
+        await AddEngineEvents("DNS");
 
         var https = pinned;
         if (!pinned.Success && TunWindows.Find(record.Id) != null)
@@ -113,8 +119,9 @@ internal static class TunConnectivity
         async Task AddEngineEvents(string phase)
         {
             var events = await session.SampleEvents(token);
-            lines.Add($"{phase} · Xray: {(events == null ? "события недоступны" : events.Length == 0 ?
-                "распознанных событий нет" : string.Join(", ", events))}.");
+            if (events is { Length: > 0 })
+                lines.AddRange(events.Select(item => $"{phase} · Xray · {item}"));
+            else lines.Add($"{phase} · Xray · {(events == null ? "события недоступны" : "распознанных событий нет")}.");
         }
     }
 
@@ -136,7 +143,7 @@ internal static class TunConnectivity
 
     internal static string PeerLine(PeerTcp? observed, int route, int expected)
     {
-        var prefix = $"Исходящий TCP Xray к VPN-серверу · маршрут IF {route} (исходный IF {expected})";
+        var prefix = $"Снимок TCP процесса Xray к VPN-серверу · маршрут IF {route} (исходный IF {expected})";
         if (observed == null) return prefix + "; таблица TCP недоступна.";
         var flags = observed.Value;
         if (!flags.HasFlag(PeerTcp.Seen)) return prefix + "; сокет не зафиксирован за время наблюдения.";
@@ -282,7 +289,8 @@ internal static class TunConnectivity
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested) { outcome = "истекло время HTTPS по контрольному IPv4"; }
         catch (VpnError) { outcome = "Windows не подтвердила интерфейс для HTTPS-пробы"; }
-        catch (IOException error) { outcome = $"сбой чтения ответа HTTPS 0x{error.HResult:X8}"; }
+        catch (IOException error) { outcome = "сбой чтения ответа HTTPS" + ErrorDetails(error); }
+        catch (SocketException error) { outcome = "сбой сокета контрольной HTTPS-пробы" + ErrorDetails(error); }
         catch (HttpRequestException error)
         {
             outcome = error.StatusCode == HttpStatusCode.ProxyAuthenticationRequired ?
@@ -290,14 +298,21 @@ internal static class TunConnectivity
                 "HTTPS по контрольному IPv4: " + error.HttpRequestError;
             if (certificate != SslPolicyErrors.None) outcome += "; сертификат: " + certificate;
             if (!string.IsNullOrEmpty(chainStatus)) outcome += "; цепочка: " + chainStatus;
-            for (var cause = error.InnerException; cause != null; cause = cause.InnerException)
-                if (cause is SocketException socket)
-                    outcome += "; код сокета Windows " + socket.NativeErrorCode;
-                else if (cause is AuthenticationException or IOException)
-                    outcome += $"; {cause.GetType().Name} 0x{cause.HResult:X8}";
+            outcome += ErrorDetails(error.InnerException);
         }
 
         return new(false, outcome, watch.ElapsedMilliseconds);
+    }
+
+    private static string ErrorDetails(Exception? cause)
+    {
+        var details = new StringBuilder();
+        for (; cause != null; cause = cause.InnerException)
+            if (cause is SocketException socket)
+                details.Append(" · код сокета этой HTTPS-пробы ").Append(socket.NativeErrorCode);
+            else if (cause is AuthenticationException or IOException)
+                details.Append($" · {cause.GetType().Name} 0x{cause.HResult:X8}");
+        return details.ToString();
     }
 }
 

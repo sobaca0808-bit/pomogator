@@ -1,6 +1,8 @@
+using System.Net;
+
 namespace Pomogator.Vpn;
 
-internal sealed class TunEngineDiagnostic
+internal sealed class TunEngineDiagnostic(IPAddress? peer = null, int port = 0, bool rawTransport = false)
 {
     private string? detail;
     private int? exitCode;
@@ -14,6 +16,7 @@ internal sealed class TunEngineDiagnostic
         "открыт защищённый транспорт VLESS"
     ];
     private readonly int[] counters = new int[Labels.Length];
+    private readonly TunSocketDiagnostic? sockets = peer == null ? null : new(peer, port, rawTransport);
 
     internal string[] TakeEvents()
     {
@@ -23,11 +26,13 @@ internal sealed class TunEngineDiagnostic
             var count = Interlocked.Exchange(ref counters[i], 0);
             if (count > 0) result.Add(Labels[i] + " × " + count);
         }
+        if (sockets != null) result.AddRange(sockets.TakeEvents());
         return result.ToArray();
     }
 
     internal void Read(string line)
     {
+        sockets?.Read(line);
         if (line.Contains("core: Xray ", StringComparison.Ordinal) && line.EndsWith(" started", StringComparison.Ordinal))
             Interlocked.Exchange(ref started, 1);
         var known = line.Contains("unable to set routes", StringComparison.OrdinalIgnoreCase) ? "установка маршрутов" :
@@ -41,9 +46,10 @@ internal sealed class TunEngineDiagnostic
         bool Has(string fragment) => line.Contains(fragment, StringComparison.OrdinalIgnoreCase);
         if (Has("Hit route rule: [pmt-control-vless]")) Interlocked.Increment(ref counters[0]);
         if (Has("Hit route rule: [pmt-control-block]")) Interlocked.Increment(ref counters[1]);
-        if (Has("failed to dial to dest") || Has("network is unreachable") || Has("no route to host"))
+        if (Has("transport/internet/tcp: failed to dial to dest"))
             Interlocked.Increment(ref counters[2]);
-        if (Has("REALITY:") || Has("x509:") || Has("tls:") || Has("found outer tls version"))
+        if (Has("app/proxyman/outbound: failed to process outbound traffic") &&
+            (Has("REALITY:") || Has("x509:") || Has("tls:")))
             Interlocked.Increment(ref counters[3]);
         if (Has("failed to retrieve response for") || Has("failed to handle DOH response") || Has("failed to lookup IP"))
             Interlocked.Increment(ref counters[4]);

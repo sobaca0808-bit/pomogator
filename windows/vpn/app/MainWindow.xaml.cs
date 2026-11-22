@@ -320,7 +320,7 @@ public partial class MainWindow : Window
                 port = Xray.FreePort();
                 checkPort = tunMode || profile.Full == null ? port : DistinctPort(port);
                 socksPort = !tunMode && profile.Full?.SocksTag != null ? DistinctPort(port, checkPort) : null;
-                var config = tunMode ? XrayConfig.Create(TunConfig.Pinned(profile, peer!), port) :
+                var config = tunMode ? TunConfig.PreflightEngine(peer!, peerSource, profile, port) :
                     XrayConfig.Create(profile, port, checkPort, socksPort);
                 return (config, port, new int?[] { checkPort, socksPort }.OfType<int>().Distinct().ToArray());
             }, source.Token, WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback,
@@ -335,10 +335,15 @@ public partial class MainWindow : Window
             if (recovery != null)
             {
                 tunStage = "запуск Wintun и подтверждение параметров Windows";
-                using (var preflight = Xray.ThroughProxy(checkPort))
+                var baselineProbe = await TunConnectivity.CheckBeforeTun(checkPort, core.ProcessId, source.Token);
+                AddLog(baselineProbe.Line("До запуска TUN · HTTPS к той же IPv4-цели через VLESS"));
+                if (!baselineProbe.Success)
+                {
+                    using var preflight = Xray.ThroughProxy(checkPort);
                     if (await InternetHealth.ProbeAsync(preflight, source.Token) == null)
                         throw new VpnError("HTTPS через выбранный VLESS недоступен до включения TUN.");
-                AddLog("До запуска TUN: HTTPS через выбранный VLESS подтверждён.");
+                    AddLog("До запуска TUN · HTTPS через VLESS подтверждён на резервном адресе.");
+                }
                 Detail.Text = "Ожидание интерфейса, IPv4-адреса, маршрутов и DNS Wintun…";
                 tun = new TunSession(recovery);
                 try { await tun.StartAsync(profile, source.Token); }
@@ -926,7 +931,7 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog(this) != true) return;
         try
         {
-            var header = new[] { "ПОМОГАТОР VPN 0.3.5", Status.Text, CoreCheck.Text, ProxyCheck.Text, TrafficCheck.Text,
+            var header = new[] { "ПОМОГАТОР VPN 0.3.6", Status.Text, CoreCheck.Text, ProxyCheck.Text, TrafficCheck.Text,
                 SystemCheck.Text, TunCheck.Text, CheckedAt.Text, "" };
             var observations = tunObservation?.Lines() ?? Enumerable.Empty<string>();
             var probes = tunChecks?.Lines() ?? Enumerable.Empty<string>();

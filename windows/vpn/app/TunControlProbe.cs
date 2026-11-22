@@ -43,9 +43,9 @@ internal static class TunControlProbe
     private static async Task Connect(Stream stream, TunControlEndpoint endpoint, CancellationToken token)
     {
         var authority = endpoint.Destination + ":" + endpoint.DestinationPort;
-        var secret = Encoding.UTF8.GetBytes(endpoint.User + ":" + endpoint.Password);
-        var header = Encoding.ASCII.GetBytes($"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n" +
-            $"Proxy-Authorization: Basic {Convert.ToBase64String(secret)}\r\n\r\n");
+        var secret = endpoint.User.Length == 0 ? [] : Encoding.UTF8.GetBytes(endpoint.User + ":" + endpoint.Password);
+        var authentication = secret.Length == 0 ? "" : $"Proxy-Authorization: Basic {Convert.ToBase64String(secret)}\r\n";
+        var header = Encoding.ASCII.GetBytes($"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n{authentication}\r\n");
         try { await stream.WriteAsync(header, token); }
         finally
         {
