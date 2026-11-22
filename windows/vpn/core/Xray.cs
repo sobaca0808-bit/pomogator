@@ -11,10 +11,12 @@ public sealed class Xray : IDisposable
     private readonly Process process;
     private IDisposable? lifetime;
     private bool disposed;
+    private readonly Func<int, int, bool>? ownsPort;
     public int Port { get; }
     public bool Running => !disposed && !process.HasExited;
 
-    private Xray(Process process, int port) { this.process = process; Port = port; }
+    private Xray(Process process, int port, Func<int, int, bool>? ownsPort)
+    { this.process = process; Port = port; this.ownsPort = ownsPort; }
 
     public static int FreePort()
     {
@@ -25,7 +27,7 @@ public sealed class Xray : IDisposable
     }
 
     public static async Task<Xray> StartAsync(string executable, string config, int port, CancellationToken token,
-        Func<Process, IDisposable>? protect = null, Func<int, int, bool>? ownsPort = null)
+        Func<Process, IDisposable?>? protect = null, Func<int, int, bool>? ownsPort = null, Action? started = null)
     {
         var info = new ProcessStartInfo(executable) {
             UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true,
@@ -34,6 +36,7 @@ public sealed class Xray : IDisposable
             WorkingDirectory = Path.GetDirectoryName(Path.GetFullPath(executable))!
         };
         foreach (var arg in new[] { "run", "-format", "json", "-config", "stdin:" }) info.ArgumentList.Add(arg);
+        info.Environment["XRAY_LOCATION_ASSET"] = info.WorkingDirectory;
         info.Environment.Remove("XRAY_LOCATION_CONFIG");
         info.Environment.Remove("XRAY_LOCATION_CONFDIR");
         info.Environment.Remove("XRAY_VMESS_AEAD_FORCED");
@@ -45,10 +48,11 @@ public sealed class Xray : IDisposable
             throw new VpnError("Не удалось запустить ядро. Проверьте комплект приложения и разрешение Windows на запуск.");
         }
 
-        var result = new Xray(process, port);
+        var result = new Xray(process, port, ownsPort);
         try
         {
             result.lifetime = protect?.Invoke(process);
+            started?.Invoke();
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
             using var startup = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -61,7 +65,7 @@ public sealed class Xray : IDisposable
             {
                 if (!result.Running)
                     throw new VpnError("Ядро отклонило профиль или завершило запуск. Проверьте параметры TLS, REALITY и транспорта.");
-                if ((ownsPort == null || ownsPort(port, process.Id)) && await Listening(port, startup.Token)) return result;
+                if (await result.IsProxyReadyAsync(port, startup.Token)) return result;
                 await Task.Delay(100, startup.Token);
             }
         }
@@ -82,12 +86,26 @@ public sealed class Xray : IDisposable
         }
     }
 
-    public static async Task CheckServerAsync(Profile profile, CancellationToken token)
+    public async Task<bool> IsProxyReadyAsync(int port, CancellationToken token)
+    {
+        if (!Running || ownsPort != null && !ownsPort(port, process.Id)) return false;
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(TimeSpan.FromSeconds(1));
+        try { return await Listening(port, deadline.Token); }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested) { return false; }
+    }
+
+    public static async Task<TimeSpan> CheckServerAsync(Profile profile, CancellationToken token)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         deadline.CancelAfter(TimeSpan.FromSeconds(6));
         using var client = new TcpClient();
-        try { await client.ConnectAsync(profile.Host, profile.Port, deadline.Token); }
+        try
+        {
+            var watch = Stopwatch.StartNew();
+            await client.ConnectAsync(profile.Host, profile.Port, deadline.Token);
+            return watch.Elapsed;
+        }
         catch (OperationCanceledException) when (!token.IsCancellationRequested)
         { throw new VpnError("VPN-сервер не ответил на TCP-проверку за 6 секунд."); }
         catch (SocketException error)
@@ -119,7 +137,7 @@ public sealed class Xray : IDisposable
         {
             using var response = await client.GetAsync(endpoint, HttpCompletionOption.ResponseHeadersRead, token);
             if (response.StatusCode != HttpStatusCode.NoContent)
-                throw new VpnError("Контрольный HTTPS-запрос не вернул ожидаемый HTTP 204. Прохождение трафика через VPN не подтверждено.");
+                throw new VpnError($"Контрольный HTTPS-запрос вернул HTTP {(int)response.StatusCode} вместо 204. Трафик не подтверждён.");
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested)
         { throw new VpnError("Контрольный HTTPS-запрос через прокси не ответил за 12 секунд. Проверьте профиль и доступ к контрольному адресу."); }

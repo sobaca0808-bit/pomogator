@@ -54,6 +54,86 @@ Test("Project only one supported VLESS outbound from a native Xray JSON", () => 
     Throws(() => Profiles.ParseList(output.Replace("\"vless\"", "\"freedom\"")));
     Throws(() => Profiles.ParseList(output.Replace("\"wsSettings\":{", "\"wsSettings\":{\"dangerous\":true,")));
 });
+Test("Import EasyGo-style TCP REALITY with a full or simplified profile", () => {
+    var json = EasyGo(@"server.example", 443, Id, RealityKey);
+    var simple = Profiles.ParseList(json).Single();
+    var full = Profiles.ParseList(json, keepRouting: true).Single();
+    foreach (var profile in new[] { simple, full })
+    {
+        Assert(profile.Id == Guid.Parse(Id) && profile.Host == "server.example" && profile.Port == 443);
+        Assert(profile.Security == "reality" && profile.Transport == "raw");
+        Assert(profile.Option("flow") == "xtls-rprx-vision" && profile.Option("fp") == "firefox");
+        Assert(profile.Option("sni") == "front.example" && profile.Option("pbk") == RealityKey && profile.Option("sid") == "0123456789abcd");
+    }
+    Assert(simple.Full == null && full.Full?.PrimaryTag == "proxy");
+    var reopened = JsonSerializer.Deserialize<Profile>(JsonSerializer.Serialize(full))!;
+    using var runtime = JsonDocument.Parse(XrayConfig.Create(reopened, 30001, 30002, 30003));
+    var root = runtime.RootElement;
+    Assert(root.GetProperty("dns").GetProperty("servers")[0].GetString() == "https://dns.example/dns-query");
+    var bounds = root.GetProperty("inbounds");
+    Assert(bounds.EnumerateArray().All(entry => entry.GetProperty("listen").GetString() == "127.0.0.1"));
+    Assert(bounds.GetArrayLength() == 3 && bounds[0].GetProperty("tag").GetString() == "http-in");
+    var rules = root.GetProperty("routing").GetProperty("rules");
+    Assert(rules[0].GetProperty("inboundTag")[0].GetString() == "pomogator-vpn-check");
+    Assert(rules[0].GetProperty("outboundTag").GetString() == "proxy");
+    Assert(rules[1].GetProperty("outboundTag").GetString() == "direct" && rules[2].GetProperty("outboundTag").GetString() == "block");
+    Assert(root.GetProperty("outbounds").EnumerateArray().Select(e => e.GetProperty("tag").GetString())
+        .SequenceEqual(new[] { "proxy", "direct", "block" }));
+    var incompatible = json.Replace("geoip:private", "ext:local-file:private");
+    Assert(Profiles.ParseList(incompatible).Single().Full == null);
+    Throws(() => Profiles.ParseList(incompatible, keepRouting: true));
+    Assert((full with { Name = Id }).DisplayName == "server.example:443");
+});
+Test("Verify all states, guard confirmation, cancel, lose and retry", () => {
+    var state = new ConnectionState();
+    var phases = new List<Phase> { state.Phase };
+    state.Changed += () => { if (phases[^1] != state.Phase) phases.Add(state.Phase); };
+    state.Begin();
+    state.Record(Check.Xray, CheckResult.Passed);
+    state.Record(Check.Proxy, CheckResult.Passed);
+    try { state.Confirm(DateTimeOffset.Now, false); }
+    catch (InvalidOperationException) { Assert(state.Phase == Phase.Connecting); }
+    Assert(state.Phase == Phase.Connecting);
+    state.Record(Check.Https, CheckResult.Passed);
+    state.Confirm(DateTimeOffset.Now, true);
+    Assert(state.ConnectedAt != null && state.SystemProxy);
+    state.ReleaseSystemProxy();
+    Assert(!state.SystemProxy && state.Phase == Phase.Connected);
+    state.Record(Check.Https, CheckResult.Failed);
+    state.BeginStop();
+    state.End(true);
+    Assert(state.ConnectedAt == null && state.Result(Check.Https) == CheckResult.Failed);
+    state.Begin();
+    Assert(state.Result(Check.Xray) == CheckResult.Pending);
+    state.BeginStop();
+    state.End(false);
+    Assert(phases.SequenceEqual(new[] { Phase.Disconnected, Phase.Connecting, Phase.Connected, Phase.Disconnecting,
+        Phase.Error, Phase.Connecting, Phase.Disconnecting, Phase.Disconnected }));
+});
+await TestAsync("HTTPS subscription handles HTTP errors and safe redirects", async () => {
+    var url = new Uri("https://supplier.example/sub?token=synthetic");
+    var handler = new StubHttp(new HttpResponseMessage(HttpStatusCode.Redirect) { Headers = { Location = new Uri("/next", UriKind.Relative) } },
+        new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(Base + "?security=tls") });
+    using var http = new HttpClient(handler);
+    var text = await Subscriptions.DownloadAsync(http, url, CancellationToken.None);
+    Assert(Profiles.ParseList(text).Count == 1 && handler.Requests[1].Query == "");
+    using var forbidden = new HttpClient(new StubHttp(new HttpResponseMessage(HttpStatusCode.Forbidden)));
+    Assert((await Fails(() => Subscriptions.DownloadAsync(forbidden, url, CancellationToken.None))).Message.Contains("403"));
+    foreach (var target in new[] { "https://other.example/?token=synthetic", "http://supplier.example/next", "/sub?token=synthetic" })
+    {
+        var redirect = new StubHttp(new HttpResponseMessage(HttpStatusCode.PermanentRedirect) { Headers = { Location = new Uri(target, UriKind.RelativeOrAbsolute) } });
+        using var unsafeClient = new HttpClient(redirect);
+        var error = await Fails(() => Subscriptions.DownloadAsync(unsafeClient, url, CancellationToken.None));
+        Assert(!error.Message.Contains("synthetic") && redirect.Requests.Count == 1);
+    }
+});
+await TestAsync("Report an unavailable server with no credential details", async () => {
+    var port = Xray.FreePort();
+    var profile = Profiles.Parse($"vless://{Id}@127.0.0.1:{port}");
+    var error = await Fails(() => Xray.CheckServerAsync(profile, CancellationToken.None));
+    Assert(error.Message.Contains("TCP") && !error.Message.Contains(Id));
+});
+
 Test("Restore exact original proxy and retained automatic flag", () => {
     var before = new ProxyState(ProxyState.Direct | ProxyState.AutoDetect, "old:80", "<local>", "");
     var windows = new FakeProxy(before);
@@ -109,7 +189,9 @@ if (!string.IsNullOrWhiteSpace(executable))
         Profiles.Parse(Base + "?security=tls&type=grpc&serviceName=r"),
         Profiles.Parse(Base + "?security=tls&type=xhttp&mode=stream-up&path=%2Fhttp")
     }) await CheckConfiguration(executable, profile);
-    Console.WriteLine("PASS Pinned Xray validates all six generated configurations");
+    var advanced = Profiles.ParseList(EasyGo("server.example", 443, Id, RealityKey), keepRouting: true).Single();
+    await CheckConfiguration(executable, advanced);
+    Console.WriteLine("PASS Pinned Xray validates transports and full EasyGo configuration");
     passed++;
 
     using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(16));
@@ -129,10 +211,19 @@ if (!string.IsNullOrWhiteSpace(executable))
     var protect = OperatingSystem.IsWindows() ? WindowsLifetime.Attach : (Func<Process, IDisposable>?)null;
     var owns = OperatingSystem.IsWindows() ? WindowsLifetime.OwnsLoopback : (Func<int, int, bool>?)null;
     using var server = await Xray.StartAsync(executable, serverConfig, port, deadline.Token, protect, owns);
-    var clientProfile = Profiles.Parse($"vless://{Id}@127.0.0.1:{port}");
+    var clientProfile = Profiles.ParseList(EasyGo("127.0.0.1", port, Id, RealityKey, "none"), keepRouting: true).Single();
     await Xray.CheckServerAsync(clientProfile, deadline.Token);
     var portLocal = Xray.FreePort();
-    using var clientCore = await Xray.StartAsync(executable, XrayConfig.Create(clientProfile, portLocal), portLocal, deadline.Token, protect, owns);
+    using var probeReservation = new TcpListener(IPAddress.Loopback, 0);
+    probeReservation.Start();
+    var portProbe = ((IPEndPoint)probeReservation.LocalEndpoint).Port;
+    var portSocks = Xray.FreePort();
+    probeReservation.Stop();
+    Assert(new[] { portLocal, portProbe, portSocks }.Distinct().Count() == 3);
+    Process? running = null;
+    IDisposable? Track(Process process) { running = process; return protect?.Invoke(process); }
+    using var clientCore = await Xray.StartAsync(executable, XrayConfig.Create(clientProfile, portLocal, portProbe, portSocks),
+        portLocal, deadline.Token, Track, owns);
 
     using var certKey = RSA.Create(2048);
     var request = new CertificateRequest("CN=localhost", certKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
@@ -147,9 +238,9 @@ if (!string.IsNullOrWhiteSpace(executable))
     try
     {
         var endpoint = new Uri($"https://127.0.0.1:{destinationPort}/fixture");
-        var responder = Respond(destination, certificate, deadline.Token);
+        var responder = Respond(destination, certificate, 204, deadline.Token);
         using var handler = new HttpClientHandler {
-            Proxy = new WebProxy($"http://127.0.0.1:{portLocal}"),
+            Proxy = new WebProxy($"http://127.0.0.1:{portProbe}"),
             ServerCertificateCustomValidationCallback = (_, candidate, _, _) => candidate?.Thumbprint == certificate.Thumbprint
         };
         using var http = new HttpClient(handler);
@@ -168,9 +259,24 @@ if (!string.IsNullOrWhiteSpace(executable))
             throw;
         }
         await responder;
+        var noContent = Respond(destination, certificate, 503, deadline.Token);
+        var rejection = await Fails(() => Xray.VerifyAsync(http, endpoint, deadline.Token));
+        Assert(rejection.Message.Contains("503"));
+        await noContent;
+        // Original routing blocks the regular inbound. The dedicated probe passed through the selected VLESS.
+        using var ordinary = Xray.ThroughProxy(portLocal);
+        ordinary.Timeout = TimeSpan.FromSeconds(2);
+        await Fails(() => Xray.VerifyAsync(ordinary, endpoint, deadline.Token));
+
+        running!.Kill();
+        await running.WaitForExitAsync(deadline.Token);
+        Assert(!clientCore.Running && !await clientCore.IsProxyReadyAsync(portLocal, deadline.Token));
+        using var restarted = await Xray.StartAsync(executable, XrayConfig.Create(clientProfile with { Full = null }, portLocal),
+            portLocal, deadline.Token, protect, owns);
+        Assert(restarted.Running);
     }
     finally { destination.Stop(); }
-    Console.WriteLine("PASS Verified HTTPS via HTTP proxy → Xray VLESS client → Xray VLESS server");
+    Console.WriteLine("PASS Full profile routes probe through VLESS, rejects HTTP 503, detects process termination and restarts");
     passed++;
 }
 else Console.WriteLine("SKIP Core integration: set POMOGATOR_TEST_XRAY to the pinned binary.");
@@ -182,6 +288,51 @@ void Test(string name, Action action)
     action();
     Console.WriteLine("PASS " + name);
     passed++;
+}
+
+async Task TestAsync(string name, Func<Task> action)
+{
+    await action();
+    Console.WriteLine("PASS " + name);
+    passed++;
+}
+
+static async Task<VpnError> Fails(Func<Task> action)
+{
+    try { await action(); }
+    catch (VpnError error) { return error; }
+    throw new InvalidOperationException("Expected a diagnostic failure.");
+}
+
+static string EasyGo(string host, int port, string id, string key, string security = "reality")
+{
+    var local = security == "none";
+    object stream = local ? new { network = "tcp", security } : new {
+        network = "tcp", security, tcpSettings = new { header = new { type = "none" } },
+        realitySettings = new { show = false, serverName = "front.example", fingerprint = "firefox",
+            publicKey = key, shortId = "0123456789abcd", spiderX = "" }
+    };
+    return JsonSerializer.Serialize(new {
+        remarks = "Фикстура EasyGo",
+        stats = new { },
+        dns = new { servers = local ? new[] { "localhost" } : new[] { "https://dns.example/dns-query", "localhost" } },
+        inbounds = new object[] {
+            new { tag = "socks-in", listen = "0.0.0.0", port = 1080, protocol = "socks", settings = new { auth = "noauth", udp = true } },
+            new { tag = "http-in", listen = "0.0.0.0", port = 8080, protocol = "http",
+                sniffing = new { enabled = true, destOverride = new[] { "http", "tls" } } }
+        },
+        outbounds = new object[] {
+            new { tag = "proxy", protocol = "vless", settings = new { vnext = new[] {
+                new { address = host, port, users = new[] { new { id, encryption = "none", flow = local ? "" : "xtls-rprx-vision" } } }
+            } }, streamSettings = stream, mux = new { enabled = false } },
+            new { tag = "direct", protocol = "freedom", settings = new { domainStrategy = "AsIs" } },
+            new { tag = "block", protocol = "blackhole", settings = new { response = new { type = "http" } } }
+        },
+        routing = new { domainStrategy = "AsIs", rules = new object[] {
+            new { type = "field", ip = local ? new[] { "192.0.2.0/24" } : new[] { "geoip:private" }, outboundTag = "direct" },
+            new { type = "field", inboundTag = new[] { "http-in" }, outboundTag = "block" }
+        } }
+    });
 }
 
 static void Assert(bool condition)
@@ -200,7 +351,8 @@ static async Task CheckConfiguration(string executable, Profile profile)
 {
     using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(8));
     var info = new ProcessStartInfo(executable) {
-        RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false
+        RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false,
+        WorkingDirectory = Path.GetDirectoryName(executable)!
     };
     foreach (var argument in new[] { "run", "-test", "-format", "json", "-config", "stdin:" }) info.ArgumentList.Add(argument);
     using var process = Process.Start(info)!;
@@ -208,7 +360,7 @@ static async Task CheckConfiguration(string executable, Profile profile)
     var stderr = process.StandardError.ReadToEndAsync(deadline.Token);
     try
     {
-        await process.StandardInput.WriteAsync(XrayConfig.Create(profile, 34000));
+        await process.StandardInput.WriteAsync(XrayConfig.Create(profile, 34000, 34001, 34002));
         process.StandardInput.Close();
         await process.WaitForExitAsync(deadline.Token);
         await Task.WhenAll(stdout, stderr);
@@ -217,7 +369,7 @@ static async Task CheckConfiguration(string executable, Profile profile)
     finally { if (!process.HasExited) process.Kill(entireProcessTree: true); }
 }
 
-static async Task Respond(TcpListener endpoint, X509Certificate2 cert, CancellationToken token)
+static async Task Respond(TcpListener endpoint, X509Certificate2 cert, int status, CancellationToken token)
 {
     using var socket = await endpoint.AcceptTcpClientAsync(token);
     using var ssl = new SslStream(socket.GetStream());
@@ -225,7 +377,7 @@ static async Task Respond(TcpListener endpoint, X509Certificate2 cert, Cancellat
     using var reader = new StreamReader(ssl, leaveOpen: true);
     Assert((await reader.ReadLineAsync(token))?.StartsWith("GET /fixture ") == true);
     while (await reader.ReadLineAsync(token) is { Length: > 0 }) { }
-    await ssl.WriteAsync("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n"u8.ToArray(), token);
+    await ssl.WriteAsync(Encoding.ASCII.GetBytes($"HTTP/1.1 {status} Test\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"), token);
 }
 
 sealed class FakeProxy(ProxyState initial) : IProxySettings
@@ -234,4 +386,16 @@ sealed class FakeProxy(ProxyState initial) : IProxySettings
     public int Writes;
     public ProxyState Read() => State;
     public void Write(ProxyState state) { State = state; Writes++; }
+}
+
+
+sealed class StubHttp(params HttpResponseMessage[] messages) : HttpMessageHandler
+{
+    private readonly Queue<HttpResponseMessage> responses = new(messages);
+    internal readonly List<Uri> Requests = new();
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        Requests.Add(request.RequestUri!);
+        return Task.FromResult(responses.Dequeue());
+    }
 }

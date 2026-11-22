@@ -6,6 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="ui/**/*.cs" />
     <ProjectReference Include="../core/Core.csproj" />
     <Compile Include="../app/WinInet.cs" Link="WinInet.cs" />
     <Compile Include="../app/WindowsLifetime.cs" Link="WindowsLifetime.cs" />

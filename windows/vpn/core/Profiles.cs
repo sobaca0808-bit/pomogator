@@ -8,8 +8,11 @@ namespace Pomogator.Vpn;
 public sealed class VpnError(string message) : Exception(message);
 
 public sealed record Profile(string Name, string Host, int Port, Guid Id, string Security, string Transport,
-    IReadOnlyDictionary<string, string> Options)
+    IReadOnlyDictionary<string, string> Options, FullRouting? Full = null)
 {
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string DisplayName => Profiles.SafeName(Name, Host + ":" + Port);
+
     public string Option(string name, string fallback = "") => Options.TryGetValue(name, out var value) ? value : fallback;
 }
 
@@ -25,6 +28,11 @@ public static class Profiles
     private static readonly HashSet<string> Fingerprints = new(StringComparer.Ordinal) {
         "chrome", "firefox", "safari", "ios", "android", "edge", "360", "qq", "random", "randomized"
     };
+
+    public static string SafeName(string name, string fallback) =>
+        name.Length == 0 || name.Contains("://", StringComparison.Ordinal) ||
+        Regex.IsMatch(name, @"[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}|[A-Za-z0-9_-]{32,}", RegexOptions.IgnoreCase)
+            ? fallback : name;
 
     public static Profile Parse(string link)
     {
@@ -105,11 +113,13 @@ public static class Profiles
         return new Profile(alias == "" ? host + ":" + uri.Port : alias, host, uri.Port, id, security, transport, options);
     }
 
-    public static IReadOnlyList<Profile> ParseList(string text)
+    public static bool IsXrayJson(string text) => text.Trim().TrimStart('\uFEFF').TrimStart().StartsWith('{');
+
+    public static IReadOnlyList<Profile> ParseList(string text, bool keepRouting = false)
     {
         if (Encoding.UTF8.GetByteCount(text) > MaxImport) throw new VpnError("Список превышает 1 МБ.");
         text = text.Trim().TrimStart('\uFEFF').Trim();
-        if (text.StartsWith('{')) return new[] { XrayProfileImport.Parse(text) };
+        if (text.StartsWith('{')) return new[] { XrayProfileImport.Parse(text, keepRouting) };
         if (!text.Contains("vless://", StringComparison.OrdinalIgnoreCase))
         {
             try { text = new UTF8Encoding(false, true).GetString(DecodeBase64(text)).Trim().TrimStart('\uFEFF'); }
@@ -161,7 +171,46 @@ public static class Profiles
 
 public static class XrayConfig
 {
-    public static string Create(Profile profile, int localPort)
+    internal const string ProbeTag = "pomogator-vpn-check";
+
+    public static string Create(Profile profile, int localPort, int? probePort = null, int? socksPort = null)
+    {
+        var inbound = Local("http", profile.Full?.HttpTag ?? "pomogator-http", localPort, profile.Full?.HttpSniffing);
+        if (profile.Full is not { } full)
+            return JsonSerializer.Serialize(new {
+                log = new { loglevel = "none" }, inbounds = new[] { inbound }, outbounds = new[] { Outbound(profile, "vpn") }
+            });
+        if (probePort is null || (full.SocksTag != null && socksPort is null))
+            throw new VpnError("Не выделены локальные порты для полного профиля.");
+        var inbounds = new List<object> { inbound, Local("http", ProbeTag, probePort.Value, null) };
+        if (full.SocksTag != null) inbounds.Add(Local("socks", full.SocksTag, socksPort!.Value, full.SocksSniffing, full.SocksUdp));
+
+        var routing = new Dictionary<string, object>();
+        foreach (var property in full.Routing.EnumerateObject())
+            if (property.Name != "rules") routing[property.Name] = property.Value;
+        // A separate loopback listener proves the selected VLESS, even when the full profile normally routes this domain directly.
+        var rules = new List<object> { new { type = "field", inboundTag = new[] { ProbeTag }, outboundTag = full.PrimaryTag } };
+        if (full.Routing.TryGetProperty("rules", out var imported))
+            rules.AddRange(imported.EnumerateArray().Select(rule => (object)rule));
+        routing["rules"] = rules;
+
+        var config = new Dictionary<string, object> {
+            ["log"] = new { loglevel = "none" }, ["inbounds"] = inbounds,
+            ["outbounds"] = full.Outbounds, ["routing"] = routing
+        };
+        if (full.Dns is { } dns) config["dns"] = dns;
+        return JsonSerializer.Serialize(config);
+    }
+
+    private static object Local(string protocol, string tag, int port, JsonElement? sniffing, bool udp = false)
+    {
+        var inbound = new Dictionary<string, object> { ["listen"] = "127.0.0.1", ["tag"] = tag, ["port"] = port, ["protocol"] = protocol };
+        if (protocol == "socks") inbound["settings"] = new { auth = "noauth", udp, ip = "127.0.0.1" };
+        if (sniffing is { } value) inbound["sniffing"] = value;
+        return inbound;
+    }
+
+    internal static object Outbound(Profile profile, string tag)
     {
         var stream = new Dictionary<string, object> {
             ["network"] = profile.Transport, ["security"] = profile.Security
@@ -198,14 +247,10 @@ public static class XrayConfig
                 };
                 break;
         }
-        return JsonSerializer.Serialize(new {
-            log = new { loglevel = "none" },
-            inbounds = new[] { new { listen = "127.0.0.1", port = localPort, protocol = "http" } },
-            outbounds = new[] { new { protocol = "vless", settings = new {
-                vnext = new[] { new { address = profile.Host, port = profile.Port, users = new[] {
-                    new { id = profile.Id.ToString("D"), encryption = "none", flow = profile.Option("flow") }
-                } } }
-            }, streamSettings = stream } }
-        });
+        return new { tag, protocol = "vless", settings = new {
+            vnext = new[] { new { address = profile.Host, port = profile.Port, users = new[] {
+                new { id = profile.Id.ToString("D"), encryption = "none", flow = profile.Option("flow") }
+            } } }
+        }, streamSettings = stream };
     }
 }

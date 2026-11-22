@@ -14,6 +14,8 @@ try {
     Expand-Archive -LiteralPath $archive -DestinationPath $expanded
     New-Item -ItemType Directory -Path $Destination -Force | Out-Null
     Copy-Item (Join-Path $expanded 'xray.exe') -Destination $Destination
+    Copy-Item (Join-Path $expanded 'geoip.dat') -Destination $Destination
+    Copy-Item (Join-Path $expanded 'geosite.dat') -Destination $Destination
     Copy-Item (Join-Path $expanded 'LICENSE') -Destination (Join-Path $Destination 'XRAY-LICENSE.txt')
 } finally {
     Remove-Item -LiteralPath $temp -Recurse -Force

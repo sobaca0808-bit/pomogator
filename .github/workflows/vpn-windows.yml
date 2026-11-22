@@ -1,4 +1,4 @@
-name: ПОМОГАТОР VPN — Windows x64
+name: ПОМОГАТОР VPN 0.2 — Windows x64
 
 on:
   push:
@@ -34,6 +34,14 @@ jobs:
           # The runner is disposable. The test refuses to overwrite an active proxy.
           $env:POMOGATOR_TEST_WININET = '1'
           dotnet run --project windows/vpn/tests/Tests.csproj -c Release
+      - name: Verify WPF and tray, render screenshots
+        shell: pwsh
+        run: dotnet run --project windows/vpn/tests/ui/UiTests.csproj -c Release -- "$env:RUNNER_TEMP/pomogator-vpn-screenshots"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PomogatorVpn-0.2.0-screenshots
+          path: ${{ runner.temp }}/pomogator-vpn-screenshots/
+          if-no-files-found: error
       - name: Build Windows x64 package
         shell: pwsh
         run: |
@@ -42,5 +50,6 @@ jobs:
           Copy-Item "$env:RUNNER_TEMP/pomogator-xray/*" windows/vpn/dist
       - uses: actions/upload-artifact@v4
         with:
-          name: PomogatorVpn-0.1.0-win-x64
+          name: PomogatorVpn-0.2.0-win-x64
           path: windows/vpn/dist/
+          if-no-files-found: error

@@ -17,8 +17,9 @@ public partial class App : Application
             Shutdown();
             return;
         }
-        MainWindow = new MainWindow();
-        MainWindow.Show();
+        var window = new MainWindow { StartInTray = e.Args.Contains("--tray", StringComparer.OrdinalIgnoreCase) };
+        MainWindow = window;
+        window.Show();
     }
 
     protected override void OnExit(ExitEventArgs e)
