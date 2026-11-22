@@ -76,9 +76,10 @@ internal static class NativeTunTests
             log = new { loglevel = "none" },
             inbounds = new[] { new { listen = "127.0.0.1", port = upstreamPort, protocol = "vless",
                 settings = new { clients = new[] { new { id } }, decryption = "none" } } },
-            outbounds = new[] { Redirect("web", httpPort), Redirect("dns", dnsPort) },
-            routing = new { rules = new[] {
-                new { type = "field", ip = new[] { dnsTarget }, outboundTag = "dns" }
+            outbounds = new object[] { new { tag = "block", protocol = "blackhole" }, Redirect("web", httpPort), Redirect("dns", dnsPort) },
+            routing = new { rules = new object[] {
+                new { type = "field", ip = new[] { webTarget }, port = httpPort.ToString(), network = "tcp", outboundTag = "web" },
+                new { type = "field", ip = new[] { dnsTarget }, port = "53", network = "tcp,udp", outboundTag = "dns" }
             } }
         });
         using var upstream = await Xray.StartAsync(executable, upstreamConfig, upstreamPort, timeLimit.Token,
@@ -189,8 +190,13 @@ internal static class NativeTunTests
                 var answeredUdp = 0;
                 var answer = AnswerUdp(udpDestination, packet =>
                 {
-                    if (packet.Length == 4) Interlocked.Increment(ref echoed);
-                    if (!IsQuestion(packet, question)) return !Volatile.Read(ref dropUdp) || packet.Length == 4;
+                    if (packet.Length == 4)
+                    {
+                        Interlocked.Increment(ref echoed);
+                        return true;
+                    }
+                    // Ignore Windows background DNS so unrelated requests cannot consume the HTTPS listener.
+                    if (!IsQuestion(packet, question)) return false;
                     if (!Volatile.Read(ref dropUdp))
                     {
                         Interlocked.Increment(ref answeredUdp);
