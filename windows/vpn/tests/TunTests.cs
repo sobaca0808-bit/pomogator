@@ -118,7 +118,13 @@ internal static class NativeTunTests
             "Failed readiness did not restore the initial network before a retry.");
 
         using (var tunnel = await Xray.StartAsync(executable, fixture, readiness, timeLimit.Token, Track,
-            WindowsLifetime.OwnsLoopback, inheritConsole: true, startupSeconds: 24))
+            WindowsLifetime.OwnsLoopback, inheritConsole: true, startupSeconds: 24, diagnosticLine: line =>
+            {
+                // Capture only fixed markers. The test needs to distinguish local CONNECT, dispatch and VLESS.
+                foreach (var marker in ControlLogMarkers)
+                    if (line.Contains(marker, StringComparison.OrdinalIgnoreCase))
+                        Console.WriteLine("Xray native fixture: " + marker);
+            }))
         {
             try
             {
@@ -248,12 +254,14 @@ internal static class NativeTunTests
                 // The same elevated Xray and VLESS serve this request with Wintun and WFP active.
                 // It enters through the authenticated loopback control inlet and validates the same certificate.
                 await RequireControlAuthentication(control, timeLimit.Token);
-                var controlResponse = AnswerHttps(httpDestination, certificate, tlsHost, requestBody, responseBody, timeLimit.Token);
+                var controlResponse = AnswerHttps(httpDestination, certificate, tlsHost, requestBody, responseBody, timeLimit.Token,
+                    stage => Console.WriteLine("TLS control fixture: " + stage));
                 using (var http = TunControlProbe.Client(control, child!.Id, tlsHost, (_, candidate, _, errors) =>
                     candidate?.GetCertHashString() == certificate.Thumbprint &&
-                    (errors & SslPolicyErrors.RemoteCertificateNameMismatch) == 0))
+                    (errors & SslPolicyErrors.RemoteCertificateNameMismatch) == 0,
+                    stage => Console.WriteLine("TLS control client: " + stage)))
                 using (var body = new ByteArrayContent(requestBody))
-                using (var reply = await http.PostAsync(endpoint, body, timeLimit.Token))
+                using (var reply = await ReceiveControl(http, endpoint, body, controlResponse, timeLimit.Token))
                 {
                     reply.EnsureSuccessStatusCode();
                     Require((await reply.Content.ReadAsByteArrayAsync(timeLimit.Token)).SequenceEqual(responseBody),
@@ -308,10 +316,22 @@ internal static class NativeTunTests
         return new X509Certificate2(generated.Export(X509ContentType.Pfx), (string?)null, X509KeyStorageFlags.UserKeySet);
     }
 
+    private static readonly string[] ControlLogMarkers = ["request to Method [CONNECT]", "pmt-control-vless",
+        "pmt-control-block", "failed to process outbound traffic", "tunneling request to", "failed to decode response header"];
+
+    private static async Task<HttpResponseMessage> ReceiveControl(HttpClient http, Uri target, HttpContent body, Task server,
+        CancellationToken token)
+    {
+        var response = http.PostAsync(target, body, token);
+        if (await Task.WhenAny(response, server) == server) await server;
+        return await response;
+    }
+
     private static async Task AnswerHttps(TcpListener listener, X509Certificate2 certificate, string expectedSni,
-        byte[] expected, byte[] response, CancellationToken token)
+        byte[] expected, byte[] response, CancellationToken token, Action<string>? observe = null)
     {
         using var socket = await listener.AcceptTcpClientAsync(token);
+        observe?.Invoke("server accepted connection");
         await using var stream = new SslStream(socket.GetStream());
         string? receivedSni = null;
         await stream.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
@@ -322,6 +342,7 @@ internal static class NativeTunTests
                 return certificate;
             }
         }, token);
+        observe?.Invoke("server completed TLS handshake");
         Require(receivedSni == expectedSni, "TLS did not send the expected DNS name as SNI for the pinned address.");
 
         // Read only the headers here. StreamReader can buffer bytes from the binary request body.
@@ -340,6 +361,7 @@ internal static class NativeTunTests
             "Unexpected TLS fixture request headers.");
         var body = new byte[expected.Length];
         await stream.ReadExactlyAsync(body, token);
+        observe?.Invoke("server received request payload");
         Require(body.SequenceEqual(expected), "Wrong TLS request payload at the VLESS egress fixture.");
         var responseHeader = Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Length: {response.Length}\r\nConnection: close\r\n\r\n");
         await stream.WriteAsync(responseHeader, token);

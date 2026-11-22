@@ -11,7 +11,7 @@ namespace Pomogator.Vpn;
 internal static class TunControlProbe
 {
     internal static HttpClient Client(TunControlEndpoint endpoint, int pid, string tlsHost,
-        RemoteCertificateValidationCallback? validation = null)
+        RemoteCertificateValidationCallback? validation = null, Action<string>? observe = null)
     {
         var handler = new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false, UseCookies = false };
         if (validation != null) handler.SslOptions.RemoteCertificateValidationCallback = validation;
@@ -29,7 +29,9 @@ internal static class TunControlProbe
                 await socket.ConnectAsync(IPAddress.Loopback, endpoint.Port, token);
                 if (!WindowsLifetime.OwnsLoopback(endpoint.Port, pid)) throw new IOException("The control listener changed.");
                 var stream = new NetworkStream(socket, ownsSocket: true);
+                observe?.Invoke("loopback connected");
                 await Connect(stream, endpoint, token);
+                observe?.Invoke("authenticated CONNECT established");
                 // The local CONNECT uses a literal IP. The HTTPS URI still controls SNI and name validation.
                 return stream;
             }
