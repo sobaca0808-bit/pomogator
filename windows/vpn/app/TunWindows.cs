@@ -4,6 +4,7 @@ using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Net.NetworkInformation;
+using System.Net.Security;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
@@ -82,11 +83,12 @@ internal static class TunWindows
             routes, properties.DnsAddresses.Any(address => address.ToString() == TunConfig.Resolver));
     }
 
-    internal static HttpClient Http(Guid id)
+    internal static HttpClient Http(Guid id, RemoteCertificateValidationCallback? validation = null)
     {
         var adapter = Find(id) ?? throw new VpnError("Интерфейс TUN пропал.");
         var adapterIndex = Index(adapter);
         var handler = new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false, UseCookies = false };
+        if (validation != null) handler.SslOptions.RemoteCertificateValidationCallback = validation;
         handler.ConnectCallback = async (context, token) =>
         {
             var addresses = await Dns.GetHostAddressesAsync(context.DnsEndPoint.Host, AddressFamily.InterNetwork, token);
@@ -109,8 +111,14 @@ internal static class TunWindows
         return new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(6) };
     }
 
-    internal static bool Vacant(TunRecovery record) => Clean(record) &&
-        NetworkInterface.GetAllNetworkInterfaces().All(adapter => adapter.Name != TunConfig.Adapter(record.Id));
+    internal static bool Vacant(TunRecovery record)
+    {
+        var prefix = IPNetwork.Parse("198.18.240.0/30");
+        return Clean(record) && NetworkInterface.GetAllNetworkInterfaces().All(adapter =>
+            adapter.Name != TunConfig.Adapter(record.Id) &&
+            !adapter.GetIPProperties().UnicastAddresses.Any(entry => entry.Address.AddressFamily == AddressFamily.InterNetwork
+                && prefix.Contains(entry.Address)));
+    }
 
     internal static async Task<bool> CheckDns(CancellationToken token)
     {

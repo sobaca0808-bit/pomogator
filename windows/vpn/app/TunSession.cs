@@ -100,7 +100,10 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
             if (!GetNamedPipeServerProcessId(channel.SafePipeHandle, out var server) || server != parent) return 1;
             var request = await Read<TunRequest>(channel, boot.Token);
             if (!IPAddress.TryParse(request.Peer, out var peer) || peer.AddressFamily != AddressFamily.InterNetwork) return 1;
-            record = new TunRecovery(id, peer.ToString(), request.Before);
+            record = LocalData.Read<TunRecovery>(LocalData.TunRecovery);
+            if (record == null || record.Id != id || record.Peer != peer.ToString() ||
+                !TunWindows.Same(record.Before, request.Before) || record.InstalledDns != TunConfig.Resolver ||
+                record.InstalledRoutes != null && !record.InstalledRoutes.SequenceEqual(TunConfig.Routes(peer))) return 1;
             if (request.Recover)
             {
                 string? reason = null;
@@ -112,7 +115,7 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
 
             if (request.SocksPort is < 1024 or > 65535 || request.Password.Length != 48 ||
                 !request.Password.All(Uri.IsHexDigit)) return 1;
-            if (!TunWindows.Vacant(record) || TunWindows.OtherVpn() ||
+            if (!TunWindows.Vacant(record) || TunWindows.OtherVpn() || new WinInet().Read().InUse ||
                 !TunWindows.Same(request.Before, TunWindows.Capture(peer)))
                 throw new VpnError("Перед запуском изменился рабочий интерфейс или появился другой VPN. Настройки не применены.");
             console = new TunConsole();
