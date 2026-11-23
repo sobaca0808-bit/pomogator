@@ -37,7 +37,7 @@ internal static class TunWfpDiagnostic
             finally { FwpmFreeMemory0(ref enabled); }
 
             status = FwpmGetAppIdFromFileName0(image, out var app);
-            if (status != 0) return Error("идентификация образа Xray", status);
+            if (status != 0) return Error("идентификация процесса VPN", status);
             try { return ReadEvents(engine, Marshal.PtrToStructure<Blob>(app), Address(peer), (ushort)port, Address(source), denied); }
             finally { FwpmFreeMemory0(ref app); }
         }
@@ -130,7 +130,7 @@ internal static class TunWfpDiagnostic
             drop.At >= attempt.From.AddMilliseconds(-500) && drop.At <= attempt.Until.AddMilliseconds(500))).ToArray();
         if (drops.Length == 0)
             return [capped ? "WFP · достигнут предел выборки, совпадения не установлены." :
-                "WFP · зарегистрированной блокировки для образа Xray и IP:порта сервера в окне отказа не найдено."];
+                "WFP · зарегистрированной блокировки для процесса VPN и IP:порта сервера в окне отказа не найдено."];
 
         var lines = new List<string>();
         foreach (var group in drops.GroupBy(x => (x.FilterId, x.LayerId, x.Filter)).Take(8))

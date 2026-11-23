@@ -584,7 +584,7 @@ public partial class MainWindow : Window
         {
             if (tun != null)
             {
-                tunStage = "контроль работы Xray";
+                tunStage = "контроль локального процесса sing-box";
                 tunEngineNote = BridgeExit(core.ExitCode);
             }
             Connection.Record(Check.Xray, CheckResult.Failed);
