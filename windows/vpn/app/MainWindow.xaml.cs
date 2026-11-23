@@ -213,13 +213,14 @@ public partial class MainWindow : Window
         EmptyServers.Visibility = ProfilesList.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
         var mode = connected ? Connection.SystemProxy : SystemMode.IsChecked == true;
-        var modeText = tun != null || startingTun || !connected && TunMode.IsChecked == true ? "VPN-туннель TUN" :
+        var useTun = tun != null || startingTun || !connected && TunMode.IsChecked == true;
+        var modeText = useTun ? "VPN-туннель TUN" :
             mode ? "Системный прокси Windows" : "Локальный прокси";
         var protocol = selected == null ? "" : "VLESS · " + Transport(selected.Transport) +
             (selected.Security == "none" ? " (тестовый)" : " · " + selected.Security.ToUpperInvariant()) + "  |  ";
         ConnectionMeta.Text = protocol + modeText + (Connection.ConnectedAt is { } active
             ? "  |  " + Uptime(DateTimeOffset.Now - active) : "");
-        CoreCheck.Text = CheckText("Xray", Check.Xray);
+        CoreCheck.Text = CheckText(useTun ? "sing-box" : "Xray", Check.Xray);
         ProxyCheck.Text = CheckText("Локальный прокси", Check.Proxy);
         TrafficCheck.Text = CheckText("HTTPS через VLESS", Check.Https);
         SystemCheck.Text = "Системный прокси: " + (Connection.SystemProxy ? "включён" : proxy.Active ? "требует проверки" : "выключен");
