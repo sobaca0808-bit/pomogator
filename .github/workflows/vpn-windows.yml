@@ -43,14 +43,14 @@ jobs:
           $env:POMOGATOR_TEST_XRAY = Join-Path $env:RUNNER_TEMP 'pomogator-xray/xray.exe'
           # The runner is disposable. The test refuses to overwrite an active proxy.
           $env:POMOGATOR_TEST_WININET = '1'
-          $env:POMOGATOR_TEST_SING_BOX = Join-Path $env:RUNNER_TEMP 'pomogator-sing-box/sing-box.exe'
+          $env:POMOGATOR_TEST_SING_BOX = Join-Path $env:RUNNER_TEMP 'pomogator-sing-box/PomogatorTunCore.exe'
           # TUN CI adds only two documentation /32 routes and a documentation IPv6 filter in this disposable VM.
           $env:POMOGATOR_TEST_TUN = '1'
           dotnet run --project windows/vpn/tests/Tests.csproj -c Release
       - name: Test the same synthetic REALITY TCP profiles with Xray and sing-box
         shell: pwsh
         run: |
-          python windows/vpn/tests/reality-smoke.py "$env:RUNNER_TEMP/pomogator-xray/xray.exe" "$env:RUNNER_TEMP/pomogator-sing-box/sing-box.exe"
+          python windows/vpn/tests/reality-smoke.py "$env:RUNNER_TEMP/pomogator-xray/xray.exe" "$env:RUNNER_TEMP/pomogator-sing-box/PomogatorTunCore.exe"
       - name: Verify WPF and tray, render screenshots
         shell: pwsh
         run: dotnet run --project windows/vpn/tests/ui/UiTests.csproj -c Release -- "$env:RUNNER_TEMP/pomogator-vpn-screenshots"

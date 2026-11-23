@@ -201,7 +201,7 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
             var config = SingBoxConfig.Tunnel(profile, peer, uplink, id, port, control);
             using var alive = CancellationTokenSource.CreateLinkedTokenSource(boot.Token);
             var runtime = Read<int>(channel, CancellationToken.None);
-            var image = Path.Combine(AppContext.BaseDirectory, "sing-box.exe");
+            var image = Path.Combine(AppContext.BaseDirectory, SingBoxConfig.Executable);
             var start = Xray.StartAsync(image, config, port,
                 alive.Token, WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback, inheritConsole: true, startupSeconds: 24,
                 diagnosticLine: diagnostic.Read, startupExit: code => engineNote = EngineExit(code));

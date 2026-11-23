@@ -314,7 +314,7 @@ public partial class MainWindow : Window
             var uplink = recovery == null ? null : TunWindows.UplinkName(recovery.Before, peerSource);
             stage = Check.Xray;
             var engine = tunMode ? "sing-box" : "Xray";
-            var path = Path.Combine(AppContext.BaseDirectory, tunMode ? "sing-box.exe" : "xray.exe");
+            var path = Path.Combine(AppContext.BaseDirectory, tunMode ? SingBoxConfig.Executable : "xray.exe");
             if (!File.Exists(path)) throw new VpnError($"В комплекте отсутствует {engine}. Распакуйте архив полностью.");
             if (tunMode) tunStage = "запуск sing-box для выбранного VLESS";
             Detail.Text = $"Запуск {engine}…";

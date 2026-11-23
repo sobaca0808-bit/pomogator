@@ -69,7 +69,8 @@ public sealed class Xray : IDisposable
     }
 
     internal static bool IsSingBox(string path) =>
-        string.Equals(Path.GetFileNameWithoutExtension(path), "sing-box", StringComparison.OrdinalIgnoreCase);
+        string.Equals(Path.GetFileNameWithoutExtension(path),
+            Path.GetFileNameWithoutExtension(SingBoxConfig.Executable), StringComparison.OrdinalIgnoreCase);
 
     public static async Task<Xray> StartAsync(string executable, string config, int port, CancellationToken token,
         Func<Process, IDisposable?>? protect = null, Func<int, int, bool>? ownsPort = null, Action? started = null, bool inheritConsole = false, int startupSeconds = 6,

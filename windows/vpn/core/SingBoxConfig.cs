@@ -7,6 +7,7 @@ namespace Pomogator.Vpn;
 public static class SingBoxConfig
 {
     public const string Version = "1.14.4-pomogator";
+    public const string Executable = "PomogatorTunCore.exe";
     public const string Gateway = "198.18.240.2";
 
     public static void Validate(Profile profile)

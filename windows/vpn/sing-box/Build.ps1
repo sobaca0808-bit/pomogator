@@ -37,7 +37,7 @@ try {
     $env:CGO_ENABLED = '0'
     $env:GOOS = 'windows'
     $env:GOARCH = 'amd64'
-    go build -mod=vendor -trimpath -tags 'with_utls,with_gvisor' -ldflags '-s -w -checklinkname=0 -X github.com/sagernet/sing-box/constant.Version=1.14.4-pomogator' -o (Join-Path $Destination 'sing-box.exe') ./cmd/sing-box
+    go build -mod=vendor -trimpath -tags 'with_utls,with_gvisor' -ldflags '-s -w -checklinkname=0 -X github.com/sagernet/sing-box/constant.Version=1.14.4-pomogator' -o (Join-Path $Destination 'PomogatorTunCore.exe') ./cmd/sing-box
 } finally { Pop-Location }
 Copy-Item (Join-Path $box 'LICENSE') (Join-Path $Destination 'SING-BOX-LICENSE.txt')
 Copy-Item (Join-Path $tun 'LICENSE') (Join-Path $Destination 'SING-TUN-LICENSE.txt')
