@@ -1,0 +1,31 @@
+name: ПОМОГАТОР — проверка площадки для v0.2
+
+on:
+  push:
+    branches: [organizer-v0.2-pages]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  deployments: read
+  pages: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect Pages without changing configuration
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROJECT: ${{ github.repository }}
+        run: |
+          if gh api "repos/$PROJECT/pages" --jq '{html_url, status, build_type, source, cname, https_enforced}' > pages.json; then
+            cat pages.json
+            url=$(jq -r '.html_url // empty' pages.json)
+            if [[ "$url" == https://* ]]; then
+              curl --silent --show-error --location --max-time 20 --output /dev/null \
+                --write-out 'Current Pages URL: %{url_effective} | HTTP %{http_code}\n' "$url" || true
+            fi
+          fi
+          gh api "repos/$PROJECT/deployments?environment=github-pages&per_page=10" \
+            --jq '[.[] | {id, sha, ref, environment, created_at}]'

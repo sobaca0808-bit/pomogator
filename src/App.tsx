@@ -17,6 +17,7 @@ type Modal = { kind: 'place'; value: Place; editing: boolean } |
   { kind: 'entry'; value: Entry; editing: boolean } |
   { kind: 'quick'; day: string } |
   { kind: 'confirm'; title: string; message: string; action: Change; done?: () => void }
+const databaseName = import.meta.env.VITE_POMOGATOR_STORAGE || 'pomogator'
 const messageOf = (cause: unknown) => cause instanceof Error ? cause.message : 'Неизвестная ошибка.'
 
 export function App() {
@@ -50,11 +51,11 @@ export function App() {
         if (active) setData(next)
       } catch (cause) { report(cause) }
     }
-    openStorage().then(db => {
+    openStorage(databaseName).then(db => {
       if (!active) return db.close()
       database.current = db
       if (typeof BroadcastChannel !== 'undefined') {
-        channel.current = new BroadcastChannel('pomogator-data')
+        channel.current = new BroadcastChannel(databaseName + '-data')
         channel.current.onmessage = () => void refresh()
       }
       void refresh()
