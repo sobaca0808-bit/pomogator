@@ -438,11 +438,11 @@ internal static class NativeTunTests
                 using var http = TunWindows.Http(id, (_, candidate, _, errors) =>
                     candidate?.GetCertHashString() == cert.Thumbprint &&
                     (errors & SslPolicyErrors.RemoteCertificateNameMismatch) == 0, host, web);
-                using var sent = await http.PostAsync($"https://{host}:{webPort}/", new ByteArrayContent(input), token);
+                using var sent = await ReceiveControl(http, new Uri($"https://{host}:{webPort}/fixture"), new ByteArrayContent(input), response, token);
                 sent.EnsureSuccessStatusCode();
                 Require((await sent.Content.ReadAsByteArrayAsync(token)).SequenceEqual(output), "sing-box HTTPS payload changed.");
                 await response;
-                var dnsReply = AnswerDnsTcp(dnsServer, TunDns.Query(TunConnectivity.ControlName)[2..], token);
+                var dnsReply = AnswerDnsTcp(dnsServer, TunDns.Query(TunConnectivity.ControlName)[2..], token, forwarded: true);
                 var index = TunWindows.Index(TunWindows.Find(id)!);
                 var actualDns = await TunConnectivity.CheckResolver(dns, index, token);
                 Require(actualDns.Success, "sing-box did not return the DNS answer over VLESS: " + actualDns.Outcome);
@@ -639,7 +639,7 @@ internal static class NativeTunTests
     private static bool IsQuestion(byte[] packet, byte[] question) =>
         packet.Length >= 12 && packet.AsSpan(2).SequenceEqual(question);
 
-    private static async Task AnswerDnsTcp(TcpListener listener, byte[] question, CancellationToken token)
+    private static async Task AnswerDnsTcp(TcpListener listener, byte[] question, CancellationToken token, bool forwarded = false)
     {
         while (!token.IsCancellationRequested)
         {
@@ -655,7 +655,14 @@ internal static class NativeTunTests
                 if (count is < 12 or > 512) continue;
                 var query = new byte[count];
                 await stream.ReadExactlyAsync(query, attempt.Token);
-                if (!IsQuestion(query, question)) continue;
+                if (forwarded)
+                {
+                    var questionBytes = question.AsSpan(10).ToArray(); // strip flags and counts from the expected query
+                    if (query[4] != 0 || query[5] != 1 || !query.AsSpan(12).StartsWith(questionBytes)) continue;
+                    query = query[..(12 + questionBytes.Length)];
+                    query[10] = query[11] = 0; // exclude optional upstream EDNS records from the fixture reply
+                }
+                else if (!IsQuestion(query, question)) continue;
                 var reply = DnsAnswer(query);
                 BinaryPrimitives.WriteUInt16BigEndian(length, (ushort)reply.Length);
                 await stream.WriteAsync(length, attempt.Token);
