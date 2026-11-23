@@ -1,0 +1,97 @@
+name: ПОМОГАТОР v0.2 — GitHub Pages
+
+on:
+  push:
+    branches: [organizer-v0.2-pages]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pomogator-pages
+  cancel-in-progress: false
+
+env:
+  PAGES_ROOT: https://sobaca0808-bit.github.io/pomogator/
+  POMOGATOR_PAGES_URL: https://sobaca0808-bit.github.io/pomogator/preview-v0.2/
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/organizer-v0.2-pages'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: Build isolated preview with relative resource URLs
+        env:
+          VITE_POMOGATOR_STORAGE: pomogator-v02-pages
+        run: |
+          npm run build -- --base=./
+          mkdir -p site/preview-v0.2
+          cp -a dist/. site/preview-v0.2/
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ env.POMOGATOR_PAGES_URL }}
+    permissions:
+      pages: write
+      id-token: write
+      deployments: read
+    steps:
+      - name: Verify existing Pages configuration and protect the main site
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROJECT: ${{ github.repository }}
+          PREVIEW_COMMIT: ${{ github.sha }}
+        run: |
+          pages=$(gh api "repos/$PROJECT/pages")
+          jq -e --arg root "$PAGES_ROOT" '.build_type == "workflow" and .html_url == $root and .cname == null and .https_enforced' <<< "$pages" > /dev/null
+          root_status=$(curl --silent --show-error --max-time 30 --output /dev/null --write-out '%{http_code}' "$PAGES_ROOT")
+          if [[ "$root_status" != 404 ]]; then
+            echo "::error::The Pages root returned HTTP $root_status. Publishing would replace an existing site."
+            exit 1
+          fi
+          deployments=$(gh api --paginate "repos/$PROJECT/deployments?environment=github-pages&per_page=100" \
+            --jq '.[] | select(.ref != "organizer-v0.2-pages") | .id')
+          for deployment in $deployments; do
+            successes=$(gh api --paginate "repos/$PROJECT/deployments/$deployment/statuses?per_page=100" \
+              --jq '.[] | select(.state == "success") | .id')
+            if [[ -n "$successes" ]]; then
+              echo "::error::A prior Pages deployment succeeded. Its files must be retained before using this publication."
+              exit 1
+            fi
+          done
+          echo "Pages root HTTP 404, no prior successful main deployment, preview commit $PREVIEW_COMMIT."
+      - uses: actions/deploy-pages@v4
+
+  verify:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Verify live HTTPS at a mobile viewport
+        run: |
+          curl --fail --silent --show-error --retry 6 --retry-delay 5 --retry-all-errors \
+            --max-time 20 --output /dev/null "$POMOGATOR_PAGES_URL"
+          node e2e/pages-smoke.mjs
+          status=$(curl --silent --show-error --max-time 20 --output /dev/null --write-out '%{http_code}' "$PAGES_ROOT")
+          test "$status" = 404
+          echo "Pages root still returns HTTP 404."
