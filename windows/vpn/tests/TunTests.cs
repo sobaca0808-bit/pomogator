@@ -108,7 +108,7 @@ internal static class NativeTunTests
         var control = new TunControlEndpoint(controlPort, "tun-fixture", Convert.ToHexString(RandomNumberGenerator.GetBytes(24)),
             webTarget, httpPort);
         var client = Profiles.Parse($"vless://{id}@{uplinkAddress}:{upstreamPort}?security=tls&sni={upstreamHost}");
-        var outbound = TunConfig.UplinkOutbound(uplinkAddress, uplinkAddress, client);
+        var outbound = TunConfig.UplinkOutbound(uplinkAddress, uplinkAddress, TunWindows.UplinkName(snapshot, uplinkAddress), client);
         var stream = (Dictionary<string, object>)outbound["streamSettings"];
         var tls = (Dictionary<string, object>)stream["tlsSettings"];
         tls["pinnedPeerCertSha256"] = Convert.ToHexString(SHA256.HashData(upstreamCertificate.RawData));

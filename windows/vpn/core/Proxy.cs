@@ -1,3 +1,6 @@
+using System.Net;
+using System.Text.RegularExpressions;
+
 namespace Pomogator.Vpn;
 
 public sealed record ProxyState(uint Flags, string Server, string Bypass, string Pac)
@@ -24,6 +27,29 @@ public interface IProxySettings
 
 public static class ProxyControl
 {
+    public static WebProxy VerifiedWindowsProxy(ProxyState effective, int port)
+    {
+        var server = $"127.0.0.1:{port}";
+        var configured = effective.Server.Trim();
+        var https = configured.Contains('=')
+            ? configured.Split(';', StringSplitOptions.TrimEntries)
+                .Where(item => item.StartsWith("https=", StringComparison.OrdinalIgnoreCase))
+                .Select(item => item[6..]).ToArray()
+            : new[] { configured };
+        if ((effective.Flags & ProxyState.ExplicitProxy) == 0 ||
+            (effective.Flags & (ProxyState.AutoDetect | ProxyState.AutomaticScript)) != 0 ||
+            effective.Pac.Length != 0 || https.Length != 1 ||
+            !(https[0] == server || https[0] == "http://" + server))
+            throw new VpnError("Windows не подтвердила наш прокси для активного подключения.", Check.Https);
+        var bypass = effective.Bypass.Split([';', ' ', '\t'], StringSplitOptions.RemoveEmptyEntries);
+        return new WebProxy("http://" + server) {
+            BypassProxyOnLocal = bypass.Contains("<local>", StringComparer.OrdinalIgnoreCase),
+            BypassList = bypass.Where(item => !item.Equals("<local>", StringComparison.OrdinalIgnoreCase))
+                .Select(item => "^" + (item.Contains("://") ? "" : "[^:]+://") +
+                    Regex.Escape(item).Replace(@"\*", ".*") + @"(?::\d+)?$").ToArray()
+        };
+    }
+
     public static ProxyRecovery Prepare(IProxySettings settings, int port)
     {
         var before = settings.Read();

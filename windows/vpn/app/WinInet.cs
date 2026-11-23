@@ -24,6 +24,37 @@ internal sealed class WinInet(string? connection = null) : IProxySettings
         internal IntPtr Options;
     }
 
+    private struct EffectiveOptions
+    {
+        internal int AutoDetect;
+        internal IntPtr Pac;
+        internal IntPtr Proxy;
+        internal IntPtr Bypass;
+    }
+
+    internal static ProxyState ReadEffective()
+    {
+        var options = new EffectiveOptions();
+        try
+        {
+            if (!WinHttpGetIEProxyConfigForCurrentUser(out options)) Fail();
+            var proxy = Marshal.PtrToStringUni(options.Proxy) ?? "";
+            var bypass = Marshal.PtrToStringUni(options.Bypass) ?? "";
+            var pac = Marshal.PtrToStringUni(options.Pac) ?? "";
+            var flags = ProxyState.Direct |
+                (proxy.Length != 0 ? ProxyState.ExplicitProxy : 0) |
+                (pac.Length != 0 ? ProxyState.AutomaticScript : 0) |
+                (options.AutoDetect != 0 ? ProxyState.AutoDetect : 0);
+            return new ProxyState(flags, proxy, bypass, pac);
+        }
+        finally
+        {
+            if (options.Pac != IntPtr.Zero) GlobalFree(options.Pac);
+            if (options.Proxy != IntPtr.Zero) GlobalFree(options.Proxy);
+            if (options.Bypass != IntPtr.Zero) GlobalFree(options.Bypass);
+        }
+    }
+
     public ProxyState Read()
     {
         var options = new[] { new Option { Id = FlagsUi }, new Option { Id = Server },
@@ -92,6 +123,10 @@ internal sealed class WinInet(string? connection = null) : IProxySettings
     [DllImport("wininet.dll", EntryPoint = "InternetSetOptionW", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool Notify(IntPtr internet, uint option, IntPtr buffer, uint size);
+
+    [DllImport("winhttp.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool WinHttpGetIEProxyConfigForCurrentUser(out EffectiveOptions options);
 
     [DllImport("kernel32.dll")]
     private static extern IntPtr GlobalFree(IntPtr memory);

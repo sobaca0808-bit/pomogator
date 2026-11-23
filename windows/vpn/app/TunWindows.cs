@@ -68,6 +68,18 @@ internal static class TunWindows
             Index(IPAddress.Parse(TunConfig.Resolver)), Index(IPAddress.Parse(TunConfig.InternetProbe)));
     }
 
+    internal static string UplinkName(TunBaseline baseline, IPAddress source)
+    {
+        var adapters = NetworkInterface.GetAllNetworkInterfaces();
+        var uplink = adapters.SingleOrDefault(adapter => adapter.Id == baseline.UplinkId &&
+            Index(adapter) == baseline.Uplink && adapter.OperationalStatus == OperationalStatus.Up);
+        if (uplink == null || string.IsNullOrWhiteSpace(uplink.Name) || !baseline.HasSource(source) ||
+            !uplink.GetIPProperties().UnicastAddresses.Any(address => address.Address.Equals(source)) ||
+            adapters.Count(adapter => string.Equals(adapter.Name, uplink.Name, StringComparison.OrdinalIgnoreCase)) != 1)
+            throw new VpnError("Не удалось однозначно подтвердить интерфейс для IPv4 VPN-сервера. TUN не запущен.");
+        return uplink.Name;
+    }
+
     internal static bool Same(TunBaseline expected, TunBaseline actual) =>
         expected.Uplink == actual.Uplink && expected.UplinkId == actual.UplinkId &&
         expected.Addresses.SequenceEqual(actual.Addresses) && expected.Dns.SequenceEqual(actual.Dns);

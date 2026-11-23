@@ -61,25 +61,31 @@ public static class TunConfig
         return profile with { Host = peer.ToString(), Options = options, Full = null };
     }
 
-    public static string Engine(Guid id, IPAddress peer, IPAddress source, Profile profile, int readiness,
+    public static string Engine(Guid id, IPAddress peer, IPAddress source, string uplink, Profile profile, int readiness,
         int diagnosticsPort = 0, TunControlEndpoint? control = null) =>
         CreateEngine(id, Routes(peer), new[] { "allexceptlan", "[::/0]:all", "misconfigtun" },
-            UplinkOutbound(peer, source, profile), readiness,
+            UplinkOutbound(peer, source, uplink, profile), readiness,
             diagnosticsPort: diagnosticsPort > 0 ? diagnosticsPort : null, dnsOverHttps: DnsUpstream, control: control, peer: peer);
 
-    public static string PreflightEngine(IPAddress peer, IPAddress source, Profile profile, int port) => JsonSerializer.Serialize(new {
+    public static string PreflightEngine(IPAddress peer, IPAddress source, string uplink, Profile profile, int port) => JsonSerializer.Serialize(new {
         log = new { loglevel = "none" },
         inbounds = new[] { new { listen = "127.0.0.1", port, protocol = "http" } },
-        outbounds = new[] { UplinkOutbound(peer, source, profile) }
+        outbounds = new[] { UplinkOutbound(peer, source, uplink, profile) }
     });
 
-    internal static Dictionary<string, object> UplinkOutbound(IPAddress peer, IPAddress source, Profile profile)
+    internal static Dictionary<string, object> UplinkOutbound(IPAddress peer, IPAddress source, string uplink, Profile profile)
     {
         if (source.AddressFamily != AddressFamily.InterNetwork || source.Equals(IPAddress.Any) ||
             IPAddress.IsLoopback(source) || source.Equals(IPAddress.Parse(Address)))
             throw new ArgumentException("An IPv4 address of the uplink is required.", nameof(source));
+        if (string.IsNullOrWhiteSpace(uplink))
+            throw new ArgumentException("A verified IPv4 interface is required.", nameof(uplink));
         var outbound = XrayConfig.Outbound(Pinned(profile, peer), "vpn");
         outbound["sendThrough"] = source.ToString();
+        // The Windows Xray dialer uses IP_UNICAST_IF on this outbound only. The
+        // global TUN interface guard can change WeakHostSend on the uplink.
+        var stream = (Dictionary<string, object>)outbound["streamSettings"];
+        stream["sockopt"] = new { @interface = uplink };
         return outbound;
     }
 

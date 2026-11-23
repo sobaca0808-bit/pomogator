@@ -172,13 +172,32 @@ if (OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable("POMOGATOR
     Assert(!initial.InUse);
     var change = ProxyControl.Prepare(windows, 62003);
     // Explicit opt-in, reserved for an isolated Windows runner.
-    try { ProxyControl.Apply(windows, change); }
+    try
+    {
+        ProxyControl.Apply(windows, change);
+        var current = ProxyControl.VerifiedWindowsProxy(WinInet.ReadEffective(), 62003);
+        Assert(current.GetProxy(new Uri("https://example.org/")) == new Uri("http://127.0.0.1:62003/"));
+    }
     finally { ProxyControl.Restore(windows, change); }
     Assert(windows.Read() == initial);
     Console.WriteLine("PASS Windows WinINet settings applied and restored");
     passed++;
 }
 
+Test("Use the active Windows HTTPS proxy and keep its bypass rules", () => {
+    var route = new Uri("https://example.org/");
+    var effective = new ProxyState(ProxyState.Direct | ProxyState.ExplicitProxy,
+        "http=other:80;https=127.0.0.1:3500", "<local>;*.skip.test", "");
+    var proxy = ProxyControl.VerifiedWindowsProxy(effective, 3500);
+    Assert(proxy.GetProxy(route) == new Uri("http://127.0.0.1:3500/"));
+    Assert(proxy.IsBypassed(new Uri("https://abc.skip.test/")) && proxy.IsBypassed(new Uri("https://fileserver/")));
+    foreach (var rejected in new[] {
+        effective with { Server = "127.0.0.1:3501" },
+        effective with { Server = "http=127.0.0.1:3500" },
+        effective with { Flags = effective.Flags | ProxyState.AutoDetect },
+        effective with { Pac = "https://example.invalid/proxy.pac" }
+    }) Throws(() => ProxyControl.VerifiedWindowsProxy(rejected, 3500));
+});
 Test("Select a single active RAS scope and refuse ambiguous proxy changes", () => {
     Assert(RasProxyScope.Select(Array.Empty<(string, string)>()) == null);
     Assert(RasProxyScope.Select(new[] { ("Broadband", "PPPoE"), ("broadband", "pppoe") }) == "Broadband");
@@ -204,7 +223,7 @@ Test("TUN splits public IPv4 routes around the pinned peer and LAN", () => {
         route.Contains(IPAddress.Parse("127.0.0.1"))));
     Assert(routes.Any(route => route.Contains(IPAddress.Parse(TunConfig.Resolver))));
     Assert(routes.Any(route => route.Contains(IPAddress.Parse("203.0.113.70"))));
-    using var config = JsonDocument.Parse(TunConfig.Engine(Guid.NewGuid(), peer, IPAddress.Parse("192.0.2.31"), Profiles.Parse(Base + "?security=tls"), 12346));
+    using var config = JsonDocument.Parse(TunConfig.Engine(Guid.NewGuid(), peer, IPAddress.Parse("192.0.2.31"), "Fixture uplink", Profiles.Parse(Base + "?security=tls"), 12346));
     var settings = config.RootElement.GetProperty("inbounds")[0].GetProperty("settings");
     Assert(settings.GetProperty("autoOutboundsInterface").GetString() == "");
     Assert(config.RootElement.GetProperty("outbounds")[0].GetProperty("protocol").GetString() == "vless");
@@ -290,7 +309,7 @@ Test("Only classified Xray diagnostics and its exit code can appear in the TUN r
         !diagnostic.Description.Contains("fixture-secret") && !diagnostic.Description.Contains("other-credential"));
 });
 Test("Production TUN routes encrypted DNS and keeps telemetry on loopback", () => {
-    using var config = JsonDocument.Parse(TunConfig.Engine(Guid.NewGuid(), IPAddress.Parse("203.0.113.71"), IPAddress.Parse("192.0.2.31"),
+    using var config = JsonDocument.Parse(TunConfig.Engine(Guid.NewGuid(), IPAddress.Parse("203.0.113.71"), IPAddress.Parse("192.0.2.31"), "Fixture uplink",
         Profiles.Parse(Base + "?security=tls"), 34002, 34003));
     var root = config.RootElement;
     Assert(root.GetProperty("dns").GetProperty("servers")[0].GetString() == "https://dns.quad9.net/dns-query");
@@ -305,15 +324,21 @@ Test("Production TUN routes encrypted DNS and keeps telemetry on loopback", () =
     var dns = root.GetProperty("outbounds").EnumerateArray().Single(item => item.GetProperty("protocol").GetString() == "dns");
     Assert(dns.GetProperty("streamSettings").GetProperty("sockopt").GetProperty("dialerProxy").GetString() == "vpn");
 });
-Test("Pin the TUN VLESS source and reject the VPN peer re-entering Wintun", () => {
+Test("Bind TUN VLESS to the selected interface and reject the VPN peer re-entering Wintun", () => {
     var peer = IPAddress.Parse("203.0.113.71");
     var source = IPAddress.Parse("192.0.2.31");
     var profile = Profiles.Parse(Base + "?security=reality&type=tcp&flow=xtls-rprx-vision&sni=vpn.example&pbk=" + RealityKey + "&sid=01");
-    using var config = JsonDocument.Parse(TunConfig.Engine(Guid.NewGuid(), peer, source, profile, 34002));
+    using var config = JsonDocument.Parse(TunConfig.Engine(Guid.NewGuid(), peer, source, "Fixture uplink", profile, 34002));
     var root = config.RootElement;
     var outbound = root.GetProperty("outbounds")[0];
+    using var preflight = JsonDocument.Parse(TunConfig.PreflightEngine(peer, source, "Fixture uplink", profile, 34006));
+    Assert(preflight.RootElement.GetProperty("outbounds")[0].GetRawText() == outbound.GetRawText());
     Assert(outbound.GetProperty("sendThrough").GetString() == source.ToString());
-    Assert(outbound.GetProperty("streamSettings").GetProperty("realitySettings").GetProperty("serverName").GetString() == "vpn.example");
+    var stream = outbound.GetProperty("streamSettings");
+    Assert(stream.GetProperty("sockopt").GetProperty("interface").GetString() == "Fixture uplink");
+    Assert(stream.GetProperty("realitySettings").GetProperty("serverName").GetString() == "vpn.example");
+    try { TunConfig.Engine(Guid.NewGuid(), peer, source, "", profile, 34002); throw new InvalidOperationException("No interface guard."); }
+    catch (ArgumentException error) { Assert(error.ParamName == "uplink"); }
     var rules = root.GetProperty("routing").GetProperty("rules").EnumerateArray().ToArray();
     var rejected = Array.FindIndex(rules, rule => rule.TryGetProperty("ruleTag", out var tag) &&
         tag.GetString() == "pmt-peer-reentry");
@@ -328,7 +353,7 @@ Test("Pin the TUN VLESS source and reject the VPN peer re-entering Wintun", () =
 });
 Test("Only the authenticated diagnostic inlet can reach the pinned destination", () => {
     var endpoint = new TunControlEndpoint(34004, "fixture-user", "fixture-password", "1.1.1.1", 443);
-    using var config = JsonDocument.Parse(TunConfig.Engine(Guid.NewGuid(), IPAddress.Parse("203.0.113.71"), IPAddress.Parse("192.0.2.31"),
+    using var config = JsonDocument.Parse(TunConfig.Engine(Guid.NewGuid(), IPAddress.Parse("203.0.113.71"), IPAddress.Parse("192.0.2.31"), "Fixture uplink",
         Profiles.Parse(Base + "?security=tls"), 34002, 34003, endpoint));
     var root = config.RootElement;
     var inlet = root.GetProperty("inbounds").EnumerateArray().Single(item =>
@@ -476,7 +501,7 @@ if (!string.IsNullOrWhiteSpace(executable))
     }) await CheckConfiguration(executable, profile);
     var advanced = Profiles.ParseList(EasyGo("server.example", 443, Id, RealityKey), keepRouting: true).Single();
     await CheckConfiguration(executable, advanced);
-    var tunConfig = TunConfig.Engine(Guid.NewGuid(), IPAddress.Parse("203.0.113.71"), IPAddress.Parse("192.0.2.31"), advanced, 34010, 34011,
+    var tunConfig = TunConfig.Engine(Guid.NewGuid(), IPAddress.Parse("203.0.113.71"), IPAddress.Parse("192.0.2.31"), "Fixture uplink", advanced, 34010, 34011,
         new TunControlEndpoint(34012, "fixture-user", "fixture-password", TunConfig.InternetProbe, 443));
     await CheckConfiguration(executable, advanced, tunConfig);
     Console.WriteLine("PASS Pinned Xray validates transports, full EasyGo and TUN DoH/StatsService configuration");

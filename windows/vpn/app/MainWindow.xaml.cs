@@ -309,6 +309,7 @@ public partial class MainWindow : Window
             LatencyText.Text = $"Задержка TCP до сервера: {Math.Round(latency.TotalMilliseconds)} мс.";
             AddLog("TCP-порт VPN-сервера доступен.");
 
+            var uplink = recovery == null ? null : TunWindows.UplinkName(recovery.Before, peerSource);
             stage = Check.Xray;
             var path = Path.Combine(AppContext.BaseDirectory, "xray.exe");
             if (!File.Exists(path)) throw new VpnError("В комплекте отсутствует xray.exe. Распакуйте архив полностью.");
@@ -320,7 +321,7 @@ public partial class MainWindow : Window
                 port = Xray.FreePort();
                 checkPort = tunMode || profile.Full == null ? port : DistinctPort(port);
                 socksPort = !tunMode && profile.Full?.SocksTag != null ? DistinctPort(port, checkPort) : null;
-                var config = tunMode ? TunConfig.PreflightEngine(peer!, peerSource, profile, port) :
+                var config = tunMode ? TunConfig.PreflightEngine(peer!, peerSource, uplink!, profile, port) :
                     XrayConfig.Create(profile, port, checkPort, socksPort);
                 return (config, port, new int?[] { checkPort, socksPort }.OfType<int>().Distinct().ToArray());
             }, source.Token, WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback,
@@ -410,7 +411,7 @@ public partial class MainWindow : Window
                 proxy.Enable(checkPort);
                 Detail.Text = "Проверяем HTTPS через системный прокси Windows…";
                 await SystemProxy.VerifyAsync(checkPort, source.Token);
-                AddLog("Системный прокси подтверждён запросом Windows и сверкой выходного IP. Chrome проверяется отдельно.");
+                AddLog("Windows подтвердила адрес системного прокси. HTTPS проверен через выбранный прокси. Настройки Chrome проверяются отдельно.");
             }
             health = new CancellationTokenSource();
             ScheduleHealth(healthPolicy.Observe(true));
@@ -931,7 +932,7 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog(this) != true) return;
         try
         {
-            var header = new[] { "ПОМОГАТОР VPN 0.3.7", Status.Text, CoreCheck.Text, ProxyCheck.Text, TrafficCheck.Text,
+            var header = new[] { "ПОМОГАТОР VPN 0.3.4", Status.Text, CoreCheck.Text, ProxyCheck.Text, TrafficCheck.Text,
                 SystemCheck.Text, TunCheck.Text, CheckedAt.Text, "" };
             var observations = tunObservation?.Lines() ?? Enumerable.Empty<string>();
             var probes = tunChecks?.Lines() ?? Enumerable.Empty<string>();

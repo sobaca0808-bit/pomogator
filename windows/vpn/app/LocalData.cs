@@ -81,8 +81,11 @@ internal sealed class SystemProxy
 
     internal static HttpClient Client(int port)
     {
-        // Let Windows/.NET resolve the effective proxy. Refuse to open a direct connection.
-        var handler = new SocketsHttpHandler { ConnectCallback = async (context, token) =>
+        // Read the active LAN/RAS settings afresh. Environment variables and cached .NET
+        // discovery cannot change the selected endpoint, and a bypass cannot dial directly.
+        var windows = ProxyControl.VerifiedWindowsProxy(WinInet.ReadEffective(), port);
+        var handler = new SocketsHttpHandler { Proxy = windows, UseProxy = true, AllowAutoRedirect = false,
+            UseCookies = false, ConnectCallback = async (context, token) =>
         {
             if (context.DnsEndPoint.Port != port || context.DnsEndPoint.Host != "127.0.0.1")
                 throw new HttpRequestException("Windows did not select the verified loopback proxy.");
@@ -99,15 +102,20 @@ internal sealed class SystemProxy
 
     internal static async Task VerifyAsync(int port, CancellationToken token)
     {
-        using var expected = Xray.ThroughProxy(port);
+        bool configurationConfirmed = false;
         for (var attempt = 0; attempt < 3; attempt++)
         {
-            using var system = Client(port);
-            var results = await Task.WhenAll(InternetHealth.ExternalIpAsync(system, token), InternetHealth.ExternalIpAsync(expected, token));
-            if (results[0] != null && results[0] == results[1]) return;
+            token.ThrowIfCancellationRequested();
+            try
+            {
+                using var system = Client(port);
+                configurationConfirmed = true;
+                if (await InternetHealth.ProbeAsync(system, token) != null) return;
+            }
+            catch (VpnError) when (!configurationConfirmed && attempt < 2) { }
             if (attempt < 2) await Task.Delay(400, token);
         }
-        throw new VpnError("Windows не подтвердила выход через системный прокси. Проверьте настройки прокси браузера или используйте локальный режим.", Check.Https);
+        throw new VpnError("Адрес системного прокси подтверждён, но контрольный HTTPS через него недоступен.", Check.Https);
     }
 
     internal bool ReleaseIfChanged()

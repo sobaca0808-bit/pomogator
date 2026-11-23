@@ -190,6 +190,7 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
             if (!TunWindows.Vacant(record) || TunWindows.OtherVpn() || SystemProxy.AnyInUse() ||
                 !TunWindows.MatchesBaseline(request.Before, TunWindows.Capture(peer)))
                 throw new VpnError("Перед запуском изменился рабочий интерфейс или появился другой VPN. Настройки не применены.");
+            var uplink = TunWindows.UplinkName(record.Before, source);
             console = new TunConsole();
             var port = Xray.FreePort();
             int diagnosticsPort;
@@ -199,7 +200,7 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
             var control = new TunControlEndpoint(controlPort, "pomogator",
                 Convert.ToHexString(RandomNumberGenerator.GetBytes(24)), TunConfig.InternetProbe, 443);
             launchingTun = true;
-            var config = TunConfig.Engine(id, peer, source, profile, port, diagnosticsPort, control);
+            var config = TunConfig.Engine(id, peer, source, uplink, profile, port, diagnosticsPort, control);
             // Start watching the parent before the first network change, including driver initialization.
             using var alive = CancellationTokenSource.CreateLinkedTokenSource(boot.Token);
             var runtime = Read<int>(channel, CancellationToken.None);
