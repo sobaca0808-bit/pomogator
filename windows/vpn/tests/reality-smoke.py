@@ -1,4 +1,5 @@
 import contextlib
+import http.client
 import http.server
 import json
 import socket
@@ -86,6 +87,7 @@ with tempfile.TemporaryDirectory(prefix='pomogator-reality-') as temporary, cont
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(path / 'web.crt', path / 'web.key')
     dest.socket = context.wrap_socket(dest.socket, server_side=True)
+    trust = ssl.create_default_context(cafile=str(path / 'web.crt'))
     thread = threading.Thread(target=dest.serve_forever, daemon=True)
     thread.start()
     stack.callback(dest.shutdown)
@@ -119,8 +121,9 @@ with tempfile.TemporaryDirectory(prefix='pomogator-reality-') as temporary, cont
             with contextlib.ExitStack() as client_scope:
                 client = start(client_scope, exe, 'run', '-c', str(settings), diagnostics=quiet)
                 assert ready(client, local_port), f'{name} did not start'
-                result = subprocess.run(['curl', '--silent', '--show-error', '--fail', '--max-time', '8', '--noproxy', '',
-                    '--proxy', f'http://{bind}:{local_port}', '--cacert', str(path / 'web.crt'),
-                    f'https://{bind}:{destination_port}/fixture'], capture_output=True)
-                assert result.returncode == 0 and result.stdout == body, f'{name} ({fingerprint}): curl code {result.returncode}'
+                with contextlib.closing(http.client.HTTPSConnection(bind, local_port, timeout=8, context=trust)) as client_http:
+                    client_http.set_tunnel(bind, destination_port)
+                    client_http.request('GET', '/fixture')
+                    with client_http.getresponse() as response:
+                        assert response.status == 200 and response.read() == body, f'{name} ({fingerprint}): unexpected HTTPS response'
                 print(f'PASS {name} ({fingerprint}): verified HTTPS body via the same synthetic TCP VLESS/REALITY Vision profile.')
