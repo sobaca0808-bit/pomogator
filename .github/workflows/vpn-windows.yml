@@ -2,7 +2,7 @@ name: ПОМОГАТОР VPN 0.3.4 — Windows x64
 
 on:
   push:
-    branches: [vpn-v0.3.0-tun, vpn-v0.3.1-tun-fix, vpn-v0.3.4-uplink]
+    branches: [vpn-v0.3.0-tun, vpn-v0.3.1-tun-fix, vpn-v0.3.4-uplink, vpn-v0.3.4-egress-ab]
     paths:
       - windows/vpn/**
       - .github/workflows/vpn-windows.yml
@@ -52,6 +52,6 @@ jobs:
           Copy-Item "$env:RUNNER_TEMP/pomogator-xray/*" windows/vpn/dist
       - uses: actions/upload-artifact@v4
         with:
-          name: PomogatorVpn-0.3.4-win-x64-uplink
+          name: PomogatorVpn-0.3.4-win-x64-egress-ab
           path: windows/vpn/dist/
           if-no-files-found: error

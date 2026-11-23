@@ -112,9 +112,34 @@ internal static class NativeTunTests
         var stream = (Dictionary<string, object>)outbound["streamSettings"];
         var tls = (Dictionary<string, object>)stream["tlsSettings"];
         tls["pinnedPeerCertSha256"] = Convert.ToHexString(SHA256.HashData(upstreamCertificate.RawData));
+        int referencePort;
+        do { referencePort = Xray.FreePort(); } while (referencePort == readiness || referencePort == controlPort ||
+            referencePort == diagnosticsPort || referencePort == upstreamPort);
+        var referenceEndpoint = control with { Port = referencePort };
+        using var reference = await Xray.StartAsync(executable, TunConfig.ReferenceEngine(referenceEndpoint, outbound),
+            referencePort, timeLimit.Token, WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback);
+        const string tlsHost = "tls-fixture.test";
+        using var certificate = CreateCertificate(tlsHost);
+        var endpoint = new Uri($"https://{tlsHost}:{httpPort}/fixture");
+        async Task VerifyReference()
+        {
+            var input = RandomNumberGenerator.GetBytes(1024);
+            var output = RandomNumberGenerator.GetBytes(1024);
+            var server = AnswerHttps(httpDestination, certificate, tlsHost, input, output, timeLimit.Token);
+            using var client = TunControlProbe.Client(referenceEndpoint, reference.ProcessId, tlsHost,
+                (_, candidate, _, errors) => candidate?.GetCertHashString() == certificate.Thumbprint &&
+                    (errors & SslPolicyErrors.RemoteCertificateNameMismatch) == 0);
+            using var response = await client.PostAsync(endpoint, new ByteArrayContent(input), timeLimit.Token);
+            response.EnsureSuccessStatusCode();
+            Require((await response.Content.ReadAsByteArrayAsync(timeLimit.Token)).SequenceEqual(output),
+                "Reference Xray did not transfer the expected payload.");
+            await server;
+        }
+        await VerifyReference();
+
         // The test peer listens on the runner's non-loopback IPv4 and uses an ephemeral pinned certificate.
         using var console = new TunConsole();
-        var fixture = TunConfig.CreateEngine(fixtureId, fixtureRoutes, new[] { "198.51.100.0/24:all", "[2001:db8:9::/48]:all" },
+        var fixture = TunConfig.CreateEngine(fixtureId, fixtureRoutes, new[] { "198.51.100.0/24:all", "[2001:db8:9::/48]:all", uplinkAddress + "/32:all" },
             outbound, readiness, dnsTarget, diagnosticsPort: diagnosticsPort, control: control, peer: uplinkAddress);
         var seenIndex = 0;
         Process? child = null;
@@ -160,18 +185,17 @@ internal static class NativeTunTests
                     TunWindows.Index(dns) == seenIndex, "Windows did not pick the TUN routes.");
                 Require(adapter!.GetIPProperties().DnsAddresses.Contains(dns), "Wintun DNS did not have the fixture address.");
                 await CheckWfpBlock(uplinkAddress, timeLimit.Token);
+                await VerifyReference();
+                Console.WriteLine("PASS Same elevated reference Xray transfers HTTPS before and during TUN with the peer WFP rule active");
 
                 // Distinct payloads exceed the MTU in both directions. Validate the actual forwarded
                 // HTTP request and response after proving TLS selected the expected certificate.
-                const string tlsHost = "tls-fixture.test";
-                using var certificate = CreateCertificate(tlsHost);
                 using var unexpected = CreateCertificate(tlsHost);
                 var countersBefore = TunPacketCounters.Read(fixtureId);
                 var xrayBefore = await TunXrayCounters.Read(executable, diagnosticsPort, child!.Id, timeLimit.Token);
                 var requestBody = RandomNumberGenerator.GetBytes(32768);
                 var responseBody = RandomNumberGenerator.GetBytes(32768);
                 var tcp = AnswerHttps(httpDestination, certificate, tlsHost, requestBody, responseBody, timeLimit.Token);
-                var endpoint = new Uri($"https://{tlsHost}:{httpPort}/fixture");
                 using (var http = TunWindows.Http(fixtureId, (_, candidate, _, errors) =>
                     candidate?.GetCertHashString() == certificate.Thumbprint &&
                     (errors & SslPolicyErrors.RemoteCertificateNameMismatch) == 0, requiredHost: tlsHost, pinnedAddress: web))

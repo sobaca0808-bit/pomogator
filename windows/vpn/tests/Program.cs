@@ -351,6 +351,24 @@ Test("Bind TUN VLESS to the selected interface and reject the VPN peer re-enteri
     var baseline = new TunBaseline(7, "fixture", new[] { source.ToString(), TunConfig.Address }, [], 7);
     Assert(baseline.HasSource(source) && !baseline.HasSource(peer) && !baseline.HasSource(IPAddress.Parse(TunConfig.Address)));
 });
+Test("Reference process keeps Wintun absent and routes only one authenticated IPv4 probe", () => {
+    var endpoint = new TunControlEndpoint(34004, "fixture-user", "fixture-password", "1.1.1.1", 443);
+    using var json = JsonDocument.Parse(TunConfig.ReferenceEngine(endpoint, new { tag = "vpn", protocol = "vless" }));
+    var inbound = json.RootElement.GetProperty("inbounds").EnumerateArray().Single();
+    Assert(inbound.GetProperty("listen").GetString() == "127.0.0.1" && inbound.GetProperty("protocol").GetString() == "http");
+    Assert(inbound.GetProperty("settings").GetProperty("accounts").GetArrayLength() == 1);
+    var rules = json.RootElement.GetProperty("routing").GetProperty("rules");
+    Assert(rules.GetArrayLength() == 2 && rules[0].GetProperty("ip")[0].GetString() == "1.1.1.1/32" &&
+        rules[0].GetProperty("port").GetString() == "443" && rules[1].GetProperty("outboundTag").GetString() == "block");
+});
+Test("Distinguish combined-engine, elevated-context and common failures", () => {
+    var before = new TunProbe(true, "fixture", 12);
+    var failure = new TunProbe(false, "fixture", 14);
+    Assert(TunConnectivity.CompareReferences(new(before, before), failure).Contains("сам обслуживает TUN"));
+    Assert(TunConnectivity.CompareReferences(new(before, failure), before).Contains("контекста процесса"));
+    Assert(TunConnectivity.CompareReferences(new(before, failure), failure).Contains("оба контрольных процесса"));
+    Assert(TunConnectivity.CompareReferences(new(failure), before).Contains("не подтвердил пару замеров"));
+});
 Test("Only the authenticated diagnostic inlet can reach the pinned destination", () => {
     var endpoint = new TunControlEndpoint(34004, "fixture-user", "fixture-password", "1.1.1.1", 443);
     using var config = JsonDocument.Parse(TunConfig.Engine(Guid.NewGuid(), IPAddress.Parse("203.0.113.71"), IPAddress.Parse("192.0.2.31"), "Fixture uplink",

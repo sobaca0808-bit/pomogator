@@ -358,7 +358,7 @@ public partial class MainWindow : Window
                 AddLog(tunStatus);
                 tunStage = "проверка DNS и HTTPS";
                 Detail.Text = "Сравниваем HTTPS через Wintun и локальный вход того же Xray…";
-                tunChecks = await TunConnectivity.Run(tun, source.Token);
+                tunChecks = await TunConnectivity.Run(tun, source.Token, core, baselineProbe);
                 Connection.Record(Check.Https, tunChecks.Https.Success ? CheckResult.Passed : CheckResult.Failed);
                 foreach (var line in tunChecks.Lines()) AddLog(line);
                 if (!tunChecks.Success)

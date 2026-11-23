@@ -89,6 +89,35 @@ public static class TunConfig
         return outbound;
     }
 
+    internal static string ReferenceEngine(TunControlEndpoint control, object outbound)
+    {
+        var (inbound, rule) = ControlRoute(control);
+        return JsonSerializer.Serialize(new {
+            log = new { loglevel = "none" },
+            inbounds = new[] { inbound },
+            outbounds = new[] { outbound, new { tag = "block", protocol = "blackhole" } },
+            routing = new { rules = new[] { rule, ControlBlock() } }
+        });
+    }
+
+    private static (object Inbound, object Rule) ControlRoute(TunControlEndpoint control)
+    {
+        if (!IPAddress.TryParse(control.Destination, out var target) || target.AddressFamily != AddressFamily.InterNetwork ||
+            control.DestinationPort is < 1 or > 65535 || control.Port is < 1 or > 65535 ||
+            control.User.Length == 0 || control.Password.Length == 0)
+            throw new ArgumentException("A pinned IPv4 destination and proxy credentials are required.", nameof(control));
+        return (new { listen = "127.0.0.1", port = control.Port, protocol = "http",
+                tag = ControlTag, settings = new {
+                    accounts = new[] { new { user = control.User, pass = control.Password } }, allowTransparent = false
+                } },
+            new { type = "field", ruleTag = "pmt-control-vless", inboundTag = new[] { ControlTag },
+                ip = new[] { target + "/32" }, port = control.DestinationPort.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                network = "tcp", outboundTag = "vpn" });
+    }
+
+    private static object ControlBlock() =>
+        new { type = "field", ruleTag = "pmt-control-block", inboundTag = new[] { ControlTag }, outboundTag = "block" };
+
     // Production and native CI use the same TUN, routing and optional StatsService.
     internal static string CreateEngine(Guid id, string[] routes, string[] filters, object outbound, int readiness,
         string resolver = Resolver, int? diagnosticsPort = null, string? dnsOverHttps = null, TunControlEndpoint? control = null,
@@ -113,20 +142,12 @@ public static class TunConfig
                 ip = new[] { peer + "/32" }, outboundTag = "block" });
         if (control != null)
         {
-            if (!IPAddress.TryParse(control.Destination, out var target) || target.AddressFamily != AddressFamily.InterNetwork ||
-                control.DestinationPort is < 1 or > 65535 || control.Port is < 1 or > 65535 ||
-                control.User.Length == 0 || control.Password.Length == 0)
-                throw new ArgumentException("A pinned IPv4 destination and proxy credentials are required.", nameof(control));
-            inbounds.Add(new { listen = "127.0.0.1", port = control.Port, protocol = "http",
-                tag = ControlTag, settings = new {
-                    accounts = new[] { new { user = control.User, pass = control.Password } }, allowTransparent = false
-                } });
-            rules.Add(new { type = "field", ruleTag = "pmt-control-vless", inboundTag = new[] { ControlTag },
-                ip = new[] { target + "/32" }, port = control.DestinationPort.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                network = "tcp", outboundTag = "vpn" });
-            rules.Add(new { type = "field", ruleTag = "pmt-control-block", inboundTag = new[] { ControlTag }, outboundTag = "block" });
+            var (inbound, rule) = ControlRoute(control);
+            inbounds.Add(inbound);
+            rules.Add(rule);
+            rules.Add(ControlBlock());
             rules.Add(new { type = "field", ruleTag = "pmt-wintun-probe", inboundTag = new[] { TunTag },
-                ip = new[] { target + "/32" }, port = control.DestinationPort.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ip = new[] { control.Destination + "/32" }, port = control.DestinationPort.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 network = "tcp", outboundTag = "vpn" });
         }
         if (dnsOverHttps != null)

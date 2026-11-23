@@ -60,7 +60,11 @@ internal static class TunConnectivity
         PinnedHttps(validation => TunControlProbe.Client(new TunControlEndpoint(port, "", "", TunConfig.InternetProbe, 443),
             pid, TunConfig.InternetProbeHost, validation), token);
 
-    internal static async Task<TunChecks> Run(TunSession session, CancellationToken token)
+    internal static Task<TunProbe> CheckControl(TunControlEndpoint endpoint, int pid, CancellationToken token) =>
+        PinnedHttps(validation => TunControlProbe.Client(endpoint, pid, TunConfig.InternetProbeHost, validation), token);
+
+    internal static async Task<TunChecks> Run(TunSession session, CancellationToken token,
+        Xray? userReference = null, TunProbe? userBefore = null)
     {
         var record = session.Record;
         var adapter = TunWindows.Find(record.Id) ?? throw new VpnError("Интерфейс Wintun исчез перед проверкой трафика.");
@@ -75,8 +79,7 @@ internal static class TunConnectivity
         TunProbe? control = null;
         if (session.Control is { } endpoint)
         {
-            var probe = PinnedHttps(validation => TunControlProbe.Client(endpoint, session.EnginePid,
-                TunConfig.InternetProbeHost, validation), token);
+            var probe = CheckControl(endpoint, session.EnginePid, token);
             var trace = await ObservePeer(probe, session, token);
             control = await probe;
             lines.Add(trace);
@@ -92,6 +95,29 @@ internal static class TunConnectivity
         var afterHttps = await Capture();
         lines.AddRange(afterHttps.Describe("HTTPS Wintun", previous, !pinned.Success));
         await AddEngineEvents("HTTPS Wintun");
+
+        if (userReference != null)
+        {
+            if (session.Reference is { } elevated)
+            {
+                lines.Add(elevated.Before.Line("Отдельный Xray с повышенными правами до Wintun"));
+                if (elevated.After is { } after)
+                    lines.Add(after.Line("Тот же отдельный Xray с повышенными правами при активном Wintun"));
+                else if (elevated.Before.Success)
+                    lines.Add("Отдельный Xray с повышенными правами завершился до повторного замера.");
+            }
+            else lines.Add("Отдельный Xray с повышенными правами: контрольный процесс не подтвердил запуск.");
+            if (!pinned.Success && control is { Success: false })
+            {
+                TunProbe? regular = null;
+                if (userBefore is { Success: true } && userReference.Running)
+                {
+                    regular = await CheckBeforeTun(userReference.Port, userReference.ProcessId, token);
+                    lines.Add(regular.Line("Исходный Xray с правами пользователя при активном Wintun"));
+                }
+                lines.Add(CompareReferences(session.Reference, regular));
+            }
+        }
 
         var direct = CheckResolver(resolver, index, token);
         var windows = CheckWindows(token);
@@ -123,6 +149,24 @@ internal static class TunConnectivity
                 lines.AddRange(events.Select(item => $"{phase} · Xray · {item}"));
             else lines.Add($"{phase} · Xray · {(events == null ? "события недоступны" : "распознанных событий нет")}.");
         }
+    }
+
+    internal static string CompareReferences(TunReference? elevated, TunProbe? regular)
+    {
+        const string label = "Сопоставление контрольных процессов · ";
+        if (elevated is not { Before.Success: true, After: { } after })
+            return label + "отдельный Xray с повышенными правами не подтвердил пару замеров.";
+        if (after.Success)
+            return label + "отдельный Xray с повышенными правами работает при активном Wintun. " +
+                "Сбой воспроизведён в Xray, который сам обслуживает TUN.";
+        if (regular is { Success: true })
+            return label + "Xray с правами пользователя доступен, а оба процесса с повышенными правами отказали при активном Wintun. " +
+                "Нужно проверить фильтрацию с учётом контекста процесса.";
+        if (regular is { Success: false })
+            return label + "оба контрольных процесса сначала работали и потеряли доступ после запуска Wintun. " +
+                "Сбой также затрагивает Xray без входа TUN.";
+        return label + "отдельный Xray с повышенными правами потерял доступ после запуска Wintun. " +
+            "Для сравнения прав пользователя данных недостаточно.";
     }
 
     private static async Task<string> ObservePeer(Task probe, TunSession session, CancellationToken token)
