@@ -89,6 +89,9 @@ public static class TunConfig
         return outbound;
     }
 
+    public static string ReferenceEngine(IPAddress peer, IPAddress source, string uplink, Profile profile,
+        TunControlEndpoint control) => ReferenceEngine(control, UplinkOutbound(peer, source, uplink, profile));
+
     internal static string ReferenceEngine(TunControlEndpoint control, object outbound)
     {
         var (inbound, rule) = ControlRoute(control);

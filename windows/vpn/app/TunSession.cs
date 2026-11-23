@@ -208,7 +208,7 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
                 int referencePort = Xray.FreePort();
                 var endpoint = referenceEndpoint = PrivateControl(referencePort);
                 var referenceStart = Xray.StartAsync(image,
-                    TunConfig.ReferenceEngine(endpoint, TunConfig.UplinkOutbound(peer, source, uplink, profile)),
+                    TunConfig.ReferenceEngine(peer, source, uplink, profile, endpoint),
                     endpoint.Port, alive.Token, WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback, startupSeconds: 8);
                 if (await Task.WhenAny(referenceStart, runtime) == runtime) alive.Cancel();
                 referenceEngine = await referenceStart;
