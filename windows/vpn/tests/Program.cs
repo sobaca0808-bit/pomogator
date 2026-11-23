@@ -646,11 +646,37 @@ if (!string.IsNullOrWhiteSpace(executable))
 }
 else Console.WriteLine("SKIP Core integration: set POMOGATOR_TEST_XRAY to the pinned binary.");
 
+var singBox = Environment.GetEnvironmentVariable("POMOGATOR_TEST_SING_BOX");
+if (!string.IsNullOrEmpty(singBox))
+{
+    await TestAsync("The real sing-box parses the generated production TUN configuration", async () =>
+    {
+        var profile = Profiles.Parse(Base + "?security=reality&type=tcp&fp=firefox&sni=vpn.example&pbk=" + RealityKey + "&sid=01");
+        var config = SingBoxConfig.Tunnel(profile, IPAddress.Parse("203.0.113.71"), "fixture",
+            Guid.NewGuid(), 31000, new TunControlEndpoint(31001, "fixture", "fixture-only", "1.1.1.1", 443));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        var start = new ProcessStartInfo(singBox) { UseShellExecute = false, RedirectStandardInput = true,
+            RedirectStandardOutput = true, RedirectStandardError = true };
+        foreach (var arg in new[] { "check", "-c", "stdin" }) start.ArgumentList.Add(arg);
+        using var process = Process.Start(start) ?? throw new InvalidOperationException("Failed to start fixture core.");
+        var error = process.StandardError.ReadToEndAsync(timeout.Token);
+        var output = process.StandardOutput.ReadToEndAsync(timeout.Token);
+        try
+        {
+            await process.StandardInput.WriteAsync(config.AsMemory(), timeout.Token);
+            process.StandardInput.Close();
+            await process.WaitForExitAsync(timeout.Token);
+            await Task.WhenAll(error, output);
+            Assert(process.ExitCode == 0);
+        }
+        finally { if (!process.HasExited) process.Kill(); }
+    });
+}
 if (OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable("POMOGATOR_TEST_TUN") == "1")
 {
     if (string.IsNullOrEmpty(executable)) throw new InvalidOperationException("Missing pinned Xray path for TUN CI.");
     Test("Administrator guard rejects a Windows token with the Administrators SID disabled", NativeTunTests.CheckPrivilegeGuard);
-    await NativeTunTests.Run(executable, Environment.GetEnvironmentVariable("POMOGATOR_TEST_SING_BOX"));
+    await NativeTunTests.Run(executable, singBox);
     passed++;
 }
 Console.WriteLine($"{passed} checks passed.");

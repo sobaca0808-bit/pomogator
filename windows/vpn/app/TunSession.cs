@@ -278,10 +278,16 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
                 finally { engine.Dispose(); }
             }
             console?.Dispose();
-            if (record != null && !boot.IsCancellationRequested)
+            if (launchingTun && record != null)
             {
-                // The normal path leaves no adapter. An abnormal exit is handled by the next explicit recovery.
-                await TunWindows.WaitClean(record, TimeSpan.FromSeconds(2));
+                // The record was saved before starting the child. Only its attested adapter
+                // is eligible for removal. If verification fails, the UI retains the record.
+                try
+                {
+                    if (!await TunWindows.WaitClean(record, TimeSpan.FromSeconds(2)))
+                        await TunWindows.Recover(record);
+                }
+                catch { }
             }
         }
     }

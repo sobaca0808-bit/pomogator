@@ -74,7 +74,7 @@ public static class SingBoxConfig
 
     private static string Create(object outbound, object[] inbounds, object[] rules, object[] dns, bool tun) =>
         JsonSerializer.Serialize(new {
-            log = new { level = tun ? "info" : "error", timestamp = false, disable_color = true },
+            log = new { level = tun ? "info" : "error", timestamp = false },
             inbounds, outbounds = new[] { outbound },
             route = new { auto_detect_interface = tun, rules, final = "vpn" },
             dns = tun ? new { servers = dns, final = "private-dns" } : null
