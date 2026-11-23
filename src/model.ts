@@ -1,12 +1,14 @@
+import { blocksOf, blockStrings, kindName, kindOf, withLegacyFields, type CardFields, type Preferences } from './cards'
+
 export const icons = ['projects', 'finance', 'tasks', 'notes', 'docs', 'services', 'folder', 'star'] as const
 export type Icon = typeof icons[number]
 export type Place = { id: string; parent: string | null; title: string; icon: Icon }
-export type Entry = {
+export type Entry = CardFields & {
   id: string; parent: string; title: string; text: string; links: string[]
   checklist: { text: string; done: boolean }[]
   date: string; amount: string; created: string; updated: string
 }
-export type Data = { version: 1; places: Place[]; entries: Entry[] }
+export type Data = { version: 1; places: Place[]; entries: Entry[]; preferences?: Preferences; generation?: string }
 export type Change = (data: Data) => Data
 
 const defaults = [
@@ -69,12 +71,27 @@ export function deletePlace(data: Data, id: string, confirmed = false): Data {
     entries: data.entries.filter(entry => !ids.has(entry.parent)) }
 }
 
-export function saveEntry(data: Data, entry: Entry, editing = false): Data {
+export function saveEntry(data: Data, entry: Entry, editing = false, expectedRevision?: number): Data {
   requirePlace(data, entry.parent)
   const existing = data.entries.find(item => item.id === entry.id)
   if (editing && !existing) throw new Error('Запись уже удалена.')
+  if (!editing && existing) throw new Error('Карточка уже существует.')
+  if (expectedRevision !== undefined && (existing?.revision ?? 0) !== expectedRevision)
+    throw new Error('Карточка изменилась в другой вкладке. Откройте её заново.')
+  if (entry.parentCard && entry.parentCard !== existing?.parentCard) {
+    const byId = new Map(data.entries.map(card => [card.id, card]))
+    if (!byId.has(entry.parentCard)) throw new Error('Родительская карточка уже удалена.')
+    for (let id: string | undefined = entry.parentCard; id; id = byId.get(id)?.parentCard) {
+      if (id === entry.id) throw new Error('Вложенность карточек не может образовывать цикл.')
+    }
+  }
   const updated = new Date().toISOString()
-  const saved = { ...entry, created: existing?.created ?? updated, updated }
+  const saved = { ...withLegacyFields(entry), created: existing?.created ?? updated, updated }
+  if (entry.blocks) {
+    saved.revision = (existing?.revision ?? 0) + 1
+    saved.history = [{ at: updated, note: !existing ? 'Карточка создана' :
+      existing.parent !== entry.parent ? 'Карточка перемещена' : 'Карточка обновлена' }, ...(existing?.history ?? [])].slice(0, 30)
+  }
   return { ...data, entries: editing
     ? data.entries.map(item => item.id === entry.id ? saved : item)
     : [...data.entries, saved] }
@@ -82,6 +99,16 @@ export function saveEntry(data: Data, entry: Entry, editing = false): Data {
 
 export function deleteEntry(data: Data, id: string): Data {
   return { ...data, entries: data.entries.filter(entry => entry.id !== id) }
+}
+
+export function restoreDeleted(data: Data, places: Place[], entries: Entry[]): Data {
+  const existingPlaces = new Set(data.places.map(place => place.id))
+  const available = new Set([...existingPlaces, ...places.map(place => place.id)])
+  const existingEntries = new Set(data.entries.map(entry => entry.id))
+  if (places.some(place => existingPlaces.has(place.id) || (place.parent !== null && !available.has(place.parent))) ||
+    entries.some(entry => existingEntries.has(entry.id) || !available.has(entry.parent)))
+    throw new Error('Не удалось отменить удаление: связанные папки или карточки изменились.')
+  return { ...data, places: [...data.places, ...places], entries: [...data.entries, ...entries] }
 }
 
 export function pathTo(data: Data, id: string): Place[] {
@@ -98,7 +125,8 @@ export function search(data: Data, query: string) {
     places: term ? data.places.filter(place => matches([place.title])) : [],
     entries: term ? data.entries.filter(entry => matches([
       entry.title, entry.text, entry.date, entry.amount, ...entry.links,
-      ...entry.checklist.map(item => item.text),
+      ...entry.checklist.map(item => item.text), ...blocksOf(entry).flatMap(blockStrings), entry.category ?? '',
+      kindName[kindOf(data, entry)],
     ])) : [],
   }
 }
