@@ -45,7 +45,7 @@ internal static class NativeTunTests
         ref SidAndAttributes disabled, uint privilegeCount, IntPtr privileges, uint restrictionCount,
         IntPtr restrictions, out SafeAccessTokenHandle result);
 
-    internal static async Task Run(string executable)
+    internal static async Task Run(string executable, string? singBox = null)
     {
         if (!TunWindows.Administrator()) throw new InvalidOperationException("Isolated TUN test requires an administrator.");
         const string id = "10000000-0000-4000-8000-000000000001";
@@ -70,7 +70,7 @@ internal static class NativeTunTests
         var dnsPort = ((IPEndPoint)udpDestination.Client.LocalEndPoint!).Port;
         using var tcpDnsDestination = new TcpListener(IPAddress.Loopback, dnsPort);
         tcpDnsDestination.Start();
-        using var timeLimit = new CancellationTokenSource(TimeSpan.FromSeconds(75));
+        using var timeLimit = new CancellationTokenSource(TimeSpan.FromSeconds(160));
 
         var upstreamPort = Xray.FreePort();
         var upstreamReady = Xray.FreePort();
@@ -99,6 +99,9 @@ internal static class NativeTunTests
         });
         using var upstream = await Xray.StartAsync(executable, upstreamConfig, upstreamReady, timeLimit.Token,
             WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback);
+        if (singBox != null)
+            await VerifySingBox(singBox, snapshot, uplinkAddress, upstreamCertificate, upstreamHost, upstreamPort,
+                id, web, dns, httpDestination, tcpDnsDestination, httpPort);
         var readiness = Xray.FreePort();
         var diagnosticsPort = Xray.FreePort();
         while (diagnosticsPort == readiness || diagnosticsPort == upstreamPort) diagnosticsPort = Xray.FreePort();
@@ -375,6 +378,96 @@ internal static class NativeTunTests
         Require(TunWindows.Index(web) == beforeWeb && TunWindows.Index(dns) == beforeDns &&
             TunWindows.MatchesBaseline(snapshot, TunWindows.Capture(peer)), "Initial routes or DNS differ after crash recovery.");
         Console.WriteLine("PASS Native Wintun: TLS VLESS with a verified non-Wintun source, duplex HTTPS and restricted same-engine control, DNS UDP/TCP and cleanup");
+    }
+
+    private static async Task VerifySingBox(string executable, TunBaseline baseline, IPAddress uplink,
+        X509Certificate2 upstreamCertificate, string upstreamHost, int upstreamPort, string user,
+        IPAddress web, IPAddress dns, TcpListener webServer, TcpListener dnsServer, int webPort)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(75));
+        var token = timeout.Token;
+        var id = Guid.NewGuid();
+        var reference = baseline with { SourceIpv4 = uplink.ToString() };
+        var routes = new[] { web + "/32", dns + "/32" };
+        var record = new TunRecovery(id, uplink.ToString(), reference, routes, dns.ToString(), SingBox: true);
+        var beforeWeb = TunWindows.Index(web);
+        var beforeDns = TunWindows.Index(dns);
+        var port = Xray.FreePort();
+        int controlPort;
+        do { controlPort = Xray.FreePort(); } while (controlPort == port || controlPort == upstreamPort);
+        var control = new TunControlEndpoint(controlPort, "fixture", Convert.ToHexString(RandomNumberGenerator.GetBytes(16)),
+            web.ToString(), webPort);
+        var client = Profiles.Parse($"vless://{user}@{uplink}:{upstreamPort}?security=tls&sni={upstreamHost}");
+        var outbound = SingBoxConfig.Outbound(client, uplink, TunWindows.UplinkName(reference, uplink));
+        var tls = (Dictionary<string, object>)outbound["tls"];
+        tls["certificate_public_key_sha256"] = new[] {
+            Convert.ToBase64String(SHA256.HashData(upstreamCertificate.PublicKey.ExportSubjectPublicKeyInfo()))
+        };
+        var config = SingBoxConfig.Tunnel(outbound, TunConfig.Adapter(id), routes, uplink, port, control,
+            dns.ToString(), new { type = "tcp", tag = "private-dns", server = dns.ToString(), detour = "vpn" });
+        using var console = new TunConsole();
+        Process? process = null;
+        IDisposable Track(Process child) { process = child; return WindowsLifetime.Attach(child); }
+        async Task<Xray> Start()
+        {
+            Require(TunWindows.Vacant(record), "sing-box test adapter still exists.");
+            var diagnostic = new SingBoxDiagnostic(uplink, upstreamPort);
+            var engine = await Xray.StartAsync(executable, config, port, token, Track, WindowsLifetime.OwnsLoopback,
+                inheritConsole: true, startupSeconds: 24, diagnosticLine: diagnostic.Read);
+            try
+            {
+                var state = await TunReadiness.Wait(() =>
+                {
+                    var observed = TunWindows.Observe(record, web);
+                    return observed.Ready && !diagnostic.Started ? observed with { ErrorCode = "TUN_ENGINE_NOT_READY" } : observed;
+                }, () => engine.Running, TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(200), token);
+                Require(state.Ready, "sing-box TUN was not ready: " + state.Failure);
+                return engine;
+            }
+            catch { engine.Dispose(); throw; }
+        }
+        using (var active = await Start())
+        {
+            try
+            {
+                const string host = "sing-box-fixture.test";
+                using var cert = CreateCertificate(host);
+                var input = RandomNumberGenerator.GetBytes(32768);
+                var output = RandomNumberGenerator.GetBytes(32768);
+                var response = AnswerHttps(webServer, cert, host, input, output, token);
+                using var http = TunWindows.Http(id, (_, candidate, _, errors) =>
+                    candidate?.GetCertHashString() == cert.Thumbprint &&
+                    (errors & SslPolicyErrors.RemoteCertificateNameMismatch) == 0, host, web);
+                using var sent = await http.PostAsync($"https://{host}:{webPort}/", new ByteArrayContent(input), token);
+                sent.EnsureSuccessStatusCode();
+                Require((await sent.Content.ReadAsByteArrayAsync(token)).SequenceEqual(output), "sing-box HTTPS payload changed.");
+                await response;
+                var dnsReply = AnswerDnsTcp(dnsServer, TunDns.Query(TunConnectivity.ControlName)[2..], token);
+                var index = TunWindows.Index(TunWindows.Find(id)!);
+                var actualDns = await TunConnectivity.CheckResolver(dns, index, token);
+                Require(actualDns.Success, "sing-box did not return the DNS answer over VLESS: " + actualDns.Outcome);
+                await dnsReply;
+                var ipv6 = await TunConnectivity.CheckIPv6(token, IPAddress.Parse("2001:db8:9::10"));
+                Require(ipv6.Success, "sing-box did not block the IPv6 probe: " + ipv6.Outcome);
+            }
+            finally { active.RequestGracefulStop(console.Signal); }
+        }
+        await Restore();
+        using (var crashed = await Start())
+        {
+            process!.Kill();
+            await process.WaitForExitAsync(token);
+        }
+        await Restore();
+        Console.WriteLine("PASS Native sing-box TUN: duplex HTTPS/VLESS, DNS interception over VLESS, IPv6 probe, graceful/crash restoration");
+
+        async Task Restore()
+        {
+            if (!await TunWindows.WaitClean(record, TimeSpan.FromSeconds(3)))
+                Require(await TunWindows.Recover(record, Console.WriteLine), "sing-box Wintun could not be recovered.");
+            Require(TunWindows.Index(web) == beforeWeb && TunWindows.Index(dns) == beforeDns &&
+                TunWindows.MatchesBaseline(baseline, TunWindows.Capture(uplink)), "sing-box left routes or DNS behind.");
+        }
     }
 
     private static async Task CheckWfpBlock(IPAddress source, CancellationToken token)

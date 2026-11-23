@@ -17,15 +17,15 @@ internal sealed record TunProbe(bool Success, string Outcome, long Milliseconds)
 }
 
 internal sealed record TunChecks(TunProbe Resolver, TunProbe Windows, TunProbe Https, string[]? Traffic = null,
-    TunProbe? DirectPinned = null, TunProbe? SameEngine = null)
+    TunProbe? DirectPinned = null, TunProbe? SameEngine = null, TunProbe? Ipv6 = null)
 {
-    internal bool Success => Resolver.Success && Windows.Success && Https.Success;
+    internal bool Success => Resolver.Success && Windows.Success && Https.Success && Ipv6 is not { Success: false };
     private bool BothHttpsFailed => DirectPinned is { Success: false } && SameEngine is { Success: false } && !Https.Success;
-    internal string FailedStage => BothHttpsFailed ? "исходящий HTTPS через VLESS при активном TUN" :
+    internal string FailedStage => Ipv6 is { Success: false } ? "проверка защиты IPv6" : BothHttpsFailed ? "исходящий HTTPS через VLESS при активном TUN" :
         !Resolver.Success ? "запрос к DNS на Wintun" :
         !Windows.Success ? "системное разрешение DNS" : "HTTPS через Wintun";
-    internal string Failure => BothHttpsFailed ?
-        "Обе HTTPS-пробы по IPv4 завершились с ошибкой. Проверьте исходящий маршрут и соединение Xray с VPN-сервером." :
+    internal string Failure => Ipv6 is { Success: false } ? "Защита IPv6 не подтверждена. Туннель остановлен." : BothHttpsFailed ?
+        "Обе HTTPS-пробы по IPv4 завершились с ошибкой. Проверьте исходящий маршрут и соединение sing-box с VPN-сервером." :
         !Resolver.Success && !Windows.Success ?
         "DNS-сервер TUN и системный DNS Windows не подтвердили разрешение имени." :
         !Resolver.Success ? "DNS-сервер TUN не подтвердил ответ через виртуальный интерфейс." :
@@ -38,16 +38,16 @@ internal sealed record TunChecks(TunProbe Resolver, TunProbe Windows, TunProbe H
         yield return Windows.Line("Системное разрешение имён Windows");
         yield return Https.Line("HTTPS через Wintun без системного прокси");
         if (DirectPinned != null) yield return DirectPinned.Line("HTTPS напрямую через Wintun, закреплённая цель");
-        if (SameEngine != null) yield return SameEngine.Line("HTTPS через локальный вход того же Xray при активном TUN");
+        if (SameEngine != null) yield return SameEngine.Line("HTTPS через локальный вход того же sing-box при активном TUN");
         if (DirectPinned != null && SameEngine != null) yield return Compare(DirectPinned.Success, SameEngine.Success);
         foreach (var line in Traffic ?? Array.Empty<string>()) yield return line;
     }
     private static string Compare(bool direct, bool control) => (direct, control) switch
     {
         (true, true) => "Сравнение HTTPS · обе проверки прошли на одной IPv4-цели.",
-        (false, true) => "Сравнение HTTPS · VLESS в том же Xray доступен. Сбой наблюдается на пути через Wintun.",
-        (true, false) => "Сравнение HTTPS · Wintun доступен. Не прошёл контроль через локальный вход Xray.",
-        _ => "Сравнение HTTPS · обе проверки не подтверждены. Проверьте коды и события исходящего соединения Xray."
+        (false, true) => "Сравнение HTTPS · VLESS в том же sing-box доступен. Сбой наблюдается на пути через Wintun.",
+        (true, false) => "Сравнение HTTPS · Wintun доступен. Не прошёл контроль через локальный вход sing-box.",
+        _ => "Сравнение HTTPS · обе проверки не подтверждены. Проверьте коды и события исходящего соединения sing-box."
     };
 }
 
@@ -63,16 +63,17 @@ internal static class TunConnectivity
     internal static Task<TunProbe> CheckControl(TunControlEndpoint endpoint, int pid, CancellationToken token) =>
         PinnedHttps(validation => TunControlProbe.Client(endpoint, pid, TunConfig.InternetProbeHost, validation), token);
 
-    internal static async Task<TunChecks> Run(TunSession session, CancellationToken token,
-        Xray? userReference = null, TunProbe? userBefore = null)
+    internal static async Task<TunChecks> Run(TunSession session, CancellationToken token)
     {
         var record = session.Record;
         var adapter = TunWindows.Find(record.Id) ?? throw new VpnError("Интерфейс Wintun исчез перед проверкой трафика.");
         var index = TunWindows.Index(adapter);
         var resolver = IPAddress.Parse(record.InstalledDns);
         var lines = new List<string>();
+        var ipv6 = await CheckIPv6(token);
+        lines.Add(ipv6.Line("IPv6 без прокси при активном TUN"));
         _ = await session.SampleEvents(token); // Discard events before this diagnostic interval.
-        Task<TunTrafficSample> Capture() => TunTrafficSample.Capture(record.Id, session.DiagnosticsPort, session.EnginePid, token);
+        Task<TunTrafficSample> Capture() => TunTrafficSample.Capture(record.Id, 0, session.EnginePid, token);
 
         var previous = await Capture();
         // Compare the two DNS-independent probes before launching our own DNS retries.
@@ -84,40 +85,17 @@ internal static class TunConnectivity
             control = await probe;
             lines.Add(trace);
             var afterControl = await Capture();
-            lines.AddRange(afterControl.Describe("HTTPS локальный вход Xray", previous, explainFailure: false));
+            lines.AddRange(afterControl.Describe("HTTPS локальный вход sing-box", previous, explainFailure: false));
             previous = afterControl;
-            await AddEngineEvents("HTTPS локальный вход Xray");
+            await AddEngineEvents("HTTPS локальный вход sing-box");
         }
-        else lines.Add("HTTPS локальный вход Xray · помощник не подтвердил контрольный вход.");
+        else lines.Add("HTTPS локальный вход sing-box · помощник не подтвердил контрольный вход.");
 
         var pinned = await PinnedHttps(validation => TunWindows.Http(record.Id, validation,
             TunConfig.InternetProbeHost, IPAddress.Parse(TunConfig.InternetProbe)), token);
         var afterHttps = await Capture();
         lines.AddRange(afterHttps.Describe("HTTPS Wintun", previous, !pinned.Success));
         await AddEngineEvents("HTTPS Wintun");
-
-        if (userReference != null)
-        {
-            if (session.Reference is { } elevated)
-            {
-                lines.Add(elevated.Before.Line("Отдельный Xray с повышенными правами до Wintun"));
-                if (elevated.After is { } after)
-                    lines.Add(after.Line("Тот же отдельный Xray с повышенными правами при активном Wintun"));
-                else if (elevated.Before.Success)
-                    lines.Add("Отдельный Xray с повышенными правами завершился до повторного замера.");
-            }
-            else lines.Add("Отдельный Xray с повышенными правами: контрольный процесс не подтвердил запуск.");
-            if (!pinned.Success && control is { Success: false })
-            {
-                TunProbe? regular = null;
-                if (userBefore is { Success: true } && userReference.Running)
-                {
-                    regular = await CheckBeforeTun(userReference.Port, userReference.ProcessId, token);
-                    lines.Add(regular.Line("Исходный Xray с правами пользователя при активном Wintun"));
-                }
-                lines.Add(CompareReferences(session.Reference, regular));
-            }
-        }
 
         var direct = CheckResolver(resolver, index, token);
         var windows = CheckWindows(token);
@@ -140,33 +118,37 @@ internal static class TunConnectivity
             }
             catch (VpnError) { lines.Add("Резервная HTTPS-проба · интерфейс Wintun больше недоступен."); }
         }
-        return new TunChecks(directResult, windowsResult, https, lines.ToArray(), pinned, control);
+        return new TunChecks(directResult, windowsResult, https, lines.ToArray(), pinned, control, ipv6);
 
         async Task AddEngineEvents(string phase)
         {
             var events = await session.SampleEvents(token);
             if (events is { Length: > 0 })
-                lines.AddRange(events.Select(item => $"{phase} · Xray · {item}"));
-            else lines.Add($"{phase} · Xray · {(events == null ? "события недоступны" : "распознанных событий нет")}.");
+                lines.AddRange(events.Select(item => $"{phase} · sing-box · {item}"));
+            else lines.Add($"{phase} · sing-box · {(events == null ? "события недоступны" : "распознанных событий нет")}.");
         }
     }
 
-    internal static string CompareReferences(TunReference? elevated, TunProbe? regular)
+    internal static async Task<TunProbe> CheckIPv6(CancellationToken token, IPAddress? destination = null)
     {
-        const string label = "Сопоставление контрольных процессов · ";
-        if (elevated is not { Before.Success: true, After: { } after })
-            return label + "отдельный Xray с повышенными правами не подтвердил пару замеров.";
-        if (after.Success)
-            return label + "отдельный Xray с повышенными правами работает при активном Wintun. " +
-                "Сбой воспроизведён в Xray, который сам обслуживает TUN.";
-        if (regular is { Success: true })
-            return label + "Xray с правами пользователя доступен, а оба процесса с повышенными правами отказали при активном Wintun. " +
-                "Нужно проверить фильтрацию с учётом контекста процесса.";
-        if (regular is { Success: false })
-            return label + "оба контрольных процесса сначала работали и потеряли доступ после запуска Wintun. " +
-                "Сбой также затрагивает Xray без входа TUN.";
-        return label + "отдельный Xray с повышенными правами потерял доступ после запуска Wintun. " +
-            "Для сравнения прав пользователя данных недостаточно.";
+        var watch = Stopwatch.StartNew();
+        if (!Socket.OSSupportsIPv6) return new(true, "IPv6 недоступен в Windows", watch.ElapsedMilliseconds);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(TimeSpan.FromSeconds(3));
+        try
+        {
+            using var socket = new Socket(AddressFamily.InterNetworkV6, SocketType.Stream, ProtocolType.Tcp);
+            await socket.ConnectAsync(destination ?? IPAddress.Parse("2606:4700:4700::1111"), 443, deadline.Token);
+            return new(false, "обнаружено прямое IPv6-соединение", watch.ElapsedMilliseconds);
+        }
+        catch (SocketException error)
+        {
+            var blocked = error.SocketErrorCode is SocketError.AccessDenied or SocketError.NetworkUnreachable or
+                SocketError.HostUnreachable or SocketError.AddressNotAvailable;
+            return new(blocked, $"Windows отклонила соединение · код {error.NativeErrorCode}", watch.ElapsedMilliseconds);
+        }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested)
+        { return new(false, "тайм-аут IPv6, блокировка не подтверждена", watch.ElapsedMilliseconds); }
     }
 
     private static async Task<string> ObservePeer(Task probe, TunSession session, CancellationToken token)
@@ -187,7 +169,7 @@ internal static class TunConnectivity
 
     internal static string PeerLine(PeerTcp? observed, int route, int expected)
     {
-        var prefix = $"Снимок TCP процесса Xray к VPN-серверу · маршрут IF {route} (исходный IF {expected})";
+        var prefix = $"Снимок TCP процесса sing-box к VPN-серверу · маршрут IF {route} (исходный IF {expected})";
         if (observed == null) return prefix + "; таблица TCP недоступна.";
         var flags = observed.Value;
         if (!flags.HasFlag(PeerTcp.Seen)) return prefix + "; сокет не зафиксирован за время наблюдения.";

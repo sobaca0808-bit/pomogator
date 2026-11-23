@@ -280,6 +280,7 @@ public partial class MainWindow : Window
             TunRecovery? recovery = null;
             if (tunMode)
             {
+                SingBoxConfig.Validate(profile);
                 if (!TunWindows.SupportsWindows)
                     throw new VpnError("Для этого режима нужна Windows 10 22H2 x64 или новее.");
                 if (TunWindows.OtherVpn() || SystemProxy.AnyInUse())
@@ -296,7 +297,7 @@ public partial class MainWindow : Window
                 { throw new VpnError("Не удалось получить IPv4-адрес VPN-сервера через текущий DNS."); }
                 if (peer == null) throw new VpnError("У VPN-сервера нет пригодного IPv4-адреса для TUN.");
                 recovery = new TunRecovery(Guid.NewGuid(), peer.ToString(), TunWindows.Capture(peer),
-                    TunConfig.Routes(peer));
+                    TunConfig.Routes(peer), SingBox: true);
             }
             var (latency, peerSource) = await Xray.CheckServerSourceAsync(
                 peer == null ? profile : profile with { Host = peer.ToString() }, source.Token);
@@ -311,25 +312,26 @@ public partial class MainWindow : Window
 
             var uplink = recovery == null ? null : TunWindows.UplinkName(recovery.Before, peerSource);
             stage = Check.Xray;
-            var path = Path.Combine(AppContext.BaseDirectory, "xray.exe");
-            if (!File.Exists(path)) throw new VpnError("В комплекте отсутствует xray.exe. Распакуйте архив полностью.");
-            if (tunMode) tunStage = "запуск Xray для выбранного VLESS";
-            Detail.Text = "Запуск Xray…";
+            var engine = tunMode ? "sing-box" : "Xray";
+            var path = Path.Combine(AppContext.BaseDirectory, tunMode ? "sing-box.exe" : "xray.exe");
+            if (!File.Exists(path)) throw new VpnError($"В комплекте отсутствует {engine}. Распакуйте архив полностью.");
+            if (tunMode) tunStage = "запуск sing-box для выбранного VLESS";
+            Detail.Text = $"Запуск {engine}…";
             int port = 0;
             core = await Xray.StartWithPortsAsync(path, () =>
             {
                 port = Xray.FreePort();
                 checkPort = tunMode || profile.Full == null ? port : DistinctPort(port);
                 socksPort = !tunMode && profile.Full?.SocksTag != null ? DistinctPort(port, checkPort) : null;
-                var config = tunMode ? TunConfig.PreflightEngine(peer!, peerSource, uplink!, profile, port) :
+                var config = tunMode ? SingBoxConfig.Preflight(profile, peer!, uplink!, port) :
                     XrayConfig.Create(profile, port, checkPort, socksPort);
                 return (config, port, new int?[] { checkPort, socksPort }.OfType<int>().Distinct().ToArray());
             }, source.Token, WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback,
                 startupExit: tunMode ? code => tunEngineNote = BridgeExit(code) : null);
             Connection.Record(Check.Xray, CheckResult.Passed);
-            AddLog("Процесс Xray запущен.");
+            AddLog($"Процесс {engine} запущен.");
             Connection.Record(Check.Proxy, CheckResult.Passed);
-            AddLog("Локальные порты принадлежат Xray и принимают подключения.");
+            AddLog($"Локальные порты принадлежат {engine} и принимают подключения.");
 
             stage = null;
             TimeSpan result;
@@ -339,12 +341,7 @@ public partial class MainWindow : Window
                 var baselineProbe = await TunConnectivity.CheckBeforeTun(checkPort, core.ProcessId, source.Token);
                 AddLog(baselineProbe.Line("До запуска TUN · HTTPS к той же IPv4-цели через VLESS"));
                 if (!baselineProbe.Success)
-                {
-                    using var preflight = Xray.ThroughProxy(checkPort);
-                    if (await InternetHealth.ProbeAsync(preflight, source.Token) == null)
-                        throw new VpnError("HTTPS через выбранный VLESS недоступен до включения TUN.");
-                    AddLog("До запуска TUN · HTTPS через VLESS подтверждён на резервном адресе.");
-                }
+                    throw new VpnError("sing-box не подтвердил VLESS/REALITY до создания Wintun. Исходная сеть сохранена.");
                 Detail.Text = "Ожидание интерфейса, IPv4-адреса, маршрутов и DNS Wintun…";
                 tun = new TunSession(recovery);
                 try { await tun.StartAsync(profile, source.Token); }
@@ -357,14 +354,23 @@ public partial class MainWindow : Window
                 tunStatus = "TUN: параметры виртуального интерфейса подтверждены.";
                 AddLog(tunStatus);
                 tunStage = "проверка DNS и HTTPS";
-                Detail.Text = "Сравниваем HTTPS через Wintun и локальный вход того же Xray…";
-                tunChecks = await TunConnectivity.Run(tun, source.Token, core, baselineProbe);
+                Detail.Text = "Проверяем HTTPS и DNS через Wintun sing-box…";
+                tunChecks = await TunConnectivity.Run(tun, source.Token);
                 Connection.Record(Check.Https, tunChecks.Https.Success ? CheckResult.Passed : CheckResult.Failed);
                 foreach (var line in tunChecks.Lines()) AddLog(line);
                 if (!tunChecks.Success)
                 {
                     tunStage = tunChecks.FailedStage;
                     throw new VpnError(tunChecks.Failure);
+                }
+                using (var tunnelIpClient = NetworkProbeClient())
+                using (var proxyIpClient = Xray.ThroughProxy(checkPort))
+                {
+                    var addresses = await Task.WhenAll(InternetHealth.ExternalIpAsync(tunnelIpClient, source.Token),
+                        InternetHealth.ExternalIpAsync(proxyIpClient, source.Token));
+                    if (addresses[0] == null || addresses[1] == null || addresses[0] != addresses[1])
+                        throw new VpnError("Не подтверждено совпадение внешнего IPv4 через TUN и локальный VLESS sing-box.");
+                    AddLog("Внешний IPv4 совпадает при проверке через TUN и локальный VLESS sing-box.");
                 }
                 tunStage = "повторное подтверждение интерфейса и маршрутов после проверки трафика";
                 var finalObservation = TunWindows.Observe(recovery);
@@ -397,7 +403,7 @@ public partial class MainWindow : Window
             if (!core.Running)
             {
                 if (tunMode) tunEngineNote = BridgeExit(core.ExitCode);
-                throw new VpnError("Xray завершился после проверки.");
+                throw new VpnError($"{engine} завершился после проверки.");
             }
             if (tun is { Running: false } closedTun)
             {
@@ -582,7 +588,7 @@ public partial class MainWindow : Window
             }
             Connection.Record(Check.Xray, CheckResult.Failed);
             lastCheck = DateTimeOffset.Now;
-            Stop(true, "Процесс Xray завершился. Повторите подключение.");
+            Stop(true, "Процесс сетевого ядра завершился. Повторите подключение.");
             return;
         }
         try
@@ -595,7 +601,7 @@ public partial class MainWindow : Window
                 {
                     tunObservation = found with { WaitedMilliseconds = tunObservation?.WaitedMilliseconds ?? 0 };
                     var helperStopped = !active.Running;
-                    tunStage = helperStopped ? "контроль работы Xray TUN" : "контроль интерфейса, DNS и маршрутов";
+                    tunStage = helperStopped ? "контроль работы sing-box TUN" : "контроль интерфейса, DNS и маршрутов";
                     if (helperStopped)
                     {
                         var reason = await active.ReadEngineStop();
@@ -932,7 +938,7 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog(this) != true) return;
         try
         {
-            var header = new[] { "ПОМОГАТОР VPN 0.3.4", Status.Text, CoreCheck.Text, ProxyCheck.Text, TrafficCheck.Text,
+            var header = new[] { "ПОМОГАТОР VPN · эксперимент sing-box", Status.Text, CoreCheck.Text, ProxyCheck.Text, TrafficCheck.Text,
                 SystemCheck.Text, TunCheck.Text, CheckedAt.Text, "" };
             var observations = tunObservation?.Lines() ?? Enumerable.Empty<string>();
             var probes = tunChecks?.Lines() ?? Enumerable.Empty<string>();

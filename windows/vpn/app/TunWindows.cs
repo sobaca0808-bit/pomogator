@@ -21,7 +21,7 @@ internal sealed record TunBaseline(int Uplink, string UplinkId, string[] Address
         Addresses.Contains(source.ToString());
 }
 internal sealed record TunRecovery(Guid Id, string Peer, TunBaseline Before, string[]? InstalledRoutes = null,
-    string InstalledDns = TunConfig.Resolver);
+    string InstalledDns = TunConfig.Resolver, bool SingBox = false);
 
 internal static class TunWindows
 {
@@ -218,7 +218,7 @@ internal static class TunWindows
             var routes = await ReadRoutes(Index(adapter));
             if (routes == null) return Refuse("could-not-read-routes");
             var planned = (record.InstalledRoutes ?? TunConfig.Routes(IPAddress.Parse(record.Peer))).ToHashSet();
-            if (routes.Any(route => !OwnRoute(route, planned))) return Refuse("unrecognized-route");
+            if (routes.Any(route => !OwnRoute(route, planned, record.SingBox))) return Refuse("unrecognized-route");
         }
         var result = await Run(Path.Combine(Environment.SystemDirectory, "pnputil.exe"), "/remove-device", pnp);
         if (result?.Exit != 0) return Refuse("device-remove-failed");
@@ -231,12 +231,13 @@ internal static class TunWindows
         }
     }
 
-    internal static bool OwnRoute(string row, IReadOnlySet<string> planned)
+    internal static bool OwnRoute(string row, IReadOnlySet<string> planned, bool singBox = false)
     {
         var parts = row.Split('|');
-        if (parts.Length != 3 || parts[1] is not ("0.0.0.0" or "::") ||
-            !int.TryParse(parts[2], out var metric)) return false;
-        if (planned.Contains(parts[0])) return metric == 0;
+        if (parts.Length != 3 || !int.TryParse(parts[2], out var metric)) return false;
+        if (planned.Contains(parts[0]))
+            return metric == 0 && (parts[1] == "0.0.0.0" || singBox && parts[1] == SingBoxConfig.Gateway);
+        if (parts[1] is not ("0.0.0.0" or "::")) return false;
         return parts[0] is TunConfig.Address + "/32" or "198.18.240.0/30" or "198.18.240.3/32" or
             "255.255.255.255/32" or "224.0.0.0/4" or "ff00::/8" or "fe80::/64" or "169.254.0.0/16" ||
             parts[0].StartsWith("fe80:", StringComparison.OrdinalIgnoreCase) && parts[0].EndsWith("/128", StringComparison.Ordinal);

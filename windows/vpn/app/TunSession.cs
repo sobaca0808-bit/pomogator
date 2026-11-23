@@ -16,9 +16,7 @@ namespace Pomogator.Vpn;
 internal sealed record TunRequest(string Peer, Profile? Profile, bool Recover, TunBaseline Before);
 internal sealed record TunReply(bool Success, string Message, TunObservation? Observation = null, string? EngineNote = null,
     int DiagnosticsPort = 0, int EnginePid = 0, TunControlEndpoint? Control = null,
-    int Sequence = 0, string[]? Events = null, TunReference? Reference = null);
-
-internal sealed record TunReference(TunProbe Before, TunProbe? After = null);
+    int Sequence = 0, string[]? Events = null);
 
 internal sealed class TunSession(TunRecovery record) : IDisposable
 {
@@ -33,7 +31,6 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
     internal int EnginePid { get; private set; }
     internal int PeerPort { get; private set; }
     internal TunControlEndpoint? Control { get; private set; }
-    internal TunReference? Reference { get; private set; }
     internal TunRecovery Record { get; } = record;
     internal bool Running => helper is { HasExited: false };
 
@@ -75,7 +72,7 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
         { throw new VpnError("Запрос прав администратора для TUN отменён."); }
 
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
-        deadline.CancelAfter(TimeSpan.FromSeconds(68));
+        deadline.CancelAfter(TimeSpan.FromSeconds(44));
         try
         {
             var pending = pipe.WaitForConnectionAsync(deadline.Token);
@@ -91,12 +88,11 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
             DiagnosticsPort = reply.DiagnosticsPort;
             EnginePid = reply.EnginePid;
             Control = reply.Control;
-            Reference = reply.Reference;
             if (!reply.Success) throw new VpnError(reply.Message);
             if (!request.Recover) stopNotice = ReadStop(pipe);
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested)
-        { throw new VpnError("Помощник TUN не ответил за 68 секунд."); }
+        { throw new VpnError("Помощник TUN не ответил за 44 секунды."); }
     }
 
     internal async Task<string[]?> SampleEvents(CancellationToken token)
@@ -158,14 +154,13 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
     {
         if (!TunWindows.Administrator() || !TunWindows.SupportsWindows) return 1;
         using var channel = new NamedPipeClientStream(".", PipeName(id), PipeDirection.InOut, PipeOptions.Asynchronous);
-        using var boot = new CancellationTokenSource(TimeSpan.FromSeconds(64));
+        using var boot = new CancellationTokenSource(TimeSpan.FromSeconds(41));
         TunRecovery? record = null;
         Xray? engine = null;
-        Xray? referenceEngine = null;
         TunConsole? console = null;
         TunObservation? observation = null;
         bool launchingTun = false;
-        var diagnostic = new TunEngineDiagnostic();
+        string? engineNote = null;
         try
         {
             await channel.ConnectAsync(boot.Token);
@@ -189,89 +184,50 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
 
             if (request.Profile is not { Full: null } profile ||
                 profile.Security is not ("tls" or "reality") || profile.Id == Guid.Empty || profile.Port is < 1 or > 65535) return 1;
-            diagnostic = new TunEngineDiagnostic(peer, profile.Port, profile.Transport == "raw");
+            var diagnostic = new SingBoxDiagnostic(peer, profile.Port);
             if (!IPAddress.TryParse(record.Before.SourceIpv4, out var source) || !record.Before.HasSource(source))
                 throw new VpnError("Не подтверждён исходный IPv4 для подключения Xray. TUN не запущен.");
             if (!TunWindows.Vacant(record) || TunWindows.OtherVpn() || SystemProxy.AnyInUse() ||
                 !TunWindows.MatchesBaseline(request.Before, TunWindows.Capture(peer)))
                 throw new VpnError("Перед запуском изменился рабочий интерфейс или появился другой VPN. Настройки не применены.");
             var uplink = TunWindows.UplinkName(record.Before, source);
-            // Parent EOF cancels the reference and the TUN boot. The reference uses the same
-            // high-integrity token, executable, endpoint and outbound as the combined engine.
-            using var alive = CancellationTokenSource.CreateLinkedTokenSource(boot.Token);
-            var runtime = Read<int>(channel, CancellationToken.None);
-            var image = Path.Combine(AppContext.BaseDirectory, "xray.exe");
-            TunReference? reference = null;
-            TunControlEndpoint? referenceEndpoint = null;
-            try
-            {
-                int referencePort = Xray.FreePort();
-                var endpoint = referenceEndpoint = PrivateControl(referencePort);
-                var referenceStart = Xray.StartAsync(image,
-                    TunConfig.ReferenceEngine(peer, source, uplink, profile, endpoint),
-                    endpoint.Port, alive.Token, WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback, startupSeconds: 8);
-                if (await Task.WhenAny(referenceStart, runtime) == runtime) alive.Cancel();
-                referenceEngine = await referenceStart;
-                var probe = TunConnectivity.CheckControl(endpoint, referenceEngine.ProcessId, alive.Token);
-                if (await Task.WhenAny(probe, runtime) == runtime) alive.Cancel();
-                reference = new(await probe);
-            }
-            catch (VpnError error)
-            {
-                reference = new(new(false, "не подтверждён запуск контрольного Xray · этап " +
-                    (error.FailedCheck?.ToString() ?? "запуск"), 0));
-            }
-
-            alive.Token.ThrowIfCancellationRequested();
-            if (!TunWindows.Vacant(record) || !TunWindows.MatchesBaseline(record.Before, TunWindows.Capture(peer)) ||
-                TunWindows.UplinkName(record.Before, source) != uplink)
-                throw new VpnError("Исходная сеть изменилась во время контрольной пробы. TUN не запущен.");
+            if (!record.SingBox) throw new VpnError("Запись восстановления относится к другому режиму TUN.");
             console = new TunConsole();
             var port = Xray.FreePort();
-            int diagnosticsPort;
-            do { diagnosticsPort = Xray.FreePort(); } while (diagnosticsPort == port);
             int controlPort;
-            do { controlPort = Xray.FreePort(); } while (controlPort == port || controlPort == diagnosticsPort);
+            do { controlPort = Xray.FreePort(); } while (controlPort == port);
             var control = PrivateControl(controlPort);
             launchingTun = true;
-            var config = TunConfig.Engine(id, peer, source, uplink, profile, port, diagnosticsPort, control);
+            var config = SingBoxConfig.Tunnel(profile, peer, uplink, id, port, control);
+            using var alive = CancellationTokenSource.CreateLinkedTokenSource(boot.Token);
+            var runtime = Read<int>(channel, CancellationToken.None);
+            var image = Path.Combine(AppContext.BaseDirectory, "sing-box.exe");
             var start = Xray.StartAsync(image, config, port,
                 alive.Token, WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback, inheritConsole: true, startupSeconds: 24,
-                diagnosticLine: diagnostic.Read, startupExit: diagnostic.Exited);
+                diagnosticLine: diagnostic.Read, startupExit: code => engineNote = EngineExit(code));
             if (await Task.WhenAny(start, runtime) == runtime) alive.Cancel();
             engine = await start;
-            // Xray starts tagged listeners in unspecified order. Its startup marker appears only
-            // after the TUN handler has applied its filters and the other features have started.
             var wait = TunReadiness.Wait(() =>
             {
                 var state = TunWindows.Observe(record);
-                return observation = state.Ready && !diagnostic.Started ?
-                    state with { ErrorCode = "TUN_ENGINE_NOT_READY" } : state;
-            }, () => engine.Running,
-                TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(300), alive.Token);
+                return observation = state.Ready && !diagnostic.Started
+                    ? state with { ErrorCode = "TUN_ENGINE_NOT_READY" } : state;
+            },
+                () => engine.Running, TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(300), alive.Token);
             if (await Task.WhenAny(wait, runtime) == runtime) alive.Cancel();
             observation = await wait;
             if (observation.Failure is { } failure)
             {
-                if (engine.ExitCode is { } code) diagnostic.Exited(code);
+                if (engine.ExitCode is { } code) engineNote = EngineExit(code);
                 throw new VpnError(failure);
             }
-            if (reference is { Before.Success: true } && referenceEndpoint is { } bound && referenceEngine is { Running: true })
-            {
-                var probe = TunConnectivity.CheckControl(bound, referenceEngine.ProcessId, alive.Token);
-                if (await Task.WhenAny(probe, runtime) == runtime) alive.Cancel();
-                reference = reference with { After = await probe };
-            }
-            referenceEngine?.Dispose();
-            referenceEngine = null;
-            await Send(channel, new TunReply(true, "", observation, DiagnosticsPort: diagnosticsPort,
-                EnginePid: engine.ProcessId, Control: control, Reference: reference), boot.Token);
+            await Send(channel, new TunReply(true, "", observation, EnginePid: engine.ProcessId, Control: control), boot.Token);
             Task<string[]>? wfp = null;
             while (engine.Running)
             {
                 if (await Task.WhenAny(runtime, Task.Delay(250)) != runtime) continue;
                 if (!runtime.IsCompletedSuccessfully || runtime.Result <= 0) return 0;
-                var events = diagnostic.TakeEvents(out var denials);
+                var events = diagnostic.Take(out var denials);
                 if (denials.Length > 0)
                 {
                     var evidence = new[] { "WFP · предыдущее чтение ещё выполняется." };
@@ -293,9 +249,9 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
             }
             if (!runtime.IsCompleted && engine.ExitCode is { } exit)
             {
-                diagnostic.Exited(exit);
+                engineNote = EngineExit(exit);
                 using var notice = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-                await Send(channel, new TunReply(false, "", EngineNote: diagnostic.Description), notice.Token);
+                await Send(channel, new TunReply(false, "", EngineNote: engineNote), notice.Token);
             }
             return 0;
         }
@@ -306,9 +262,9 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
                 if (channel.IsConnected)
                 {
                     var message = launchingTun && engine == null && error is VpnError ?
-                        "Ядро Xray не завершило запуск Wintun. Подробности в отчёте." :
+                        "sing-box не завершил запуск Wintun. Подробности в отчёте." :
                         error is VpnError ? error.Message : "Windows отклонила TUN. Код 0x" + error.HResult.ToString("X8") + ".";
-                    await Send(channel, new TunReply(false, message, observation, diagnostic.Description), boot.Token);
+                    await Send(channel, new TunReply(false, message, observation, engineNote), boot.Token);
                 }
             }
             catch { }
@@ -321,7 +277,6 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
                 try { if (console != null) engine.RequestGracefulStop(console.Signal); }
                 finally { engine.Dispose(); }
             }
-            referenceEngine?.Dispose();
             console?.Dispose();
             if (record != null && !boot.IsCancellationRequested)
             {
@@ -330,6 +285,8 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
             }
         }
     }
+
+    private static string EngineExit(int code) => $"sing-box завершился · код 0x{unchecked((uint)code):X8}.";
 
     private static TunControlEndpoint PrivateControl(int port) => new(port, "pomogator",
         Convert.ToHexString(RandomNumberGenerator.GetBytes(24)), TunConfig.InternetProbe, 443);

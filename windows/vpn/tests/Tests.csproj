@@ -8,6 +8,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="ui/**/*.cs" />
+    <Compile Include="../app/SingBoxDiagnostic.cs" Link="SingBoxDiagnostic.cs" />
     <Compile Include="../app/TunSession.cs" Link="TunSession.cs" />
     <Compile Include="../app/LocalData.cs" Link="LocalData.cs" />
     <Compile Include="../app/TunControlProbe.cs" Link="TunControlProbe.cs" />

@@ -68,6 +68,9 @@ public sealed class Xray : IDisposable
         }
     }
 
+    internal static bool IsSingBox(string path) =>
+        string.Equals(Path.GetFileNameWithoutExtension(path), "sing-box", StringComparison.OrdinalIgnoreCase);
+
     public static async Task<Xray> StartAsync(string executable, string config, int port, CancellationToken token,
         Func<Process, IDisposable?>? protect = null, Func<int, int, bool>? ownsPort = null, Action? started = null, bool inheritConsole = false, int startupSeconds = 6,
         Action<string>? diagnosticLine = null, Action<int>? startupExit = null)
@@ -78,7 +81,10 @@ public sealed class Xray : IDisposable
             StandardInputEncoding = new UTF8Encoding(false),
             WorkingDirectory = Path.GetDirectoryName(Path.GetFullPath(executable))!
         };
-        foreach (var arg in new[] { "run", "-format", "json", "-config", "stdin:" }) info.ArgumentList.Add(arg);
+        var args = IsSingBox(executable)
+            ? new[] { "run", "-c", "stdin" }
+            : new[] { "run", "-format", "json", "-config", "stdin:" };
+        foreach (var arg in args) info.ArgumentList.Add(arg);
         info.Environment["XRAY_LOCATION_ASSET"] = info.WorkingDirectory;
         info.Environment.Remove("XRAY_LOCATION_CONFIG");
         info.Environment.Remove("XRAY_LOCATION_CONFDIR");

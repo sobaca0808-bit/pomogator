@@ -1,0 +1,67 @@
+diff --git a/common/tls/reality_client.go b/common/tls/reality_client.go
+index be4806f..cd93825 100644
+--- a/common/tls/reality_client.go
++++ b/common/tls/reality_client.go
+@@ -30,7 +30,6 @@ import (
+ 	"github.com/sagernet/sing-box/adapter"
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/option"
+-	"github.com/sagernet/sing/common"
+ 	"github.com/sagernet/sing/common/debug"
+ 	E "github.com/sagernet/sing/common/exceptions"
+ 	"github.com/sagernet/sing/common/logger"
+@@ -141,25 +140,28 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
+ 	uConfig.SessionTicketsDisabled = true
+ 	uConfig.VerifyPeerCertificate = verifier.VerifyPeerCertificate
+ 	uConn := utls.UClient(conn, uConfig, e.uClient.id)
+-	verifier.UConn = uConn
+-	err := uConn.BuildHandshakeState()
+-	if err != nil {
+-		return nil, err
+-	}
+-	for _, extension := range uConn.Extensions {
+-		if ce, ok := extension.(*utls.SupportedCurvesExtension); ok {
+-			ce.Curves = common.Filter(ce.Curves, func(curveID utls.CurveID) bool {
+-				return curveID != utls.X25519MLKEM768
+-			})
++	if e.uClient.id.Client == utls.HelloFirefox_Auto.Client {
++		// This version of uTLS uses Firefox 120. Generate the hybrid share
++		// through uTLS before it builds the ClientHello.
++		spec, err := utls.UTLSIdToSpec(e.uClient.id)
++		if err != nil {
++			return nil, err
++		}
++		for _, extension := range spec.Extensions {
++			switch ext := extension.(type) {
++			case *utls.SupportedCurvesExtension:
++				ext.Curves = append([]utls.CurveID{utls.X25519MLKEM768}, ext.Curves...)
++			case *utls.KeyShareExtension:
++				ext.KeyShares = append([]utls.KeyShare{{Group: utls.X25519MLKEM768}}, ext.KeyShares...)
++			}
+ 		}
+-		if ks, ok := extension.(*utls.KeyShareExtension); ok {
+-			ks.KeyShares = common.Filter(ks.KeyShares, func(share utls.KeyShare) bool {
+-				return share.Group != utls.X25519MLKEM768
+-			})
++		uConn = utls.UClient(conn, uConfig, utls.HelloCustom)
++		if err := uConn.ApplyPreset(&spec); err != nil {
++			return nil, err
+ 		}
+ 	}
+-	err = uConn.BuildHandshakeState()
+-	if err != nil {
++	verifier.UConn = uConn
++	if err := uConn.BuildHandshakeState(); err != nil {
+ 		return nil, err
+ 	}
+ 
+@@ -201,6 +203,9 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
+ 		return nil, E.New("nil KeyShareKeys")
+ 	}
+ 	ecdheKey := keyShareKeys.Ecdhe
++	if ecdheKey == nil {
++		ecdheKey = keyShareKeys.MlkemEcdhe
++	}
+ 	if ecdheKey == nil {
+ 		return nil, E.New("nil ecdheKey")
+ 	}

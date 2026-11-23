@@ -361,13 +361,36 @@ Test("Reference process keeps Wintun absent and routes only one authenticated IP
     Assert(rules.GetArrayLength() == 2 && rules[0].GetProperty("ip")[0].GetString() == "1.1.1.1/32" &&
         rules[0].GetProperty("port").GetString() == "443" && rules[1].GetProperty("outboundTag").GetString() == "block");
 });
-Test("Distinguish combined-engine, elevated-context and common failures", () => {
-    var before = new TunProbe(true, "fixture", 12);
-    var failure = new TunProbe(false, "fixture", 14);
-    Assert(TunConnectivity.CompareReferences(new(before, before), failure).Contains("сам обслуживает TUN"));
-    Assert(TunConnectivity.CompareReferences(new(before, failure), before).Contains("контекста процесса"));
-    Assert(TunConnectivity.CompareReferences(new(before, failure), failure).Contains("оба контрольных процесса"));
-    Assert(TunConnectivity.CompareReferences(new(failure), before).Contains("не подтвердил пару замеров"));
+Test("sing-box keeps profile identity, protects DNS and excludes the exact IPv4 peer", () => {
+    var profile = Profiles.Parse(Base + "?security=reality&type=tcp&fp=firefox&sni=vpn.example&pbk=" + RealityKey + "&sid=01");
+    var peer = IPAddress.Parse("203.0.113.71");
+    using var parsed = JsonDocument.Parse(SingBoxConfig.Tunnel(profile, peer, "PPPoE fixture", Guid.NewGuid(),
+        31000, new TunControlEndpoint(31001, "fixture", "fixture-only", "1.1.1.1", 443)));
+    var json = parsed.RootElement;
+    var tun = json.GetProperty("inbounds")[0];
+    Assert(tun.GetProperty("strict_route").GetBoolean() &&
+        tun.GetProperty("route_address").EnumerateArray().All(x => !IPNetwork.Parse(x.GetString()!).Contains(peer)));
+    Assert(json.GetProperty("route").GetProperty("auto_detect_interface").GetBoolean());
+    var vpn = json.GetProperty("outbounds").EnumerateArray().Single();
+    Assert(vpn.GetProperty("bind_interface").GetString() == "PPPoE fixture" &&
+        vpn.GetProperty("uuid").GetString() == profile.Id.ToString("D"));
+    var tls = vpn.GetProperty("tls");
+    Assert(tls.GetProperty("reality").GetProperty("public_key").GetString() == RealityKey &&
+        tls.GetProperty("utls").GetProperty("fingerprint").GetString() == "firefox");
+    Assert(json.GetProperty("dns").GetProperty("servers")[0].GetProperty("detour").GetString() == "vpn");
+    var owned = new HashSet<string> { "198.51.100.10/32" };
+    Assert(TunWindows.OwnRoute("198.51.100.10/32|198.18.240.2|0", owned, singBox: true) &&
+        !TunWindows.OwnRoute("198.51.100.10/32|192.168.137.1|0", owned, singBox: true) &&
+        !TunWindows.OwnRoute("198.51.100.10/32|198.18.240.2|0", owned));
+});
+Test("sing-box matches only Windows socket errors to the actual VPN peer and keeps raw logs private", () => {
+    var subject = new SingBoxDiagnostic(IPAddress.Parse("192.0.2.7"), 443);
+    subject.Read("INFO sing-box started (0.01s)");
+    subject.Read("ERROR dial tcp 192.0.2.7:4431: ConnectEx: 10013");
+    subject.Read("ERROR dial tcp 192.0.2.7:443: ConnectEx: An attempt was made to access a socket in a way forbidden by its access permissions");
+    var events = subject.Take(out var denial);
+    Assert(subject.Started && denial.Length == 1 && events.Single().Contains("WinSock 10013") &&
+        !events.Single().Contains("192.0.2.7") && subject.Take(out _).Length == 0);
 });
 Test("Only the authenticated diagnostic inlet can reach the pinned destination", () => {
     var endpoint = new TunControlEndpoint(34004, "fixture-user", "fixture-password", "1.1.1.1", 443);
@@ -406,7 +429,7 @@ Test("Differential diagnosis and Xray event sampling export categories without r
     var report = new TunChecks(pass, pass, fail, events, fail, pass);
     Assert(!report.Success);
     Assert(report.Lines().Any(line => line.Contains("Сбой наблюдается на пути через Wintun")));
-    Assert(report.Lines().Any(line => line.Contains("HTTPS через локальный вход того же Xray")));
+    Assert(report.Lines().Any(line => line.Contains("HTTPS через локальный вход того же sing-box")));
     Assert(new TunChecks(fail, fail, fail, DirectPinned: fail, SameEngine: fail).FailedStage.Contains("VLESS"));
     Assert(new TunChecks(fail, fail, pass, DirectPinned: pass, SameEngine: pass).FailedStage.Contains("DNS"));
     Assert(TunConnectivity.PeerLine(PeerTcp.Seen | PeerTcp.ExpectedSource | PeerTcp.Established, 7, 7).Contains("ESTABLISHED"));
@@ -627,7 +650,7 @@ if (OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable("POMOGATOR
 {
     if (string.IsNullOrEmpty(executable)) throw new InvalidOperationException("Missing pinned Xray path for TUN CI.");
     Test("Administrator guard rejects a Windows token with the Administrators SID disabled", NativeTunTests.CheckPrivilegeGuard);
-    await NativeTunTests.Run(executable);
+    await NativeTunTests.Run(executable, Environment.GetEnvironmentVariable("POMOGATOR_TEST_SING_BOX"));
     passed++;
 }
 Console.WriteLine($"{passed} checks passed.");
