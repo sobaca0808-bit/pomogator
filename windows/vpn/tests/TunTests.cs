@@ -442,11 +442,23 @@ internal static class NativeTunTests
                 sent.EnsureSuccessStatusCode();
                 Require((await sent.Content.ReadAsByteArrayAsync(token)).SequenceEqual(output), "sing-box HTTPS payload changed.");
                 await response;
-                var dnsReply = AnswerDnsTcp(dnsServer, TunDns.Query(TunConnectivity.ControlName)[2..], token, forwarded: true);
-                var index = TunWindows.Index(TunWindows.Find(id)!);
-                var actualDns = await TunConnectivity.CheckResolver(dns, index, token);
-                Require(actualDns.Success, "sing-box did not return the DNS answer over VLESS: " + actualDns.Outcome);
-                await dnsReply;
+                using var dnsFixture = CancellationTokenSource.CreateLinkedTokenSource(token);
+                var answered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var dnsReply = AnswerDnsTcp(dnsServer, TunDns.Query(TunConnectivity.ControlName)[2..], dnsFixture.Token, answered);
+                try
+                {
+                    var index = TunWindows.Index(TunWindows.Find(id)!);
+                    var actualDns = await TunConnectivity.CheckResolver(dns, index, token);
+                    Require(actualDns.Success, "sing-box did not return the DNS answer over VLESS: " + actualDns.Outcome +
+                        $" (fixture answered: {answered.Task.IsCompletedSuccessfully}).");
+                    await answered.Task.WaitAsync(TimeSpan.FromSeconds(2), token);
+                }
+                finally
+                {
+                    dnsFixture.Cancel();
+                    try { await dnsReply; }
+                    catch (OperationCanceledException) when (dnsFixture.IsCancellationRequested) { }
+                }
                 var ipv6 = await TunConnectivity.CheckIPv6(token, IPAddress.Parse("2001:db8:9::10"));
                 Require(ipv6.Success, "sing-box did not block the IPv6 probe: " + ipv6.Outcome);
             }
@@ -639,7 +651,7 @@ internal static class NativeTunTests
     private static bool IsQuestion(byte[] packet, byte[] question) =>
         packet.Length >= 12 && packet.AsSpan(2).SequenceEqual(question);
 
-    private static async Task AnswerDnsTcp(TcpListener listener, byte[] question, CancellationToken token, bool forwarded = false)
+    private static async Task AnswerDnsTcp(TcpListener listener, byte[] question, CancellationToken token, TaskCompletionSource? forwarded = null)
     {
         while (!token.IsCancellationRequested)
         {
@@ -655,7 +667,7 @@ internal static class NativeTunTests
                 if (count is < 12 or > 512) continue;
                 var query = new byte[count];
                 await stream.ReadExactlyAsync(query, attempt.Token);
-                if (forwarded)
+                if (forwarded != null)
                 {
                     var questionBytes = question.AsSpan(10).ToArray(); // strip flags and counts from the expected query
                     if (query[4] != 0 || query[5] != 1 || !query.AsSpan(12).StartsWith(questionBytes)) continue;
@@ -664,9 +676,16 @@ internal static class NativeTunTests
                 }
                 else if (!IsQuestion(query, question)) continue;
                 var reply = DnsAnswer(query);
-                BinaryPrimitives.WriteUInt16BigEndian(length, (ushort)reply.Length);
-                await stream.WriteAsync(length, attempt.Token);
-                await stream.WriteAsync(reply, attempt.Token);
+                var frame = new byte[2 + reply.Length];
+                BinaryPrimitives.WriteUInt16BigEndian(frame, (ushort)reply.Length);
+                reply.CopyTo(frame, 2);
+                await stream.WriteAsync(frame, attempt.Token);
+                if (forwarded != null)
+                {
+                    forwarded.TrySetResult();
+                    // The sing-box TCP transport pools connections and reads complete frames asynchronously.
+                    await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                }
                 return;
             }
             catch (IOException) { }

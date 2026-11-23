@@ -92,8 +92,10 @@ with tempfile.TemporaryDirectory(prefix='pomogator-reality-') as temporary, cont
     thread.start()
     stack.callback(dest.shutdown)
 
-    cover_proc = start(stack, 'openssl', 's_server', '-accept', f'{bind}:{cover_port}', '-tls1_3', '-alpn', 'h2,http/1.1', '-quiet',
-        '-key', str(path / 'cover.key'), '-cert', str(path / 'cover.crt'), diagnostics=quiet)
+    cover_executable = path / 'reality-cover.exe'
+    subprocess.run(['go', 'build', '-o', str(cover_executable), str(Path(__file__).with_name('reality-cover.go'))], check=True)
+    cover_proc = start(stack, str(cover_executable), f'{bind}:{cover_port}', str(path / 'cover.crt'),
+        str(path / 'cover.key'), diagnostics=quiet)
     server = config(path, 'peer', {'log': {'loglevel':'error'}, 'inbounds':[
         {'listen':bind,'port':peer_port,'protocol':'vless','settings':{'decryption':'none','clients':[{'id':user,'flow':flow}]},
         'streamSettings':{'network':'raw','security':'reality','realitySettings':{

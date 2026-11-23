@@ -25,6 +25,8 @@ internal sealed record TunRecovery(Guid Id, string Peer, TunBaseline Before, str
 
 internal static class TunWindows
 {
+    private const string NetworkClass = "{4D36E972-E325-11CE-BFC1-08002BE10318}";
+
     internal static bool Administrator()
     {
         using var identity = WindowsIdentity.GetCurrent();
@@ -198,7 +200,7 @@ internal static class TunWindows
             return Refuse("unrecognized-device-instance");
 
         var adapter = Find(record.Id);
-        if (adapter == null)
+        if (adapter == null && !(record.SingBox && IsOwnedNetworkDevice(record.Id, pnp)))
         {
             // After a hard crash a non-present Wintun can remain registered while IP Helper has no interface.
             // Verify it is non-present via PnP before removing the exact owned devnode.
@@ -206,10 +208,11 @@ internal static class TunWindows
             var command = "$ErrorActionPreference='Stop'; $instance=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" +
                 encoded + "')); $devices=@(Get-PnpDevice -Class Net -PresentOnly | Where-Object InstanceId -eq $instance); $devices.Count";
             var present = await PowerShell(command);
+            if (Clean(record)) return true;
             if (present?.Exit != 0 || present.Value.Output.Trim() != "0")
                 return Refuse("device-visible-to-pnp-only");
         }
-        else
+        else if (adapter != null)
         {
             var props = adapter.GetIPProperties();
             if (props.UnicastAddresses.Any(a => !a.Address.IsIPv6LinkLocal && a.Address.ToString() != TunConfig.Address &&
@@ -220,6 +223,7 @@ internal static class TunWindows
             var planned = (record.InstalledRoutes ?? TunConfig.Routes(IPAddress.Parse(record.Peer))).ToHashSet();
             if (routes.Any(route => !OwnRoute(route, planned, record.SingBox))) return Refuse("unrecognized-route");
         }
+        if (Clean(record)) return true;
         var result = await Run(Path.Combine(Environment.SystemDirectory, "pnputil.exe"), "/remove-device", pnp);
         if (result?.Exit != 0) return Refuse("device-remove-failed");
         return await WaitClean(record, TimeSpan.FromSeconds(5)) || Refuse("device-still-present");
@@ -229,6 +233,18 @@ internal static class TunWindows
             diagnostic?.Invoke(reason);
             return false;
         }
+    }
+
+    private static bool IsOwnedNetworkDevice(Guid id, string pnp)
+    {
+        // IP Helper can lose sight of a crashed device before Plug and Play does. In that window,
+        // confirm the connection entry against the independent driver's network instance GUID.
+        using var device = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\" + pnp);
+        var driver = device?.GetValue("Driver") as string;
+        if (driver?.StartsWith(NetworkClass + @"\", StringComparison.OrdinalIgnoreCase) != true) return false;
+        using var key = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\Class\" + driver);
+        return Guid.TryParse(key?.GetValue("NetCfgInstanceId") as string, out var instance) &&
+            instance == TunConfig.AdapterId(id);
     }
 
     internal static bool OwnRoute(string row, IReadOnlySet<string> planned, bool singBox = false)
@@ -251,7 +267,7 @@ internal static class TunWindows
     }
 
     private static string ConnectionKey(Guid id) =>
-        @"SYSTEM\CurrentControlSet\Control\Network\{4D36E972-E325-11CE-BFC1-08002BE10318}\" + TunConfig.AdapterId(id).ToString("B") + @"\Connection";
+        @"SYSTEM\CurrentControlSet\Control\Network\" + NetworkClass + @"\" + TunConfig.AdapterId(id).ToString("B") + @"\Connection";
 
     private static async Task<string[]?> ReadRoutes(int index)
     {
