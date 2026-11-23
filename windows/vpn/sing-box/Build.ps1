@@ -18,10 +18,17 @@ function Get-Source($Name, $Url, $Commit) {
 }
 Get-Source $box 'https://github.com/SagerNet/sing-box.git' 'c005f35300ce76427dc285481ec5695f5b179cd2'
 Get-Source $tun 'https://github.com/SagerNet/sing-tun.git' '040db71fcd33196f1d15708b91eb61e9dc6ab8dd'
-git -C $box apply (Join-Path $PSScriptRoot 'patches/reality.patch')
-git -C $tun apply (Join-Path $PSScriptRoot 'patches/windows-tun.patch')
+$patchDirectory = Join-Path $SourceDirectory 'patches'
+New-Item -ItemType Directory -Path $patchDirectory -Force | Out-Null
+function Apply-Patch($Repository, $Name) {
+    $patch = Join-Path $patchDirectory $Name
+    $content = [IO.File]::ReadAllText((Join-Path $PSScriptRoot "patches/$Name"))
+    [IO.File]::WriteAllText($patch, $content.Replace("`r`n", "`n"), [Text.UTF8Encoding]::new($false))
+    git -C $Repository apply $patch
+}
+Apply-Patch $box 'reality.patch'
+Apply-Patch $tun 'windows-tun.patch'
 Copy-Item $PSCommandPath (Join-Path $SourceDirectory 'Build.ps1')
-Copy-Item (Join-Path $PSScriptRoot 'patches') $SourceDirectory -Recurse
 Copy-Item (Join-Path $PSScriptRoot 'LICENSES.md') $SourceDirectory
 Push-Location $box
 try {
