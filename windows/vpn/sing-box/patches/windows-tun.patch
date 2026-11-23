@@ -1,8 +1,8 @@
 diff --git a/tun_windows.go b/tun_windows.go
-index 726fb8a..5cb71e6 100644
+index 726fb8a..5389dd9 100644
 --- a/tun_windows.go
 +++ b/tun_windows.go
-@@ -12,6 +12,7 @@ import (
+@@ -12,11 +12,11 @@ import (
  	"sync/atomic"
  	"time"
  	"unsafe"
@@ -10,7 +10,12 @@ index 726fb8a..5cb71e6 100644
  
  	"github.com/sagernet/sing-tun/internal/winipcfg"
  	"github.com/sagernet/sing-tun/internal/winsys"
-@@ -189,19 +190,8 @@ func (t *NativeTun) Start() error {
+ 	"github.com/sagernet/sing-tun/internal/wintun"
+-	"github.com/sagernet/sing/common/control"
+ 	E "github.com/sagernet/sing/common/exceptions"
+ 	"github.com/sagernet/sing/common/windnsapi"
+ 	"github.com/sagernet/sing/common/x/list"
+@@ -189,19 +189,8 @@ func (t *NativeTun) Start() error {
  	if err != nil {
  		return err
  	}
@@ -32,7 +37,7 @@ index 726fb8a..5cb71e6 100644
  	err = addRouteList(luid, routeRanges, gateway4, gateway6, 0)
  	if err != nil {
  		return err
-@@ -262,7 +252,6 @@ func (t *NativeTun) Start() error {
+@@ -262,7 +251,6 @@ func (t *NativeTun) Start() error {
  		permitFilter4.Action.Type = winsys.FWP_ACTION_PERMIT
  		permitFilter4.Weight.Type = winsys.FWP_UINT8
  		permitFilter4.Weight.Value = uintptr(13)
@@ -40,7 +45,7 @@ index 726fb8a..5cb71e6 100644
  		err = winsys.FwpmFilterAdd0(engine, &permitFilter4, 0, &filterId)
  		if err != nil {
  			return os.NewSyscallError("FwpmFilterAdd0", err)
-@@ -277,7 +266,6 @@ func (t *NativeTun) Start() error {
+@@ -277,7 +265,6 @@ func (t *NativeTun) Start() error {
  		permitFilter6.Action.Type = winsys.FWP_ACTION_PERMIT
  		permitFilter6.Weight.Type = winsys.FWP_UINT8
  		permitFilter6.Weight.Value = uintptr(13)
@@ -48,7 +53,7 @@ index 726fb8a..5cb71e6 100644
  		err = winsys.FwpmFilterAdd0(engine, &permitFilter6, 0, &filterId)
  		if err != nil {
  			return os.NewSyscallError("FwpmFilterAdd0", err)
-@@ -633,7 +621,6 @@ func (t *NativeTun) Close() error {
+@@ -633,7 +620,6 @@ func (t *NativeTun) Close() error {
  		if t.defaultInterfaceListener != nil {
  			t.options.InterfaceMonitor.UnregisterCallback(t.defaultInterfaceListener)
  		}
@@ -56,7 +61,7 @@ index 726fb8a..5cb71e6 100644
  		if t.options.AutoRoute {
  			windnsapi.FlushResolverCache()
  		}
-@@ -703,7 +690,9 @@ func addRouteList(luid winipcfg.LUID, destinations []netip.Prefix, gateway4 neti
+@@ -703,7 +689,9 @@ func addRouteList(luid winipcfg.LUID, destinations []netip.Prefix, gateway4 neti
  
  func generateGUIDByDeviceName(name string) *windows.GUID {
  	hash := md5.New()
