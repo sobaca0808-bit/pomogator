@@ -62,3 +62,11 @@ export function dueReminders(data: Data, now: number, seen: string[]) {
     return dismissed.has(key) ? [] : [{ entry, key, date: block.value }]
   })).sort((a, b) => a.date.localeCompare(b.date))
 }
+
+
+export function deadlineState(day: string, today: string, done: boolean) {
+  if (done) return 'done'
+  if (day < today) return 'late'
+  if (day === today) return 'today'
+  return day <= shiftDay(today, 3) ? 'soon' : 'upcoming'
+}
