@@ -40,6 +40,7 @@ for (const touch of [false, true]) {
       await activate(edit)
       const dialog = page.getByRole('dialog')
       await expect(dialog.getByRole('button', { name: 'Назад' })).toBeVisible()
+      await expect(dialog.getByRole('button', { name: 'Назад' })).toHaveCSS('border-radius', '999px')
       await dialog.getByLabel('Название').fill('')
       page.once('dialog', prompt => prompt.dismiss())
       await page.goBack()
@@ -50,6 +51,7 @@ for (const touch of [false, true]) {
       await expect(dialog).toHaveCount(0)
       await expect(button(page, 'Редактировать «Запись 28 обновлена»')).toBeVisible()
       expect(Math.abs(await page.evaluate(() => scrollY) - position)).toBeLessThan(110)
+      await expect(back(page)).toHaveCSS('border-radius', '999px')
       const sticky = (await back(page).boundingBox())!
       expect(sticky.y).toBeGreaterThanOrEqual(0)
       expect(sticky.y).toBeLessThan(100)

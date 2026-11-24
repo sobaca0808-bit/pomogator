@@ -20,7 +20,7 @@ export function Dialog({ title, close, children, className, showBack }: { showBa
   }, [])
   return <dialog className={className} ref={ref} onCancel={event => { event.preventDefault(); close() }} aria-labelledby="dialog-title">
     <header className="dialog-header">
-      <div className="dialog-title-group">{showBack && <button type="button" onClick={close}><ArrowLeft size={17} /> Назад</button>}
+      <div className="dialog-title-group">{showBack && <button className="back-button" type="button" onClick={close}><ArrowLeft size={17} /> Назад</button>}
         <h2 id="dialog-title">{title}</h2></div>
       <button type="button" className="icon-button" aria-label="Закрыть" onClick={close}><X /></button>
     </header>

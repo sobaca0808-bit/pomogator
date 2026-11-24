@@ -350,6 +350,7 @@ main { display: flex; flex-direction: column; }
   max-width: 1320px; width: 100%; margin-inline: auto;
   padding: .35rem 0; background: #171d20;
 }
+.back-button { border-radius: 999px; }
 .dialog-title-group { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
 .card-dialog .dialog-header, .place-dialog .dialog-header {
   position: sticky; top: -1.25rem; z-index: 2; background: #22282f; padding-block: .25rem;

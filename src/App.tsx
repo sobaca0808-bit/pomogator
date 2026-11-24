@@ -277,7 +277,7 @@ export function App() {
         <span className="local"><span /> Локальная база</span>
       </div>
       {navigation.canBack && view !== 'home' && <div className="back-toolbar">
-        <button onClick={navigation.back}><ArrowLeft size={18} /> Назад</button>
+        <button className="back-button" onClick={navigation.back}><ArrowLeft size={18} /> Назад</button>
       </div>}
       <div className="workspace">
         {error && <p className="error banner" role="alert">{error}</p>}
