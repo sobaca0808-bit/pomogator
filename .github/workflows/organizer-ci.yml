@@ -36,6 +36,11 @@ jobs:
       - run: npm run test:e2e
       - uses: actions/upload-artifact@v4
         with:
+          name: Pomogator-organizer-android-web-test
+          path: dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
           name: pomogator-organizer-v0.2
           path: |
             dist/
@@ -76,3 +81,32 @@ jobs:
           name: Pomogator-organizer-win-x64-test
           path: package/
           if-no-files-found: error
+
+  android-chrome:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build -- --base=./
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Run on Android Chrome
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          disable-animations: true
+          script: adb shell pm path com.android.chrome && adb reverse tcp:4182 tcp:4182 && npm run test:e2e -- --grep "Android Chrome"
+        env:
+          POMOGATOR_ANDROID: '1'
+          DEBUG: pw:android
