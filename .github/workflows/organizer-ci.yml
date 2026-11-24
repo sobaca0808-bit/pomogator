@@ -49,6 +49,8 @@ jobs:
 
   windows-package:
     runs-on: windows-latest
+    outputs:
+      artifact-id: ${{ steps.windows-zip.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -77,6 +79,7 @@ jobs:
         env:
           POMOGATOR_TEST_EXE: package/Pomogator.exe
       - uses: actions/upload-artifact@v4
+        id: windows-zip
         with:
           name: Pomogator-organizer-win-x64-test
           path: package/
@@ -110,3 +113,20 @@ jobs:
         env:
           POMOGATOR_ANDROID: '1'
           DEBUG: pw:android
+
+  request-pages:
+    if: github.ref == 'refs/heads/organizer-v0.2-fixes'
+    needs: [organizer, windows-package, android-chrome]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Publish the tested commit through the approved Pages branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROJECT: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+          BUILD_RUN: ${{ github.run_id }}
+          WINDOWS_ZIP: ${{ needs.windows-package.outputs.artifact-id }}
+        run: |
+          gh api "repos/$PROJECT/actions/workflows/organizer-pages-preview.yml/dispatches"             -f ref=organizer-v0.2-pages -f "inputs[source_sha]=$SOURCE_SHA"             -f "inputs[build_run]=$BUILD_RUN" -f "inputs[windows_zip]=$WINDOWS_ZIP"
