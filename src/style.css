@@ -400,3 +400,43 @@ main { display: flex; flex-direction: column; }
 [data-theme=light] :is(.banner, .deadline-late) { background: #f6e2e5; }
 [data-theme=light] .danger { color: white; }
 [data-theme=light] .danger:hover:not(:disabled) { background: #8c3d49; }
+
+.center-tile {
+  display: flex; width: 100%; justify-content: flex-start; gap: 1rem;
+  min-height: 92px; margin-bottom: 1rem; border-color: #a4cf624d;
+}
+.center-tile:hover:not(:disabled) { border-color: var(--accent); }
+.center-tile .center-tile-icon { width: 48px; height: 48px; }
+.center-tile-label { flex: 1; min-width: 0; display: grid; }
+.center-tile-label strong { font-size: 1.2rem; }
+.center-tile > svg { color: var(--muted); }
+.center-toolbar { margin-bottom: 1rem; }
+.shortcut-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 11rem), 1fr));
+  gap: .75rem; padding: 0; margin: 0; list-style: none;
+}
+.shortcut-card { padding: 0; overflow: hidden; }
+.shortcut-open {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center; gap: .55rem; padding: .7rem; color: inherit;
+  text-decoration: none; overflow-wrap: anywhere;
+}
+.shortcut-open:hover { background: var(--surface); }
+.shortcut-open:focus-visible { outline-offset: -3px; }
+.shortcut-open > svg { color: var(--muted); }
+.shortcut-icon {
+  display: grid; place-items: center; flex: none; width: 43px; height: 43px;
+  border-radius: 11px; background: #f4f6f3; color: #31541d;
+}
+.shortcut-generic { background: #e1efd7; }
+.shortcut-yandexMusic { background: #ffe477; color: #533911; }
+.shortcut-tools { justify-content: space-evenly; border-top: 1px solid var(--line); gap: 0; }
+.shortcut-catalog { display: grid; grid-template-columns: repeat(auto-fit, minmax(5.3rem, 1fr)); gap: .35rem; }
+.shortcut-catalog > button { display: grid; justify-items: center; gap: .25rem; padding: .4rem .2rem; text-align: center; font-size: .8rem; overflow-wrap: anywhere; }
+.shortcut-catalog > [aria-pressed=true] { border-color: var(--accent); }
+@media (max-width: 480px) {
+  .shortcut-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; }
+  .shortcut-open { grid-template-columns: minmax(0, 1fr); justify-items: center; text-align: center; }
+  .shortcut-open > svg { display: none; }
+  .shortcut-tools { display: grid; grid-template-columns: repeat(2, 44px); justify-content: center; }
+}

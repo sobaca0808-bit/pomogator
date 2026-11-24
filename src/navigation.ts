@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import type { WidgetView } from './Overview'
 
-export type View = 'home' | 'folders' | 'calendar' | 'settings' | WidgetView
+export type View = 'home' | 'folders' | 'calendar' | 'settings' | 'center' | WidgetView
 type Screen = { view: View; folder: string | null; query: string }
 type Frame = Screen & { session: string; index: number; dialog?: number }
 const initial: Screen = { view: 'home', folder: null, query: '' }

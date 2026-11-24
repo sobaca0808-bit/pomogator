@@ -2,7 +2,7 @@ name: ПОМОГАТОР — проверка органайзера
 
 on:
   push:
-    branches: [organizer-v0.2-fixes, organizer-v0.2.1]
+    branches: [organizer-v0.2-fixes, organizer-v0.2.1, organizer-v0.2.2]
   pull_request:
     paths:
       - 'src/**'

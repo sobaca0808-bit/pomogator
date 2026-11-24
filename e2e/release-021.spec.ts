@@ -1,5 +1,6 @@
 import { devices, expect, test, type Page } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { exportBackup } from '../src/backup'
 import { createCard, makeBlock } from '../src/cards'
 import { saveEntry, savePlace, seed } from '../src/model'
@@ -111,5 +112,6 @@ test('ссылка, сроки, обе темы и фактический ном
   await page.getByRole('dialog').getByRole('button', { name: 'Назад' }).click()
   await expect(page.getByRole('dialog')).toHaveCount(0)
   const sha = execFileSync('git', ['rev-parse', '--short=7', 'HEAD'], { encoding: 'utf8' }).trim()
-  await expect(page.getByRole('contentinfo')).toHaveText(`ПОМОГАТОР · v0.2.1 · build ${sha}`)
+  const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  await expect(page.getByRole('contentinfo')).toHaveText(`ПОМОГАТОР · v${version} · build ${sha}`)
 })
