@@ -453,6 +453,9 @@ summary {
   .overview-toolbar p { font-size: .8rem; }
   dialog, .card-dialog { --dialog-padding: .75rem; width: calc(100% - 1rem); max-height: calc(100dvh - 1rem); }
   .section-bar { gap: .45rem; padding-inline: .4rem; }
+  .section-bar h1 {
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; white-space: normal;
+  }
   .section-bar .back-button { padding-inline: .65rem; }
   .scroll-top { width: 44px; padding: 0; }
   .scroll-top span { display: none; }

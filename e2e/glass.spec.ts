@@ -28,6 +28,14 @@ for (const viewport of [{ width: 320, height: 680 }, { width: 800, height: 1000 
       await expect(heading(page, 'Обзор')).toBeVisible()
       await expect(button(page, 'Наверх')).toHaveCount(0)
       await expectNoOverflow(page)
+      await button(page, 'Предстоящие платежи').tap()
+      const payments = heading(page, 'Предстоящие платежи')
+      await expect(payments).toBeVisible()
+      if (viewport.width === 320) {
+        expect(await payments.evaluate(title => title.scrollHeight)).toBeLessThanOrEqual(
+          await payments.evaluate(title => title.clientHeight + 1))
+      }
+      await button(page, 'Назад').tap()
 
       let data = savePlace(seed(), { id: 'nested', parent: 'notes', title: 'Вложенная папка', icon: 'folder' })
       for (let index = 1; index <= 24; index++)
