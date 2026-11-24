@@ -440,3 +440,13 @@ main { display: flex; flex-direction: column; }
   .shortcut-open > svg { display: none; }
   .shortcut-tools { display: grid; grid-template-columns: repeat(2, 44px); justify-content: center; }
 }
+.shortcut-dialog[data-keyboard] {
+  inset: var(--shortcut-visible-top) 0 auto;
+  margin: .5rem auto 0;
+  max-height: calc(var(--shortcut-visible-height) - 1rem);
+}
+.shortcut-dialog .shortcut-editor-actions {
+  position: sticky; bottom: 0; z-index: 1;
+  padding-block: .35rem; background: #22282f;
+}
+[data-theme=light] .shortcut-dialog .shortcut-editor-actions { background: #f5f8f1; }

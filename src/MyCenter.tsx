@@ -1,4 +1,4 @@
-import { useLayoutEffect, useState, type RefObject } from 'react'
+import { useLayoutEffect, useRef, useState, type RefObject } from 'react'
 import { ArrowDown, ArrowUp, ChevronRight, ExternalLink, Globe, LayoutGrid, Link2, Mail, Music2, Pencil, Plus, Trash2 } from 'lucide-react'
 import { siDiscord, siGithub, siGmail, siGooglemaps, siNotion, siSteam, siTelegram, siVk, siWhatsapp, siYoutube } from 'simple-icons'
 import { Dialog } from './editors'
@@ -76,6 +76,25 @@ export function ShortcutEditor({ value, editing, busy, close, guard, error, save
     guard.current = canClose
     return () => { guard.current = null }
   })
+  const form = useRef<HTMLFormElement>(null)
+  useLayoutEffect(() => {
+    const viewport = window.visualViewport
+    const dialog = form.current?.closest('dialog')
+    if (!viewport || !dialog) return
+    const fit = () => {
+      // Android may shrink only the visual viewport when the keyboard opens.
+      dialog.toggleAttribute('data-keyboard', viewport.height < window.innerHeight - 100 && viewport.scale === 1)
+      dialog.style.setProperty('--shortcut-visible-top', viewport.offsetTop + 'px')
+      dialog.style.setProperty('--shortcut-visible-height', viewport.height + 'px')
+    }
+    viewport.addEventListener('resize', fit)
+    viewport.addEventListener('scroll', fit)
+    fit()
+    return () => {
+      viewport.removeEventListener('resize', fit)
+      viewport.removeEventListener('scroll', fit)
+    }
+  }, [])
   const askClose = () => { if (canClose()) close() }
 
   function select(icon: ShortcutIcon) {
@@ -90,8 +109,8 @@ export function ShortcutEditor({ value, editing, busy, close, guard, error, save
     })
   }
 
-  return <Dialog title={editing ? 'Изменить ярлык' : 'Добавить ярлык'} close={askClose}>
-    <form noValidate onSubmit={event => {
+  return <Dialog className="shortcut-dialog" title={editing ? 'Изменить ярлык' : 'Добавить ярлык'} close={askClose}>
+    <form ref={form} noValidate onSubmit={event => {
       event.preventDefault()
       if (!busy && draft.title.trim() && url) save({ ...draft, title: draft.title.trim(), url })
     }}>
@@ -112,7 +131,7 @@ export function ShortcutEditor({ value, editing, busy, close, guard, error, save
           'По ссылке откроется сайт или связанное с ним приложение, если это поддерживает устройство.'}
       </p>
       {error && <p className="error" role="alert">{error}</p>}
-      <div className="actions"><button type="button" onClick={askClose} disabled={busy}>Отмена</button>
+      <div className="actions shortcut-editor-actions"><button type="button" onClick={askClose} disabled={busy}>Отмена</button>
         <button className="primary" disabled={busy || !draft.title.trim() || !url}>Сохранить ярлык</button></div>
     </form>
   </Dialog>
