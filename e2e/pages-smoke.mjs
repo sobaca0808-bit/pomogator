@@ -21,9 +21,13 @@ try {
   const activate = target => android ? target.tap() : target.click()
   const errors = []
   page.on('pageerror', error => errors.push(error.message))
-  const notes = () => page.getByRole('navigation', { name: 'Разделы' }).getByRole('button', { name: 'Заметки', exact: true })
+  async function navigate(name) {
+    const menu = page.locator('.navigation-menu')
+    if (await menu.isVisible() && await menu.getAttribute('open') === null) await activate(menu.locator('summary'))
+    await activate(page.getByRole('navigation', { name: 'Разделы', exact: true }).getByRole('button', { name, exact: true }))
+  }
   async function folder(title) {
-    await activate(notes())
+    await navigate('Заметки')
     await page.getByRole('button', { name: 'Папка', exact: true }).click()
     await page.getByLabel('Название').fill(title)
     await page.getByRole('button', { name: 'Сохранить', exact: true }).click()
@@ -61,6 +65,17 @@ try {
   expect(width).toBeLessThanOrEqual(500)
   expect(scroll).toBeLessThanOrEqual(width)
 
+  if (process.env.EXPECTED_VERSION === '0.2.4') {
+    await expect(page.locator('.app-header')).toHaveCSS('backdrop-filter', /blur/)
+    await expect(page.locator('.overview-places > article')).toHaveCount(6)
+    const image = await page.locator('.shell').evaluate(element =>
+      getComputedStyle(element, '::before').backgroundImage.match(/url\("([^"]+)"\)/)?.[1])
+    expect(new URL(image).pathname.startsWith(sitePath)).toBe(true)
+    const backdrop = await context.request.get(image)
+    expect(backdrop.status()).toBe(200)
+    expect(backdrop.headers()['content-type']).toMatch(/image\/webp/)
+  }
+
   const expected = process.env.EXPECTED_COMMIT
   const metadata = await context.request.get(new URL('build.json?v=' + expected, site).href)
   expect(metadata.status()).toBe(200)
@@ -82,7 +97,7 @@ try {
   await activate(page.getByRole('button', { name: 'Предстоящие платежи', exact: true }))
   await expect(page.getByRole('heading', { name: 'Предстоящие платежи', level: 1 })).toBeVisible()
 
-  await activate(notes())
+  await navigate('Заметки')
   await expect(page.getByRole('button', { name: /Папка v01 0 пап/ })).toHaveCount(0)
   await folder('Папка проверки')
   await page.getByRole('button', { name: /Папка проверки 0 пап/ }).click()
@@ -91,19 +106,19 @@ try {
   await expect(page.getByRole('status').filter({ hasText: 'Сохранено в этом браузере' })).toBeVisible()
 
   await page.reload()
-  await activate(notes())
+  await navigate('Заметки')
   await page.getByRole('button', { name: /Папка проверки 0 пап/ }).click()
   await expect(page.getByRole('heading', { name: 'Карточка проверки' })).toBeVisible()
   const names = await page.evaluate(async () => (await indexedDB.databases()).map(database => database.name).sort())
   expect(names).toEqual(process.env.POMOGATOR_V01_URL ? [previousDatabase, database].sort() : [database])
 
-  if (['0.2.2', '0.2.3'].includes(process.env.EXPECTED_VERSION)) {
-    await activate(page.getByRole('button', { name: 'Обзор', exact: true }))
+  if (['0.2.2', '0.2.3', '0.2.4'].includes(process.env.EXPECTED_VERSION)) {
+    await navigate('Обзор')
     const center = () => page.getByRole('button', { name: 'Мой центр', exact: true })
     const panel = page.getByRole('region', { name: 'Мои ярлыки' })
     await activate(center())
-    if (process.env.EXPECTED_VERSION === '0.2.3') {
-      const bar = page.locator('.section-bar')
+    if (['0.2.3', '0.2.4'].includes(process.env.EXPECTED_VERSION)) {
+      const bar = page.locator(process.env.EXPECTED_VERSION === '0.2.4' ? '.app-header' : '.section-bar')
       await expect(bar.getByRole('heading', { name: 'Мой центр', exact: true })).toBeVisible()
       await expect(bar.getByRole('button', { name: 'Назад', exact: true })).toBeVisible()
       await expect(bar).toHaveCSS('position', 'sticky')
@@ -125,7 +140,7 @@ try {
 
   if (process.env.POMOGATOR_V01_URL) {
     await page.goto(process.env.POMOGATOR_V01_URL)
-    await activate(notes())
+    await navigate('Заметки')
     await expect(page.getByRole('button', { name: /Папка v01 0 пап/ })).toBeVisible()
     await expect(page.getByRole('button', { name: /Папка проверки/ })).toHaveCount(0)
   }

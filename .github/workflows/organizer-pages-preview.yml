@@ -27,6 +27,7 @@ env:
   POMOGATOR_PAGES_URL: https://sobaca0808-bit.github.io/pomogator/preview-v0.2/
   POMOGATOR_022_URL: https://sobaca0808-bit.github.io/pomogator/preview-v0.2.2/
   POMOGATOR_023_URL: https://sobaca0808-bit.github.io/pomogator/preview-v0.2.3/
+  POMOGATOR_024_URL: https://sobaca0808-bit.github.io/pomogator/preview-v0.2.4/
   POMOGATOR_021_URL: https://sobaca0808-bit.github.io/pomogator/preview-v0.2.1/
 
 jobs:
@@ -39,6 +40,7 @@ jobs:
       preview: ${{ steps.source.outputs.preview }}
       center: ${{ steps.source.outputs.center }}
       glass: ${{ steps.source.outputs.glass }}
+      redesign: ${{ steps.source.outputs.redesign }}
     steps:
       - name: Select the current source revision
         id: source
@@ -58,6 +60,9 @@ jobs:
           [[ "$center" =~ ^[a-f0-9]{40}$ ]]
           glass=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/organizer-v0.2.3-preview" --jq .object.sha)
           [[ "$glass" =~ ^[a-f0-9]{40}$ ]]
+          redesign=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/organizer-v0.2.4-preview" --jq .object.sha)
+          [[ "$redesign" =~ ^[a-f0-9]{40}$ ]]
+          echo "redesign=$redesign" >> "$GITHUB_OUTPUT"
           echo "glass=$glass" >> "$GITHUB_OUTPUT"
           echo "center=$center" >> "$GITHUB_OUTPUT"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
@@ -149,6 +154,35 @@ jobs:
           cp -a dist/. "$dest/"
           sed -i "s@</head>@<meta name=\"pomogator-build\" content=\"$PREVIEW_SHA\" /></head>@" "$dest/index.html"
           jq -n --arg commit "$PREVIEW_SHA" --arg version "$VERSION" '{commit:$commit,version:$version}' > "$dest/build.json"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.source.outputs.redesign }}
+          path: redesign-source
+          persist-credentials: false
+      - name: Build the 0.2.4 preview with separate storage
+        working-directory: redesign-source
+        env:
+          VITE_POMOGATOR_STORAGE: pomogator-v024-pages
+          VITE_POMOGATOR_PAGES: 'true'
+          PREVIEW_SHA: ${{ steps.source.outputs.redesign }}
+        run: |
+          npm ci
+          npm run build -- --base=./
+          VERSION=$(node -p 'require("./package.json").version')
+          test "$VERSION" = 0.2.4
+          dest=../site/preview-v0.2.4
+          mkdir -p "$dest"
+          cp -a dist/. "$dest/"
+          sed -i "s@</head>@<meta name=\"pomogator-build\" content=\"$PREVIEW_SHA\" /></head>@" "$dest/index.html"
+          jq -n --arg commit "$PREVIEW_SHA" --arg version "$VERSION" '{commit:$commit,version:$version}' > "$dest/build.json"
+      - name: Capture the 0.2.3 and 0.2.4 main screens on the same data
+        working-directory: redesign-source
+        env:
+          POMOGATOR_EVIDENCE_ROOT: ${{ github.workspace }}/site
+          POMOGATOR_EVIDENCE_DIR: ${{ github.workspace }}/site/preview-v0.2.4/evidence
+        run: |
+          npx playwright install --with-deps chromium
+          npm run test:e2e -- e2e/home-evidence.spec.ts
       - uses: actions/upload-pages-artifact@v4
         with:
           path: site
@@ -172,6 +206,7 @@ jobs:
           PREVIEW_021_COMMIT: ${{ needs.build.outputs.preview }}
           PREVIEW_022_COMMIT: ${{ needs.build.outputs.center }}
           PREVIEW_023_COMMIT: ${{ needs.build.outputs.glass }}
+          PREVIEW_024_COMMIT: ${{ needs.build.outputs.redesign }}
         run: |
           latest=$(gh api "repos/$PROJECT/git/ref/heads/organizer-v0.2-fixes" --jq .object.sha)
           if [[ "$latest" != "$PREVIEW_COMMIT" ]]; then
@@ -184,6 +219,8 @@ jobs:
           test "$latest_center" = "$PREVIEW_022_COMMIT"
           latest_glass=$(gh api "repos/$PROJECT/git/ref/heads/organizer-v0.2.3-preview" --jq .object.sha)
           test "$latest_glass" = "$PREVIEW_023_COMMIT"
+          latest_redesign=$(gh api "repos/$PROJECT/git/ref/heads/organizer-v0.2.4-preview" --jq .object.sha)
+          test "$latest_redesign" = "$PREVIEW_024_COMMIT"
           pages=$(gh api "repos/$PROJECT/pages")
           jq -e --arg root "$PAGES_ROOT" '.build_type == "workflow" and .html_url == $root and .cname == null and .https_enforced' <<< "$pages" > /dev/null
           root_status=$(curl --silent --show-error --max-time 30 --output /dev/null --write-out '%{http_code}' "$PAGES_ROOT")
@@ -271,6 +308,22 @@ jobs:
             --max-time 20 --output /dev/null "${POMOGATOR_PAGES_URL}build.json?v=$EXPECTED_COMMIT"
           node e2e/pages-smoke.mjs
 
+      - name: Verify 0.2.4 and its isolation from the previous preview
+        env:
+          POMOGATOR_PAGES_URL: ${{ env.POMOGATOR_024_URL }}
+          POMOGATOR_DATABASE: pomogator-v024-pages
+          POMOGATOR_V01_URL: ${{ env.POMOGATOR_023_URL }}
+          POMOGATOR_PREVIOUS_DATABASE: pomogator-v023-pages
+          EXPECTED_COMMIT: ${{ needs.build.outputs.redesign }}
+          EXPECTED_VERSION: '0.2.4'
+        run: |
+          curl --fail --silent --show-error --retry 8 --retry-delay 7 --retry-all-errors \
+            --max-time 20 --output /dev/null "${POMOGATOR_PAGES_URL}build.json?v=$EXPECTED_COMMIT"
+          node e2e/pages-smoke.mjs
+          for file in index.html before-dark-390.jpg after-dark-390.jpg after-light-390.jpg after-dark-1366.jpg; do
+            curl -fsS --max-time 20 --output /dev/null "${POMOGATOR_PAGES_URL}evidence/$file"
+          done
+
       - name: Write the test report
         env:
           VERSION: ${{ needs.build.outputs.version }}
@@ -286,6 +339,8 @@ jobs:
             echo "- [Отдельный стенд 0.2.1]($POMOGATOR_021_URL)"
             echo "- [Отдельный стенд 0.2.2]($POMOGATOR_022_URL)"
             echo "- [Отдельный стенд 0.2.3]($POMOGATOR_023_URL)"
+            echo "- [Отдельный стенд 0.2.4]($POMOGATOR_024_URL)"
+            echo "- [Сравнение главного экрана](${POMOGATOR_024_URL}evidence/)"
             if [[ "$BUILD_RUN" =~ ^[0-9]+$ && "$WINDOWS_ZIP" =~ ^[0-9]+$ ]]; then
               echo "- [ZIP Windows x64](https://github.com/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN/artifacts/$WINDOWS_ZIP)"
             fi
@@ -319,9 +374,9 @@ jobs:
           script: node e2e/pages-smoke.mjs
         env:
           POMOGATOR_ANDROID: '1'
-          POMOGATOR_PAGES_URL: ${{ env.POMOGATOR_023_URL }}
-          POMOGATOR_DATABASE: pomogator-v023-pages
-          POMOGATOR_V01_URL: ${{ env.POMOGATOR_022_URL }}
-          POMOGATOR_PREVIOUS_DATABASE: pomogator-v022-pages
-          EXPECTED_COMMIT: ${{ needs.build.outputs.glass }}
-          EXPECTED_VERSION: '0.2.3'
+          POMOGATOR_PAGES_URL: ${{ env.POMOGATOR_024_URL }}
+          POMOGATOR_DATABASE: pomogator-v024-pages
+          POMOGATOR_V01_URL: ${{ env.POMOGATOR_023_URL }}
+          POMOGATOR_PREVIOUS_DATABASE: pomogator-v023-pages
+          EXPECTED_COMMIT: ${{ needs.build.outputs.redesign }}
+          EXPECTED_VERSION: '0.2.4'
