@@ -97,6 +97,25 @@ try {
   const names = await page.evaluate(async () => (await indexedDB.databases()).map(database => database.name).sort())
   expect(names).toEqual(process.env.POMOGATOR_V01_URL ? [previousDatabase, database].sort() : [database])
 
+  if (process.env.EXPECTED_VERSION === '0.2.2') {
+    await activate(page.getByRole('button', { name: 'Обзор', exact: true }))
+    const center = () => page.getByRole('button', { name: 'Мой центр', exact: true })
+    const panel = page.getByRole('region', { name: 'Мои ярлыки' })
+    await activate(center())
+    expect(await panel.getByRole('link').count()).toBe(0)
+    await activate(panel.getByRole('button', { name: 'Добавить ярлык', exact: true }))
+    const editor = page.getByRole('dialog')
+    await activate(editor.getByRole('button', { name: 'Telegram', exact: true }))
+    await editor.getByLabel('Название').fill('Проверка ярлыка Pages')
+    await editor.getByLabel('HTTPS-ссылка').fill('https://t.me/test')
+    await activate(editor.getByRole('button', { name: 'Сохранить ярлык', exact: true }))
+    await expect(panel.getByRole('link', { name: 'Проверка ярлыка Pages' })).toBeVisible()
+    await page.reload()
+    await activate(center())
+    await expect(panel.getByRole('link', { name: 'Проверка ярлыка Pages' })).toHaveAttribute('href', 'https://t.me/test')
+    console.log('Мой центр · добавление ярлыка и сохранение после обновления подтверждены.')
+  }
+
   if (process.env.POMOGATOR_V01_URL) {
     await page.goto(process.env.POMOGATOR_V01_URL)
     await activate(notes())
