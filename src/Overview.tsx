@@ -60,19 +60,21 @@ export function Overview({ data, open, navigate, update, busy, today }: {
   const [configure, setConfigure] = useState(false)
   const prefs = preferences(data)
   const visible = prefs.order.filter(widget => !prefs.hidden.includes(widget))
-  return <>
+  return <section className="overview-summary" aria-labelledby="overview-summary-title">
     <div className="overview-toolbar">
-      <p><CalendarDays size={17} /> {fromDay(today).toLocaleDateString('ru-RU', longDate)}</p>
-      <button disabled={busy} onClick={() => setConfigure(true)}><Settings2 size={17} /> Виджеты</button>
+      <h2 id="overview-summary-title">Сводка</h2>
+      <button className="glass-surface" disabled={busy} onClick={() => setConfigure(true)}><Settings2 size={17} /> Виджеты</button>
     </div>
     <div className="overview-grid">{visible.map(widget => {
       const Icon = icons[widget]
       const rows = widgetRows(data, today, widget, 4)
-      return <section className={`widget widget-${widget}`} key={widget}>
+      return <section className={`widget glass-surface widget-${widget}`} key={widget}>
         <header><span className="widget-icon"><Icon size={19} /></span><h2>{widgetNames[widget]}</h2></header>
         {rows.length ? <div className="summary-list">{rows.map(row => <Row key={row.entry.id} data={data} open={widget === 'today' ? open : undefined} {...row} />)}</div> :
           <p className="widget-empty">{empty[widget]}</p>}
-        {widget !== 'today' && <button className="widget-open" aria-label={widgetNames[widget]} onClick={() => navigate(widget)} />}
+        {widget !== 'today' && <button className="widget-open" aria-label={widgetNames[widget]} onClick={() => navigate(widget)}>
+          <ChevronRight size={16} aria-hidden="true" />
+        </button>}
       </section>
     })}</div>
     {!visible.length && <p className="empty">Все виджеты скрыты. Откройте настройки виджетов, чтобы вернуть их.</p>}
@@ -91,7 +93,7 @@ export function Overview({ data, open, navigate, update, busy, today }: {
       </div>)}</div>
       <div className="actions"><button className="primary" onClick={() => setConfigure(false)}>Готово</button></div>
     </Dialog>}
-  </>
+  </section>
 }
 
 export function Calendar({ data, open, create, today }: {

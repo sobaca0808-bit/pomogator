@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { ArrowDown, ArrowLeft, ArrowUp, Bell, CalendarDays, ChevronRight, Download, FileText, FolderOpen, House, LayoutGrid, Pencil, Plus, Search, Settings, Trash2, Undo2, Upload, X } from 'lucide-react'
+import { ArrowDown, ArrowLeft, ArrowUp, Bell, CalendarDays, ChevronRight, Download, Ellipsis, FileText, FolderOpen, Pencil, Plus, Search, Trash2, Undo2, Upload, X } from 'lucide-react'
 import { downloadFile } from './attachments'
 import { exportBackup, importBackup } from './backup'
 import { CardEditor } from './CardEditor'
@@ -9,9 +9,10 @@ import { Dialog, Glyph, PlaceEditor } from './editors'
 import { contents, deleteEntry, deletePlace, orderPlace, pathTo, restoreDeleted, saveEntry, savePlace, search,
   type Change, type Data, type Entry, type Place } from './model'
 import { CenterTile, MyCenter, ShortcutEditor } from './MyCenter'
+import { Disclosure, OrganizerHeader } from './OrganizerHeader'
 import { moveShortcut, removeShortcut, saveShortcut, type Shortcut } from './shortcuts'
 import { Calendar, Finance, Overview, WidgetSection } from './Overview'
-import { dayKey, dueReminders } from './schedule'
+import { dayKey, dueReminders, fromDay } from './schedule'
 import { useNavigation, type View } from './navigation'
 import { buildLabel } from './version'
 import { openStorage, transact } from './storage'
@@ -186,6 +187,7 @@ export function App() {
   const children = data?.places.filter(item => item.parent === parent) ?? []
   const entries = data?.entries.filter(entry => entry.parent === parent) ?? []
   const result = data && query.trim() ? search(data, query) : undefined
+  const home = view === 'home' && !result
   const heading = result ? 'Результаты поиска' : view === 'home' ? 'Обзор' : view === 'calendar' ? 'Календарь' : view === 'settings' ? 'Настройки' : view === 'center' ? 'Мой центр' : view === 'folders' ? place?.title ?? 'Все разделы' : widgetNames[view]
 
   function editShortcut(item?: Shortcut) {
@@ -256,58 +258,55 @@ export function App() {
     const index = siblings.findIndex(candidate => candidate.id === item.id)
     const folderCount = data!.places.filter(candidate => candidate.parent === item.id).length
     const entryCount = data!.entries.filter(entry => entry.parent === item.id).length
-    return <article className={`place-card tone-${item.icon}`} key={item.id}>
+    return <article className={`place-card glass-surface tone-${item.icon}`} key={item.id}>
       <button className="place-open" onClick={() => navigate(item.id)}>
-        <span className="tile"><Glyph icon={item.icon} /></span><ChevronRight className="card-chevron" size={19} />
-        <strong>{item.title}</strong>
-        <span className="muted">{folderCount} пап. · {entryCount} карт.</span>
+        <span className="tile"><Glyph icon={item.icon} /></span>
+        <span className="place-label"><strong>{item.title}</strong>
+          <small>{folderCount} пап. · {entryCount} карт.</small>
+        </span>
+        <ChevronRight className="card-chevron" size={16} aria-hidden="true" />
       </button>
-      <div className="tools card-tools">
-        <button className="icon-button" aria-label={`Настроить «${item.title}»`} onClick={() => show({ kind: 'place', value: item, editing: true })}><Pencil size={16} /></button>
-        <button className="icon-button" aria-label={`Передвинуть «${item.title}» выше`} disabled={busy || index === 0} onClick={() => void commit(snapshot => orderPlace(snapshot, item.id, -1))}><ArrowUp size={17} /></button>
-        <button className="icon-button" aria-label={`Передвинуть «${item.title}» ниже`} disabled={busy || index === siblings.length - 1} onClick={() => void commit(snapshot => orderPlace(snapshot, item.id, 1))}><ArrowDown size={17} /></button>
-        <button className="icon-button" aria-label={`Удалить «${item.title}»`} onClick={() => removePlace(item)}><Trash2 size={16} /></button>
-      </div>
+      <Disclosure className="place-menu" label={`Действия «${item.title}»`} icon={Ellipsis}>
+        <button aria-label={`Настроить «${item.title}»`} onClick={() => show({ kind: 'place', value: item, editing: true })}><Pencil size={16} /> Настроить</button>
+        <button aria-label={`Передвинуть «${item.title}» выше`} disabled={busy || index === 0} onClick={() => void commit(snapshot => orderPlace(snapshot, item.id, -1))}><ArrowUp size={17} /> Выше</button>
+        <button aria-label={`Передвинуть «${item.title}» ниже`} disabled={busy || index === siblings.length - 1} onClick={() => void commit(snapshot => orderPlace(snapshot, item.id, 1))}><ArrowDown size={17} /> Ниже</button>
+        <button className="remove-place" aria-label={`Удалить «${item.title}»`} onClick={() => removePlace(item)}><Trash2 size={16} /> Удалить</button>
+      </Disclosure>
     </article>
   }
 
   const close = () => { if (!writing.current) navigation.dismiss() }
-  return <div className="shell">
-    <aside className="sidebar">
-      <button className="brand" onClick={() => openView('home')}><span className="brand-icon"><LayoutGrid size={21} /></span>ПОМОГАТОР</button>
-      <nav aria-label="Разделы">
-        <button aria-current={view === 'home' && !result ? 'page' : undefined} onClick={() => openView('home')}><House size={19} /> Обзор</button>
-        <button aria-current={view === 'folders' && !place && !result ? 'page' : undefined} onClick={() => navigate(null)}><LayoutGrid size={19} /> Все разделы</button>
-        <button aria-current={view === 'calendar' && !result ? 'page' : undefined} onClick={() => openView('calendar')}><CalendarDays size={19} /> Календарь</button>
-        <span className="nav-divider" aria-hidden="true" />
-        {roots.map(root => <button key={root.id} aria-current={path[0]?.id === root.id && !result ? 'page' : undefined}
-          onClick={() => navigate(root.id)}><Glyph icon={root.icon} />{root.title}</button>)}
-      </nav>
-      <div className="sidebar-bottom">
-        <button aria-current={view === 'settings' && !result ? 'page' : undefined} onClick={() => openView('settings')}>
-          <Settings size={18} /> Настройки
-        </button>
-      </div>
-    </aside>
+  return <div className="shell" data-workspace={view === 'home' || (view === 'folders' && !place) || undefined}>
+    <OrganizerHeader roots={roots} activeView={result ? undefined : view} activeRoot={result ? undefined : path[0]?.id}
+      openView={openView} navigate={navigate} focusSearch={() => searchInput.current?.focus()}>
+      {!home && <div className="section-bar">
+        {navigation.canBack && view !== 'home' &&
+          <button className="back-button" onClick={navigation.back}><ArrowLeft size={18} /> Назад</button>}
+        <h1 ref={pageTitle} tabIndex={-1}>{heading}</h1>
+      </div>}
+    </OrganizerHeader>
     <main>
-      <div className="topbar">
+      <div className={home ? 'overview-intro glass-surface' : 'workspace-search'}>
+        {home && <div className="overview-title">
+          <p><CalendarDays size={16} aria-hidden="true" />
+            {fromDay(today).toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'long' })}</p>
+          <h1 ref={pageTitle} tabIndex={-1}>{heading}</h1>
+        </div>}
         <div className="search">
           <Search aria-hidden="true" size={20} />
           <input ref={searchInput} type="search" aria-label="Поиск по органайзеру" placeholder="Поиск по органайзеру" value={query}
             onChange={event => setQuery(event.target.value)} />
           {query ? <button className="icon-button" aria-label="Очистить поиск" onClick={() => setQuery('')}><X size={18} /></button> : <kbd>Ctrl K</kbd>}
         </div>
-        <span className="local"><span /> Локальная база</span>
+        {home && <button className="primary new-card" disabled={!data} onClick={() =>
+          roots.length ? show({ kind: 'quick', day: '' }) : newPlace(null)}>
+          <Plus size={19} aria-hidden="true" />{roots.length ? 'Новая карточка' : 'Новый раздел'}
+        </button>}
       </div>
-      <header className="section-bar">
-        {navigation.canBack && view !== 'home' &&
-          <button className="back-button" onClick={navigation.back}><ArrowLeft size={18} /> Назад</button>}
-        <h1 ref={pageTitle} tabIndex={-1}>{heading}</h1>
-        {showScrollTop && <button className="scroll-top" aria-label="Наверх" onClick={() => {
+      {showScrollTop && <button className="scroll-top glass-surface" aria-label="Наверх" onClick={() => {
           pageTitle.current?.focus({ preventScroll: true })
           window.scrollTo({ top: 0, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' })
-        }}><ArrowUp size={18} aria-hidden="true" /><span>Наверх</span></button>}
-      </header>
+        }}><ArrowUp size={19} aria-hidden="true" /><span>Наверх</span></button>}
       <div className="workspace">
         {error && <p className="error banner" role="alert">{error}</p>}
         {(notice || undo) && <div className={undo || notice.includes('копия') || notice === 'Удаление отменено' ? 'feedback' : 'sr-only'}>
@@ -322,8 +321,7 @@ export function App() {
               {part.id === parent ? <span aria-current="page">{part.title}</span> :
                 <button onClick={() => navigate(part.id)}>{part.title}</button>}</span>)}
           </nav>}
-          {!result && view !== 'settings' && view !== 'center' && <div className="page-header">
-            {view === 'home' && <p>Один раз настроил — всё под рукой</p>}
+          {!result && !home && view !== 'settings' && view !== 'center' && <div className="page-header">
             <div className="actions">
               {place && <button onClick={() => newPlace(parent)}><Plus size={18} /> Папка</button>}
               <button className="primary" onClick={() => {
@@ -347,10 +345,17 @@ export function App() {
               <FileText size={22} /><span><strong>{entry.title}</strong>
                 <small>{pathTo(data, entry.parent).map(part => part.title).join(' / ')}</small></span></button>)}
             {!result.places.length && !result.entries.length && <p className="empty">Совпадений не найдено</p>}
-          </div> : view === 'home' ? <>
-            <CenterTile open={() => openView('center')} />
+          </div> : view === 'home' ? <div className="overview-layout">
+            <section className="overview-sections" aria-labelledby="overview-sections-title">
+              <CenterTile open={() => openView('center')} count={data.shortcuts?.length ?? 0} />
+              <div className="overview-section-heading">
+                <h2 id="overview-sections-title">Разделы</h2>
+                <button className="glass-surface" aria-label="Добавить раздел" onClick={() => newPlace(null)}><Plus size={16} aria-hidden="true" /> Раздел</button>
+              </div>
+              {roots.length > 0 && <div className="grid overview-places">{roots.map(renderPlace)}</div>}
+            </section>
             <Overview data={data} today={today} open={open} navigate={openView} update={updatePrefs} busy={busy} />
-          </> :
+          </div> :
             view === 'center' ? <MyCenter shortcuts={data.shortcuts ?? []} busy={busy} edit={editShortcut}
               move={(item, offset) => void commit(snapshot => moveShortcut(snapshot, item.id, offset))}
               remove={item => {

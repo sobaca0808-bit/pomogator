@@ -1,5 +1,6 @@
 import { devices, expect, test, type Page } from '@playwright/test'
 import { _android } from 'playwright'
+import { navigateSection } from './navigation-support'
 
 const widgets = ['Ближайшие дела', 'Предстоящие платежи', 'Активные проекты', 'Недавние карточки', 'Избранные ссылки']
 
@@ -8,7 +9,6 @@ async function checkOrganizer(page: Page, url: string, pointer: 'mouse' | 'touch
   const activate = (target: ReturnType<Page['getByRole']>) => pointer === 'touch' ? target.tap() : target.click()
   const button = (name: string) => page.getByRole('button', { name, exact: true })
   const heading = (name: string) => page.getByRole('heading', { name, exact: true, level: 1 })
-  const nav = (name: string) => page.getByRole('navigation', { name: 'Разделы' }).getByRole('button', { name, exact: true })
 
   await expect(heading('Обзор')).toBeVisible()
   await page.evaluate(() => {
@@ -32,7 +32,7 @@ async function checkOrganizer(page: Page, url: string, pointer: 'mouse' | 'touch
         console.log('Android Chrome browser history used for the Back check.')
       }
       await expect(heading('Обзор')).toBeVisible()
-    } else await activate(nav('Обзор'))
+    } else await navigateSection(page, 'Обзор', activate)
   }
   await expect(page.locator('html')).toHaveAttribute('data-test-pointer', pointer)
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(await page.evaluate(() => innerWidth))
@@ -56,7 +56,7 @@ async function checkOrganizer(page: Page, url: string, pointer: 'mouse' | 'touch
   await expect(dialog.getByLabel('Сумма (₽)')).toHaveValue('1200.50')
   await expect(dialog.locator('input[type=date]')).toHaveValue('2099-01-15')
   await activate(button('Закрыть'))
-  await activate(nav('Финансы'))
+  await navigateSection(page, 'Финансы', activate)
   await expect(heading('Финансы')).toBeVisible()
   await expect(button('Редактировать «Межплатформенный платёж»')).toBeVisible()
 }

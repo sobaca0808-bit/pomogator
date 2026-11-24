@@ -21,10 +21,10 @@ function ShortcutGlyph({ icon }: { icon: ShortcutIcon }) {
   return <span className={`shortcut-icon shortcut-generic shortcut-${icon}`} aria-hidden="true"><Icon size={24} /></span>
 }
 
-export function CenterTile({ open }: { open: () => void }) {
-  return <button className="widget center-tile" type="button" onClick={open} aria-label="Мой центр">
+export function CenterTile({ open, count }: { open: () => void; count: number }) {
+  return <button className="center-tile glass-surface" type="button" onClick={open} aria-label="Мой центр">
     <span className="widget-icon center-tile-icon"><LayoutGrid size={24} aria-hidden="true" /></span>
-    <span className="center-tile-label"><strong>Мой центр</strong><small>Быстрый доступ к сайтам, приложениям и проектам</small></span>
+    <span className="center-tile-label"><strong>Мой центр</strong><small>{count ? `Сохранено ярлыков: ${count}` : 'Быстрый доступ к сайтам и приложениям'}</small></span>
     <ChevronRight size={22} aria-hidden="true" />
   </button>
 }

@@ -2,6 +2,7 @@ import { expect, test, type Page } from '@playwright/test'
 import { exportBackup } from '../src/backup'
 import { createCard, makeBlock } from '../src/cards'
 import { saveEntry, savePlace, seed } from '../src/model'
+import { navigateSection } from './navigation-support'
 
 const button = (page: Page, name: string) => page.getByRole('button', { name, exact: true })
 const heading = (page: Page, name: string) => page.getByRole('heading', { name, exact: true, level: 1 })
@@ -52,10 +53,10 @@ for (const viewport of [{ width: 320, height: 680 }, { width: 800, height: 1000 
       })
       await button(page, 'Подтвердить').tap()
       await expect(heading(page, 'Обзор')).toBeVisible()
-      await button(page, 'Заметки').tap()
+      await navigateSection(page, 'Заметки', target => target.tap())
       await page.getByRole('button', { name: /^Вложенная папка 0 пап/ }).tap()
       const title = heading(page, 'Вложенная папка')
-      const bar = page.locator('.section-bar')
+      const bar = page.locator('.app-header')
       await expect(bar).toHaveCSS('position', 'sticky')
       await expect(bar).toHaveCSS('backdrop-filter', /blur/)
       await expect(bar.getByRole('button', { name: 'Назад', exact: true })).toHaveCSS('border-radius', '999px')
@@ -65,7 +66,8 @@ for (const viewport of [{ width: 320, height: 680 }, { width: 800, height: 1000 
       await edit.scrollIntoViewIfNeeded()
       const before = await page.evaluate(() => scrollY)
       expect(before).toBeGreaterThan(viewport.height)
-      expect((await title.boundingBox())!.y).toBeLessThan(60)
+      expect((await bar.boundingBox())!.y).toBeLessThan(24)
+      await expect(title).toBeInViewport()
       await expect(button(page, 'Наверх')).toBeInViewport()
       await edit.tap()
       await expect(page.getByRole('dialog').getByLabel('Название')).toHaveValue('Запись 24')
@@ -78,7 +80,7 @@ for (const viewport of [{ width: 320, height: 680 }, { width: 800, height: 1000 
       await expect(title).toBeFocused()
       await expect(button(page, 'Наверх')).toHaveCount(0)
 
-      await button(page, 'Календарь').tap()
+      await navigateSection(page, 'Календарь', target => target.tap())
       await expect(heading(page, 'Календарь')).toBeVisible()
       const today = page.locator('.calendar-grid [aria-current=date]')
       await expect(today).toHaveAttribute('aria-pressed', 'true')
@@ -106,6 +108,8 @@ test('Glass UI: мышь, клавиатура и состояния элеме�
   await page.keyboard.press('Control+k')
   await expect(search).toBeFocused()
   await expect(searchFrame).not.toHaveCSS('box-shadow', baseShadow)
+  await page.keyboard.press('Shift+Tab')
+  await expect(page.locator('.navigation-menu summary')).toBeFocused()
   await page.keyboard.press('Shift+Tab')
   const settings = button(page, 'Настройки')
   await expect(settings).toBeFocused()
