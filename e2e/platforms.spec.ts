@@ -52,12 +52,10 @@ test('мышь: навигация и сохранение карточки', as
   await checkOrganizer(page, baseURL!, 'mouse')
 })
 
-test.describe('сенсорный экран', () => {
-  test.use({ ...devices['Pixel 7'] })
-
-  test('сенсорные нажатия: навигация и сохранение карточки', async ({ page, baseURL }) => {
-    await checkOrganizer(page, baseURL!, 'touch')
-  })
+test('сенсорные нажатия: навигация и сохранение карточки', async ({ browser, baseURL }) => {
+  const context = await browser.newContext({ ...devices['Pixel 7'], colorScheme: 'dark', locale: 'ru-RU' })
+  try { await checkOrganizer(await context.newPage(), baseURL!, 'touch') }
+  finally { await context.close() }
 })
 
 test('Android Chrome: сенсорные нажатия, навигация и сохранение карточки', async ({ baseURL }) => {
