@@ -65,7 +65,7 @@ test('Android Chrome: сенсорные нажатия, навигация и �
   expect(devices).toHaveLength(1)
   const [device] = devices
   try {
-    const context = await device.launchBrowser()
+    const context = await device.launchBrowser({ hasTouch: true })
     try {
       const page = context.pages()[0] ?? await context.newPage()
       await checkOrganizer(page, baseURL!, 'touch')
