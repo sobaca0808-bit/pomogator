@@ -20,8 +20,16 @@ async function checkOrganizer(page: Page, url: string, pointer: 'mouse' | 'touch
     await activate(button(name))
     await expect(heading(name)).toBeVisible()
     if (systemBack && name === widgets[0]) {
+      await expect(page).toHaveURL(/#screen-1$/)
+      const state = () => page.evaluate(() => ({
+        hash: location.hash, index: history.state?.index, activation: navigator.userActivation.hasBeenActive,
+      }))
+      const before = await state()
       await systemBack()
-      await expect(heading('Обзор')).toBeVisible()
+      await expect(heading('Обзор')).toBeVisible({ timeout: 10_000 }).catch(async error => {
+        console.error('Android back history', { before, after: await state() })
+        throw error
+      })
     } else await activate(nav('Обзор'))
   }
   await expect(page.locator('html')).toHaveAttribute('data-test-pointer', pointer)

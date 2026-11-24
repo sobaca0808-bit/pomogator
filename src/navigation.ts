@@ -25,7 +25,7 @@ export function useNavigation<T>(canLeave: () => boolean) {
   useLayoutEffect(() => {
     const original = history.scrollRestoration
     history.scrollRestoration = 'manual'
-    history.replaceState(current.current, '')
+    history.replaceState(current.current, '', location.pathname + location.search)
     async function pop(event: PopStateEvent) {
       const previous = current.current
       const next = event.state as Frame | null
@@ -68,7 +68,9 @@ export function useNavigation<T>(canLeave: () => boolean) {
     scroll.current.set(previous.index, window.scrollY)
     for (const index of scroll.current.keys()) if (index > previous.index) scroll.current.delete(index)
     const next = { ...screen, session: previous.session, index: previous.index + 1, dialog }
-    history.pushState(next, '')
+    // Android Chrome's system Back uses the browser's navigation entries.
+    // Give each same-document entry a distinct URL while keeping drafts in memory.
+    history.pushState(next, '', '#screen-' + next.index)
     restoreScroll.current = restore
     activate(next)
   }
