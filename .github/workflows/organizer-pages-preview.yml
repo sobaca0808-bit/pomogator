@@ -25,6 +25,7 @@ concurrency:
 env:
   PAGES_ROOT: https://sobaca0808-bit.github.io/pomogator/
   POMOGATOR_PAGES_URL: https://sobaca0808-bit.github.io/pomogator/preview-v0.2/
+  POMOGATOR_021_URL: https://sobaca0808-bit.github.io/pomogator/preview-v0.2.1/
 
 jobs:
   build:
@@ -33,6 +34,7 @@ jobs:
     outputs:
       source: ${{ steps.source.outputs.sha }}
       version: ${{ steps.package.outputs.version }}
+      preview: ${{ steps.source.outputs.preview }}
     steps:
       - name: Select the current source revision
         id: source
@@ -46,7 +48,10 @@ jobs:
             echo "::error::The requested source is no longer the tip of organizer-v0.2-fixes."
             exit 1
           fi
+          preview=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/organizer-v0.2.1-preview" --jq .object.sha)
+          [[ "$preview" =~ ^[a-f0-9]{40}$ ]]
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "preview=$preview" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
         with:
           ref: ${{ steps.source.outputs.sha }}
@@ -71,6 +76,27 @@ jobs:
           cp -a dist/. site/preview-v0.2/
           sed -i "s@</head>@<meta name=\"pomogator-build\" content=\"$SOURCE_SHA\" /></head>@" site/preview-v0.2/index.html
           jq -n --arg commit "$SOURCE_SHA" --arg version "$VERSION" '{commit:$commit,version:$version}' > site/preview-v0.2/build.json
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.source.outputs.preview }}
+          path: preview-source
+          persist-credentials: false
+      - name: Build the separately tested 0.2.1 preview
+        working-directory: preview-source
+        env:
+          VITE_POMOGATOR_STORAGE: pomogator-v021-pages
+          VITE_POMOGATOR_PAGES: 'true'
+          PREVIEW_SHA: ${{ steps.source.outputs.preview }}
+        run: |
+          npm ci
+          npm run build -- --base=./
+          VERSION=$(node -p 'require("./package.json").version')
+          test "$VERSION" = 0.2.1
+          dest=../site/preview-v0.2.1
+          mkdir -p "$dest"
+          cp -a dist/. "$dest/"
+          sed -i "s@</head>@<meta name=\"pomogator-build\" content=\"$PREVIEW_SHA\" /></head>@" "$dest/index.html"
+          jq -n --arg commit "$PREVIEW_SHA" --arg version "$VERSION" '{commit:$commit,version:$version}' > "$dest/build.json"
       - uses: actions/upload-pages-artifact@v4
         with:
           path: site
@@ -91,12 +117,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PROJECT: ${{ github.repository }}
           PREVIEW_COMMIT: ${{ needs.build.outputs.source }}
+          PREVIEW_021_COMMIT: ${{ needs.build.outputs.preview }}
         run: |
           latest=$(gh api "repos/$PROJECT/git/ref/heads/organizer-v0.2-fixes" --jq .object.sha)
           if [[ "$latest" != "$PREVIEW_COMMIT" ]]; then
             echo "::error::A newer source revision is available. This build will not replace it."
             exit 1
           fi
+          latest_preview=$(gh api "repos/$PROJECT/git/ref/heads/organizer-v0.2.1-preview" --jq .object.sha)
+          test "$latest_preview" = "$PREVIEW_021_COMMIT"
           pages=$(gh api "repos/$PROJECT/pages")
           jq -e --arg root "$PAGES_ROOT" '.build_type == "workflow" and .html_url == $root and .cname == null and .https_enforced' <<< "$pages" > /dev/null
           root_status=$(curl --silent --show-error --max-time 30 --output /dev/null --write-out '%{http_code}' "$PAGES_ROOT")
@@ -145,6 +174,19 @@ jobs:
           test "$status" = 404
           echo "Pages root still returns HTTP 404."
 
+      - name: Verify the separately published preview and storage isolation
+        env:
+          POMOGATOR_PAGES_URL: ${{ env.POMOGATOR_021_URL }}
+          POMOGATOR_DATABASE: pomogator-v021-pages
+          POMOGATOR_V01_URL: ${{ env.POMOGATOR_PAGES_URL }}
+          POMOGATOR_PREVIOUS_DATABASE: pomogator-v02-pages
+          EXPECTED_COMMIT: ${{ needs.build.outputs.preview }}
+          EXPECTED_VERSION: '0.2.1'
+        run: |
+          curl --fail --silent --show-error --retry 8 --retry-delay 7 --retry-all-errors \
+            --max-time 20 --output /dev/null "${POMOGATOR_PAGES_URL}build.json?v=$EXPECTED_COMMIT"
+          node e2e/pages-smoke.mjs
+
       - name: Write the test report
         env:
           VERSION: ${{ needs.build.outputs.version }}
@@ -157,6 +199,7 @@ jobs:
             echo "- Изменения и точная ревизия · [$SOURCE_SHA](https://github.com/$GITHUB_REPOSITORY/commit/$SOURCE_SHA)"
             echo "- Проверки · сборка, модульные тесты и проверка опубликованного HTTPS, установки и сохранения карточек"
             echo "- [Мобильный стенд]($POMOGATOR_PAGES_URL)"
+            echo "- [Отдельный стенд 0.2.1]($POMOGATOR_021_URL)"
             if [[ "$BUILD_RUN" =~ ^[0-9]+$ && "$WINDOWS_ZIP" =~ ^[0-9]+$ ]]; then
               echo "- [ZIP Windows x64](https://github.com/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN/artifacts/$WINDOWS_ZIP)"
             fi
@@ -190,4 +233,9 @@ jobs:
           script: node e2e/pages-smoke.mjs
         env:
           POMOGATOR_ANDROID: '1'
-          EXPECTED_COMMIT: ${{ needs.build.outputs.source }}
+          POMOGATOR_PAGES_URL: ${{ env.POMOGATOR_021_URL }}
+          POMOGATOR_DATABASE: pomogator-v021-pages
+          POMOGATOR_V01_URL: ${{ env.POMOGATOR_PAGES_URL }}
+          POMOGATOR_PREVIOUS_DATABASE: pomogator-v02-pages
+          EXPECTED_COMMIT: ${{ needs.build.outputs.preview }}
+          EXPECTED_VERSION: '0.2.1'

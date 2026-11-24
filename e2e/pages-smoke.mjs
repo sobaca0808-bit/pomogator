@@ -6,6 +6,8 @@ import { join } from 'node:path'
 
 const site = new URL(process.env.POMOGATOR_PAGES_URL)
 const sitePath = site.pathname
+const database = process.env.POMOGATOR_DATABASE || 'pomogator-v02-pages'
+const previousDatabase = process.env.POMOGATOR_PREVIOUS_DATABASE || 'pomogator'
 const android = process.env.POMOGATOR_ANDROID === '1'
 const device = android ? (await _android.devices())[0] : undefined
 if (android && !device) throw new Error('Android device unavailable')
@@ -64,6 +66,10 @@ try {
   expect(metadata.status()).toBe(200)
   expect((await metadata.json()).commit).toBe(expected)
   await expect(page.locator('meta[name=pomogator-build]')).toHaveAttribute('content', expected)
+  if (process.env.EXPECTED_VERSION) {
+    await expect(page.getByRole('contentinfo')).toHaveText(
+      `ПОМОГАТОР · v${process.env.EXPECTED_VERSION} · build ${expected.slice(0, 7)}`)
+  }
 
   await expect.poll(() => page.evaluate(() => navigator.serviceWorker.controller?.scriptURL)).toBe(new URL('sw.js', site).href)
   const session = await context.newCDPSession(page)
@@ -89,7 +95,7 @@ try {
   await page.getByRole('button', { name: /Папка проверки 0 пап/ }).click()
   await expect(page.getByRole('heading', { name: 'Карточка проверки' })).toBeVisible()
   const names = await page.evaluate(async () => (await indexedDB.databases()).map(database => database.name).sort())
-  expect(names).toEqual(process.env.POMOGATOR_V01_URL ? ['pomogator', 'pomogator-v02-pages'] : ['pomogator-v02-pages'])
+  expect(names).toEqual(process.env.POMOGATOR_V01_URL ? [previousDatabase, database].sort() : [database])
 
   if (process.env.POMOGATOR_V01_URL) {
     await page.goto(process.env.POMOGATOR_V01_URL)
