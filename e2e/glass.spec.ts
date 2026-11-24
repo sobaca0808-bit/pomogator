@@ -32,8 +32,12 @@ for (const viewport of [{ width: 320, height: 680 }, { width: 800, height: 1000 
       const payments = heading(page, 'Предстоящие платежи')
       await expect(payments).toBeVisible()
       if (viewport.width === 320) {
-        expect(await payments.evaluate(title => title.scrollHeight)).toBeLessThanOrEqual(
-          await payments.evaluate(title => title.clientHeight + 1))
+        const clipped = await payments.evaluate(title => {
+          const lineHeight = parseFloat(getComputedStyle(title).lineHeight)
+          // Allow for font glyphs taller than their line box, but no clipped line.
+          return title.scrollHeight - title.clientHeight >= lineHeight / 2
+        })
+        expect(clipped).toBe(false)
       }
       await button(page, 'Назад').tap()
 
