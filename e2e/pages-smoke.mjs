@@ -1,15 +1,20 @@
 import { chromium, expect } from '@playwright/test'
 import { _android } from 'playwright'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 const site = new URL(process.env.POMOGATOR_PAGES_URL)
 const sitePath = site.pathname
 const android = process.env.POMOGATOR_ANDROID === '1'
 const device = android ? (await _android.devices())[0] : undefined
 if (android && !device) throw new Error('Android device unavailable')
-const browser = !device ? await chromium.launch({ executablePath: process.env.POMOGATOR_CHROMIUM }) : undefined
-const context = device ? await device.launchBrowser({ hasTouch: true }) :
-  await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true })
+const profile = device ? undefined : await mkdtemp(join(tmpdir(), 'pomogator-pages-'))
+let context
 try {
+  context = device ? await device.launchBrowser({ hasTouch: true }) :
+    await chromium.launchPersistentContext(profile, { executablePath: process.env.POMOGATOR_CHROMIUM,
+      viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true })
   const page = context.pages()[0] ?? await context.newPage()
   const activate = target => android ? target.tap() : target.click()
   const errors = []
@@ -95,8 +100,8 @@ try {
   expect(errors).toEqual([])
   console.log(`Проверено ${site.href} · HTTP 200, ревизия ${expected}, критерии установки Chrome, карточка после обновления, отдельная IndexedDB`)
 } finally {
-  try { await context.close() } finally {
+  try { await context?.close() } finally {
     if (device) await device.close()
-    if (browser) await browser.close()
+    if (profile) await rm(profile, { recursive: true, force: true })
   }
 }
