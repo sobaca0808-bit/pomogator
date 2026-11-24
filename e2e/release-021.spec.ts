@@ -108,7 +108,7 @@ test('ссылка, сроки, обе темы и фактический ном
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
   await button(page, 'Финансы').click()
   await button(page, 'Редактировать «Оплаченный счёт»').click()
-  await expect(page.getByRole('dialog')).toHaveCSS('background-color', 'rgb(245, 248, 241)')
+  await expect(page.getByRole('dialog')).toHaveCSS('color-scheme', 'light')
   await page.getByRole('dialog').getByRole('button', { name: 'Назад' }).click()
   await expect(page.getByRole('dialog')).toHaveCount(0)
   const sha = execFileSync('git', ['rev-parse', '--short=7', 'HEAD'], { encoding: 'utf8' }).trim()

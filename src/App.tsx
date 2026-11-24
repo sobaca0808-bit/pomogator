@@ -36,7 +36,9 @@ export function App() {
     catch { return 'dark' }
   })
   useLayoutEffect(() => {
-    document.documentElement.dataset.theme = theme
+    const root = document.documentElement
+    root.dataset.theme = theme
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', getComputedStyle(root).getPropertyValue('--page').trim())
     try { localStorage.setItem(databaseName + '-theme', theme) } catch { /* The theme still applies to this session. */ }
   }, [theme])
   const [busy, setBusy] = useState(false)
@@ -45,10 +47,12 @@ export function App() {
   const [notice, setNotice] = useState('')
   const [undo, setUndo] = useState<Change>()
   const [now, setNow] = useState(Date.now)
+  const [showScrollTop, setShowScrollTop] = useState(false)
   const database = useRef<IDBDatabase>(null)
   const channel = useRef<BroadcastChannel>(null)
   const input = useRef<HTMLInputElement>(null)
   const searchInput = useRef<HTMLInputElement>(null)
+  const pageTitle = useRef<HTMLHeadingElement>(null)
   const notified = useRef(new Set<string>())
   const today = dayKey(new Date(now))
   const reminders = data ? dueReminders(data, now, preferences(data).seenReminders) : []
@@ -80,6 +84,17 @@ export function App() {
       clearInterval(timer)
       channel.current?.close()
       database.current?.close()
+    }
+  }, [])
+
+  useEffect(() => {
+    function updateScrollTop() { setShowScrollTop(window.scrollY > window.innerHeight) }
+    window.addEventListener('scroll', updateScrollTop, { passive: true })
+    window.addEventListener('resize', updateScrollTop)
+    updateScrollTop()
+    return () => {
+      window.removeEventListener('scroll', updateScrollTop)
+      window.removeEventListener('resize', updateScrollTop)
     }
   }, [])
 
@@ -261,15 +276,15 @@ export function App() {
     <aside className="sidebar">
       <button className="brand" onClick={() => openView('home')}><span className="brand-icon"><LayoutGrid size={21} /></span>ПОМОГАТОР</button>
       <nav aria-label="Разделы">
-        <button className={view === 'home' && !result ? 'selected' : ''} onClick={() => openView('home')}><House size={19} /> Обзор</button>
-        <button className={view === 'folders' && !place && !result ? 'selected' : ''} onClick={() => navigate(null)}><LayoutGrid size={19} /> Все разделы</button>
-        <button className={view === 'calendar' && !result ? 'selected' : ''} onClick={() => openView('calendar')}><CalendarDays size={19} /> Календарь</button>
+        <button aria-current={view === 'home' && !result ? 'page' : undefined} onClick={() => openView('home')}><House size={19} /> Обзор</button>
+        <button aria-current={view === 'folders' && !place && !result ? 'page' : undefined} onClick={() => navigate(null)}><LayoutGrid size={19} /> Все разделы</button>
+        <button aria-current={view === 'calendar' && !result ? 'page' : undefined} onClick={() => openView('calendar')}><CalendarDays size={19} /> Календарь</button>
         <span className="nav-divider" aria-hidden="true" />
-        {roots.map(root => <button key={root.id} className={path[0]?.id === root.id && !result ? 'selected' : ''}
+        {roots.map(root => <button key={root.id} aria-current={path[0]?.id === root.id && !result ? 'page' : undefined}
           onClick={() => navigate(root.id)}><Glyph icon={root.icon} />{root.title}</button>)}
       </nav>
       <div className="sidebar-bottom">
-        <button className={view === 'settings' && !result ? 'selected' : ''} onClick={() => openView('settings')}>
+        <button aria-current={view === 'settings' && !result ? 'page' : undefined} onClick={() => openView('settings')}>
           <Settings size={18} /> Настройки
         </button>
       </div>
@@ -284,9 +299,15 @@ export function App() {
         </div>
         <span className="local"><span /> Локальная база</span>
       </div>
-      {navigation.canBack && view !== 'home' && <div className="back-toolbar">
-        <button className="back-button" onClick={navigation.back}><ArrowLeft size={18} /> Назад</button>
-      </div>}
+      <header className="section-bar">
+        {navigation.canBack && view !== 'home' &&
+          <button className="back-button" onClick={navigation.back}><ArrowLeft size={18} /> Назад</button>}
+        <h1 ref={pageTitle} tabIndex={-1}>{heading}</h1>
+        {showScrollTop && <button className="scroll-top" aria-label="Наверх" onClick={() => {
+          pageTitle.current?.focus({ preventScroll: true })
+          window.scrollTo({ top: 0, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' })
+        }}><ArrowUp size={18} aria-hidden="true" /><span>Наверх</span></button>}
+      </header>
       <div className="workspace">
         {error && <p className="error banner" role="alert">{error}</p>}
         {(notice || undo) && <div className={undo || notice.includes('копия') || notice === 'Удаление отменено' ? 'feedback' : 'sr-only'}>
@@ -301,17 +322,17 @@ export function App() {
               {part.id === parent ? <span aria-current="page">{part.title}</span> :
                 <button onClick={() => navigate(part.id)}>{part.title}</button>}</span>)}
           </nav>}
-          <header className="page-header">
-            <div><h1>{heading}</h1>{view === 'home' && !result && <p>Один раз настроил — всё под рукой</p>}</div>
-            {!result && view !== 'settings' && view !== 'center' && <div className="actions">
+          {!result && view !== 'settings' && view !== 'center' && <div className="page-header">
+            {view === 'home' && <p>Один раз настроил — всё под рукой</p>}
+            <div className="actions">
               {place && <button onClick={() => newPlace(parent)}><Plus size={18} /> Папка</button>}
               <button className="primary" onClick={() => {
                 if (parent) newEntry(parent)
                 else if (view === 'folders' || !roots.length) newPlace(null)
                 else show({ kind: 'quick', day: '' })
               }}><Plus size={20} /> {view === 'folders' && !place || !roots.length ? 'Новый раздел' : 'Новая карточка'}</button>
-            </div>}
-          </header>
+            </div>
+          </div>}
           {!result && reminders.slice(0, 3).map(reminder => <div className="reminder" key={reminder.key}>
             <Bell size={18} /><button onClick={() => open(reminder.entry)}>{reminder.entry.title}</button>
             <button className="icon-button" aria-label={`Скрыть напоминание «${reminder.entry.title}»`} disabled={busy}

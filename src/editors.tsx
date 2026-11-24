@@ -18,6 +18,24 @@ export function Dialog({ title, close, children, className, showBack }: { showBa
     dialog.showModal()
     return () => dialog.close()
   }, [])
+  useLayoutEffect(() => {
+    const dialog = ref.current!
+    const viewport = window.visualViewport
+    if (!viewport) return
+    const fit = () => {
+      // Android can open the keyboard without resizing the layout viewport.
+      dialog.toggleAttribute('data-keyboard', viewport.height < window.innerHeight - 100 && viewport.scale === 1)
+      dialog.style.setProperty('--dialog-visible-top', viewport.offsetTop + 'px')
+      dialog.style.setProperty('--dialog-visible-height', viewport.height + 'px')
+    }
+    viewport.addEventListener('resize', fit)
+    viewport.addEventListener('scroll', fit)
+    fit()
+    return () => {
+      viewport.removeEventListener('resize', fit)
+      viewport.removeEventListener('scroll', fit)
+    }
+  }, [])
   return <dialog className={className} ref={ref} onCancel={event => { event.preventDefault(); close() }} aria-labelledby="dialog-title">
     <header className="dialog-header">
       <div className="dialog-title-group">{showBack && <button className="back-button" type="button" onClick={close}><ArrowLeft size={17} /> Назад</button>}
