@@ -4,6 +4,16 @@ on:
   push:
     branches: [organizer-v0.2-pages]
   workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Проверенный коммит organizer-v0.2-fixes
+        type: string
+      build_run:
+        description: Номер прогона сборки
+        type: string
+      windows_zip:
+        description: Номер ZIP Windows x64
+        type: string
 
 permissions:
   contents: read
@@ -20,21 +30,47 @@ jobs:
   build:
     if: github.ref == 'refs/heads/organizer-v0.2-pages'
     runs-on: ubuntu-latest
+    outputs:
+      source: ${{ steps.source.outputs.sha }}
+      version: ${{ steps.package.outputs.version }}
     steps:
+      - name: Select the current source revision
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED: ${{ inputs.source_sha }}
+        run: |
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/organizer-v0.2-fixes" --jq .object.sha)
+          [[ "$sha" =~ ^[a-f0-9]{40}$ ]]
+          if [[ -n "$REQUESTED" && "$REQUESTED" != "$sha" ]]; then
+            echo "::error::The requested source is no longer the tip of organizer-v0.2-fixes."
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.source.outputs.sha }}
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: npm
       - run: npm ci
       - run: npm test
-      - name: Build isolated preview with relative resource URLs
+      - name: Build the preview with its existing storage and address
+        id: package
         env:
           VITE_POMOGATOR_STORAGE: pomogator-v02-pages
+          VITE_POMOGATOR_PAGES: 'true'
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
         run: |
           npm run build -- --base=./
+          VERSION=$(node -p 'require("./package.json").version')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           mkdir -p site/preview-v0.2
           cp -a dist/. site/preview-v0.2/
+          sed -i "s@</head>@<meta name=\"pomogator-build\" content=\"$SOURCE_SHA\" /></head>@" site/preview-v0.2/index.html
+          jq -n --arg commit "$SOURCE_SHA" --arg version "$VERSION" '{commit:$commit,version:$version}' > site/preview-v0.2/build.json
       - uses: actions/upload-pages-artifact@v4
         with:
           path: site
@@ -54,8 +90,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PROJECT: ${{ github.repository }}
-          PREVIEW_COMMIT: ${{ github.sha }}
+          PREVIEW_COMMIT: ${{ needs.build.outputs.source }}
         run: |
+          latest=$(gh api "repos/$PROJECT/git/ref/heads/organizer-v0.2-fixes" --jq .object.sha)
+          if [[ "$latest" != "$PREVIEW_COMMIT" ]]; then
+            echo "::error::A newer source revision is available. This build will not replace it."
+            exit 1
+          fi
           pages=$(gh api "repos/$PROJECT/pages")
           jq -e --arg root "$PAGES_ROOT" '.build_type == "workflow" and .html_url == $root and .cname == null and .https_enforced' <<< "$pages" > /dev/null
           root_status=$(curl --silent --show-error --max-time 30 --output /dev/null --write-out '%{http_code}' "$PAGES_ROOT")
@@ -77,7 +118,7 @@ jobs:
       - uses: actions/deploy-pages@v4
 
   verify:
-    needs: deploy
+    needs: [build, deploy]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -88,10 +129,65 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - name: Verify live HTTPS at a mobile viewport
+        env:
+          EXPECTED_COMMIT: ${{ needs.build.outputs.source }}
         run: |
           curl --fail --silent --show-error --retry 6 --retry-delay 5 --retry-all-errors \
             --max-time 20 --output /dev/null "$POMOGATOR_PAGES_URL"
+          for attempt in {1..24}; do
+            actual=$(curl -fsS --max-time 10 "${POMOGATOR_PAGES_URL}build.json?v=$EXPECTED_COMMIT" | jq -r .commit || true)
+            [[ "$actual" == "$EXPECTED_COMMIT" ]] && break
+            sleep 10
+          done
+          test "$actual" = "$EXPECTED_COMMIT"
           node e2e/pages-smoke.mjs
           status=$(curl --silent --show-error --max-time 20 --output /dev/null --write-out '%{http_code}' "$PAGES_ROOT")
           test "$status" = 404
           echo "Pages root still returns HTTP 404."
+
+      - name: Write the test report
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          SOURCE_SHA: ${{ needs.build.outputs.source }}
+          BUILD_RUN: ${{ inputs.build_run }}
+          WINDOWS_ZIP: ${{ inputs.windows_zip }}
+        run: |
+          {
+            echo "### ПОМОГАТОР $VERSION"
+            echo "- Изменения и точная ревизия · [$SOURCE_SHA](https://github.com/$GITHUB_REPOSITORY/commit/$SOURCE_SHA)"
+            echo "- Проверки · сборка, модульные тесты и проверка опубликованного HTTPS, установки и сохранения карточек"
+            echo "- [Мобильный стенд]($POMOGATOR_PAGES_URL)"
+            if [[ "$BUILD_RUN" =~ ^[0-9]+$ && "$WINDOWS_ZIP" =~ ^[0-9]+$ ]]; then
+              echo "- [ZIP Windows x64](https://github.com/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN/artifacts/$WINDOWS_ZIP)"
+            fi
+            echo "- [Рабочая ветка](https://github.com/$GITHUB_REPOSITORY/tree/organizer-v0.2-fixes)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  android-install:
+    needs: [build, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Enable hardware acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Test installability in Android Chrome
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          disable-animations: true
+          script: node e2e/pages-smoke.mjs
+        env:
+          POMOGATOR_ANDROID: '1'
+          EXPECTED_COMMIT: ${{ needs.build.outputs.source }}
