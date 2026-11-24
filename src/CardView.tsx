@@ -3,8 +3,9 @@ import { AttachmentView } from './attachments'
 import { blocksOf, cardStatus, kindIcon, kindName, kindOf, priorities, priorityName, progress, stateName, tagsOf, type Block } from './cards'
 import { Glyph } from './editors'
 import { safeLink, type Data, type Entry } from './model'
-import { fromDay } from './schedule'
+import { deadlineState, fromDay } from './schedule'
 
+const deadlineLabel = { done: 'Выполнено', late: 'Просрочено', today: 'Сегодня', soon: 'Скоро', upcoming: 'Предстоит' }
 export const shortDate = (day: string) => fromDay(day).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })
 
 function Body({ block, data, open, toggle }: { block: Block; data: Data; open: (entry: Entry) => void; toggle: (id: string, index: number) => void }) {
@@ -16,8 +17,7 @@ function Body({ block, data, open, toggle }: { block: Block; data: Data; open: (
         {block.value.split('\n').filter(line => line.trim()).map((line, index) => <li key={index}>{line}</li>)}
       </ul>
       return <p className="entry-text">{block.value}</p>
-    case 'link': return safeLink(block.value) ? <a className="card-link" href={block.value} target="_blank" rel="noreferrer">
-      <ExternalLink size={17} />{block.label || block.value}</a> : null
+    case 'link': return null
     case 'checklist': return <div>{block.items.map((item, index) => item.text.trim() && <label className="check-item" key={index}>
       <input type="checkbox" checked={item.done} onChange={() => toggle(block.id, index)} /><span>{item.text}</span>
     </label>)}</div>
@@ -39,13 +39,17 @@ function Body({ block, data, open, toggle }: { block: Block; data: Data; open: (
   }
 }
 
-export function CardView({ entry, data, open, remove, toggle, complete, favorite }: {
-  entry: Entry; data: Data; open: (entry: Entry) => void; remove: () => void;
+export function CardView({ entry, data, today, open, remove, toggle, complete, favorite }: {
+  entry: Entry; data: Data; today: string; open: (entry: Entry) => void; remove: () => void;
   toggle: (id: string, index: number) => void; complete: () => void; favorite: () => void
 }) {
   const kind = kindOf(data, entry)
   const status = cardStatus(entry)
   const tags = tagsOf(entry)
+  const blocks = blocksOf(entry)
+  const isDeadline = kind === 'task' || kind === 'project' || kind === 'payment'
+  const links = blocks.flatMap(block => block.type === 'link' && safeLink(block.value) ? [block] : [])
+  const dates = isDeadline ? blocks.flatMap(block => block.type === 'date' && block.value ? [block] : []) : []
   const children = data.entries.filter(item => item.parentCard === entry.id)
   const parent = data.entries.find(item => item.id === entry.parentCard)
   return <article className="entry">
@@ -66,9 +70,19 @@ export function CardView({ entry, data, open, remove, toggle, complete, favorite
       {entry.category && <span className="tag">{entry.category}</span>}
       {tags.map((tag, index) => <span className="tag" key={index}>#{tag}</span>)}
     </div>
+    {dates.map(({ id, value }) => {
+      const state = deadlineState(value, today, status === 'done')
+      const label = kind === 'payment' && state === 'done' ? 'Оплачено' : deadlineLabel[state]
+      return <p className={`deadline deadline-${state}`} key={id}>
+        <time dateTime={value}>{kind === 'payment' ? 'Дата платежа' : 'Срок'} · {shortDate(value)}</time>
+        <strong>{label}</strong>
+      </p>
+    })}
+    {links.map(link => <a className="card-link" key={link.id} href={link.value} target="_blank" rel="noreferrer">
+      <ExternalLink size={17} />{link.label || link.value}</a>)}
     {kind === 'project' && <div className="card-progress"><progress value={progress(entry)} max={100} aria-label="Выполнение проекта" />
       <small>{progress(entry)}%</small></div>}
-    <div className="card-body">{blocksOf(entry).map(block => <Body key={block.id} block={block} data={data} open={open} toggle={toggle} />)}</div>
+    <div className="card-body">{blocks.filter(block => block.type !== 'link' && (!isDeadline || block.type !== 'date')).map(block => <Body key={block.id} block={block} data={data} open={open} toggle={toggle} />)}</div>
     {parent && <button className="related" onClick={() => open(parent)}>В составе · {parent.title}</button>}
     {children.length > 0 && <details><summary>{kind === 'project' ? 'Подпроекты' : 'Подзадачи'} · {children.length}</summary>
       <div className="related-list">{children.map(child => <button className="related" key={child.id} onClick={() => open(child)}>{child.title}</button>)}</div>

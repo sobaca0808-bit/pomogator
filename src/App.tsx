@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import { ArrowDown, ArrowUp, Bell, CalendarDays, ChevronRight, Download, FileText, FolderOpen, House, LayoutGrid, Pencil, Plus, Search, Trash2, Undo2, Upload, X } from 'lucide-react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { ArrowDown, ArrowLeft, ArrowUp, Bell, CalendarDays, ChevronRight, Download, FileText, FolderOpen, House, LayoutGrid, Pencil, Plus, Search, Settings, Trash2, Undo2, Upload, X } from 'lucide-react'
 import { downloadFile } from './attachments'
 import { exportBackup, importBackup } from './backup'
 import { CardEditor } from './CardEditor'
@@ -8,11 +8,12 @@ import { blocksOf, cardStatus, createCard, kindName, kinds, kindOf, preferences,
 import { Dialog, Glyph, PlaceEditor } from './editors'
 import { contents, deleteEntry, deletePlace, orderPlace, pathTo, restoreDeleted, saveEntry, savePlace, search,
   type Change, type Data, type Entry, type Place } from './model'
-import { Calendar, Finance, Overview, WidgetSection, type WidgetView } from './Overview'
+import { Calendar, Finance, Overview, WidgetSection } from './Overview'
 import { dayKey, dueReminders } from './schedule'
+import { useNavigation, type View } from './navigation'
+import { buildLabel } from './version'
 import { openStorage, transact } from './storage'
 
-type View = 'home' | 'folders' | 'calendar' | WidgetView
 type Modal = { kind: 'place'; value: Place; editing: boolean } |
   { kind: 'entry'; value: Entry; editing: boolean } |
   { kind: 'quick'; day: string } |
@@ -22,10 +23,19 @@ const messageOf = (cause: unknown) => cause instanceof Error ? cause.message : '
 
 export function App() {
   const [data, setData] = useState<Data>()
-  const [view, setView] = useState<View>('home')
-  const [current, setCurrent] = useState<string | null>(null)
-  const [query, setQuery] = useState('')
-  const [modal, setModal] = useState<Modal>()
+  const writing = useRef(false)
+  const navigation = useNavigation<Modal>(() => !writing.current)
+  const { view, folder: current, query } = navigation.frame
+  const modal = navigation.dialog
+  const setQuery = navigation.search
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+    try { return localStorage.getItem(databaseName + '-theme') === 'light' ? 'light' : 'dark' }
+    catch { return 'dark' }
+  })
+  useLayoutEffect(() => {
+    document.documentElement.dataset.theme = theme
+    try { localStorage.setItem(databaseName + '-theme', theme) } catch { /* The theme still applies to this session. */ }
+  }, [theme])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [modalError, setModalError] = useState('')
@@ -36,7 +46,6 @@ export function App() {
   const channel = useRef<BroadcastChannel>(null)
   const input = useRef<HTMLInputElement>(null)
   const searchInput = useRef<HTMLInputElement>(null)
-  const writing = useRef(false)
   const notified = useRef(new Set<string>())
   const today = dayKey(new Date(now))
   const reminders = data ? dueReminders(data, now, preferences(data).seenReminders) : []
@@ -95,7 +104,7 @@ export function App() {
 
   function show(next: Modal) {
     setModalError('')
-    setModal(next)
+    navigation.show(next)
   }
 
   async function apply(change: Change) {
@@ -115,9 +124,9 @@ export function App() {
     setNotice('')
     try {
       await apply(change)
-      if (fromModal) setModal(undefined)
       setNotice('Изменения сохранены')
-      done?.()
+      if (fromModal) navigation.dismiss(done)
+      else done?.()
     } catch (cause) {
       const message = `Не удалось сохранить изменения. ${messageOf(cause)}`
       if (fromModal) setModalError(message)
@@ -148,17 +157,9 @@ export function App() {
     } catch (cause) { setError(messageOf(cause)) }
   }
 
-  function openView(next: View) {
-    setView(next)
-    setCurrent(null)
-    setQuery('')
-  }
+  function openView(next: View) { navigation.open(next) }
 
-  function navigate(id: string | null) {
-    setView('folders')
-    setCurrent(id)
-    setQuery('')
-  }
+  function navigate(id: string | null) { navigation.open('folders', id) }
 
   const path = data && current ? pathTo(data, current) : []
   const place = path.at(-1)
@@ -167,7 +168,7 @@ export function App() {
   const children = data?.places.filter(item => item.parent === parent) ?? []
   const entries = data?.entries.filter(entry => entry.parent === parent) ?? []
   const result = data && query.trim() ? search(data, query) : undefined
-  const heading = result ? 'Результаты поиска' : view === 'home' ? 'Обзор' : view === 'calendar' ? 'Календарь' : view === 'folders' ? place?.title ?? 'Все разделы' : widgetNames[view]
+  const heading = result ? 'Результаты поиска' : view === 'home' ? 'Обзор' : view === 'calendar' ? 'Календарь' : view === 'settings' ? 'Настройки' : view === 'folders' ? place?.title ?? 'Все разделы' : widgetNames[view]
 
   function newPlace(parentId: string | null) {
     show({ kind: 'place', editing: false, value: { id: crypto.randomUUID(), parent: parentId,
@@ -247,7 +248,7 @@ export function App() {
     </article>
   }
 
-  const close = () => { if (!busy) setModal(undefined) }
+  const close = () => { if (!writing.current) navigation.dismiss() }
   return <div className="shell">
     <aside className="sidebar">
       <button className="brand" onClick={() => openView('home')}><span className="brand-icon"><LayoutGrid size={21} /></span>ПОМОГАТОР</button>
@@ -260,13 +261,9 @@ export function App() {
           onClick={() => navigate(root.id)}><Glyph icon={root.icon} />{root.title}</button>)}
       </nav>
       <div className="sidebar-bottom">
-        <button disabled={!data || busy} onClick={() => input.current?.click()}><Upload size={18} /> Импорт JSON</button>
-        <button disabled={!data || busy} onClick={() => void download()}><Download size={18} /> Экспорт JSON</button>
-        <input ref={input} hidden type="file" accept=".json,application/json" onChange={event => {
-          const file = event.target.files?.[0]
-          event.target.value = ''
-          if (file) void upload(file)
-        }} />
+        <button className={view === 'settings' && !result ? 'selected' : ''} onClick={() => openView('settings')}>
+          <Settings size={18} /> Настройки
+        </button>
       </div>
     </aside>
     <main>
@@ -279,6 +276,9 @@ export function App() {
         </div>
         <span className="local"><span /> Локальная база</span>
       </div>
+      {navigation.canBack && view !== 'home' && <div className="back-toolbar">
+        <button onClick={navigation.back}><ArrowLeft size={18} /> Назад</button>
+      </div>}
       <div className="workspace">
         {error && <p className="error banner" role="alert">{error}</p>}
         {(notice || undo) && <div className={undo || notice.includes('копия') || notice === 'Удаление отменено' ? 'feedback' : 'sr-only'}>
@@ -295,7 +295,7 @@ export function App() {
           </nav>}
           <header className="page-header">
             <div><h1>{heading}</h1>{view === 'home' && !result && <p>Один раз настроил — всё под рукой</p>}</div>
-            {!result && <div className="actions">
+            {!result && view !== 'settings' && <div className="actions">
               {place && <button onClick={() => newPlace(parent)}><Plus size={18} /> Папка</button>}
               <button className="primary" onClick={() => {
                 if (parent) newEntry(parent)
@@ -320,10 +320,23 @@ export function App() {
             {!result.places.length && !result.entries.length && <p className="empty">Совпадений не найдено</p>}
           </div> : view === 'home' ? <Overview data={data} today={today} open={open} navigate={openView} update={updatePrefs} busy={busy} /> :
             view === 'calendar' ? <Calendar data={data} today={today} open={open} create={day => show({ kind: 'quick', day })} /> :
+            view === 'settings' ? <section className="widget app-settings">
+              <label className="check-item"><input type="checkbox" checked={theme === 'light'}
+                onChange={event => setTheme(event.target.checked ? 'light' : 'dark')} /> Светлая тема</label>
+              <div className="actions">
+                <button disabled={busy} onClick={() => input.current?.click()}><Upload size={18} /> Импорт JSON</button>
+                <button disabled={busy} onClick={() => void download()}><Download size={18} /> Экспорт JSON</button>
+                <input ref={input} hidden type="file" accept=".json,application/json" onChange={event => {
+                  const file = event.target.files?.[0]
+                  event.target.value = ''
+                  if (file) void upload(file)
+                }} />
+              </div>
+            </section> :
             view !== 'folders' ? <WidgetSection data={data} today={today} widget={view} open={open} /> : <>
               {place?.id === 'finance' && <Finance data={data} open={open} />}
               {children.length > 0 && <div className="grid">{children.map(renderPlace)}</div>}
-              {entries.length > 0 && <div className="entries">{entries.map(entry => <CardView key={entry.id} entry={entry} data={data}
+              {entries.length > 0 && <div className="entries">{entries.map(entry => <CardView key={entry.id} entry={entry} data={data} today={today}
                 open={open} remove={() => confirmation(`Удалить «${entry.title}»?`, 'Карточка и её вложения будут удалены.',
                   snapshot => deleteEntry(snapshot, entry.id))}
                 favorite={() => mutate(entry, latest => ({ ...latest, blocks: blocksOf(latest), favorite: !latest.favorite }))}
@@ -336,6 +349,7 @@ export function App() {
             </>}
         </>}
       </div>
+      <footer role="contentinfo" className="build-label">{buildLabel}</footer>
     </main>
     {modal?.kind === 'quick' && <Dialog title="Выберите тип карточки" close={close}>
       <div className="quick-list">{kinds.map(kind => <button key={kind} onClick={() => {
@@ -343,10 +357,10 @@ export function App() {
         if (selected) newEntry(selected.id, kind, modal.day)
       }}>{kindName[kind]}</button>)}</div>
     </Dialog>}
-    {modal?.kind === 'place' && <PlaceEditor place={modal.value} close={close}
+    {modal?.kind === 'place' && <PlaceEditor place={modal.value} close={close} guard={navigation.guard}
       busy={busy} error={modalError} save={value => void commit(snapshot => savePlace(snapshot, value, modal.editing), true)} />}
     {modal?.kind === 'entry' && data && <CardEditor key={modal.value.id} entry={modal.value} data={data} editing={modal.editing}
-      close={() => setModal(undefined)} child={entry => newEntry(entry.parent, entry.kind, '', entry.id)} persist={async (value, editing, revision, generation) => {
+      close={close} guard={navigation.guard} child={entry => newEntry(entry.parent, entry.kind, '', entry.id)} persist={async (value, editing, revision, generation) => {
         const next = await apply(snapshot => {
           if (snapshot.generation !== generation) throw new Error('База заменена в другой вкладке. Откройте карточку заново.')
           return saveEntry(snapshot, value, editing, revision)

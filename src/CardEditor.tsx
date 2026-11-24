@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react'
 import { ArrowDown, ArrowUp, Plus, Star, Trash2, Undo2 } from 'lucide-react'
 import { AttachmentView } from './attachments'
 import { validateBlocks } from './backup'
@@ -85,8 +85,9 @@ function BlockEditor({ block, cards, change }: { block: Block; cards: Entry[]; c
   }
 }
 
-export function CardEditor({ entry, editing, data, persist, close, child }: {
+export function CardEditor({ entry, editing, data, persist, close, child, guard }: {
   entry: Entry; editing: boolean; data: Data; close: () => void; child: (entry: Entry) => void;
+  guard: RefObject<(() => boolean | Promise<boolean>) | null>;
   persist: (value: Entry, editing: boolean, revision: number, generation?: string) => Promise<Entry>
 }) {
   const [draft, setDraft] = useState<Entry>(() => ({ ...entry, kind: kindOf(data, entry), blocks: blocksOf(entry) }))
@@ -156,19 +157,29 @@ export function CardEditor({ entry, editing, data, persist, close, child }: {
     return () => window.removeEventListener('beforeunload', warn)
   }, [dirty])
 
-  async function finish(next: () => void, allowDiscard = false) {
-    if (finishing.current) return
+  async function prepareToClose(allowDiscard = false) {
+    if (finishing.current) return false
     finishing.current = true
     setSubmitting(true)
     try {
       // A failed autosave must not consume the explicit save request.
       await pending.current
-      if (await save(latest.current) || (allowDiscard && window.confirm('Закрыть карточку и потерять несохранённые изменения?'))) next()
+      if (await save(latest.current)) return true
+      return allowDiscard && window.confirm('Закрыть карточку и потерять несохранённые изменения?')
     } finally {
       finishing.current = false
       setSubmitting(false)
     }
   }
+
+  async function finish(next: () => void, allowDiscard = false) {
+    if (await prepareToClose(allowDiscard)) next()
+  }
+
+  useLayoutEffect(() => {
+    guard.current = () => prepareToClose(true)
+    return () => { guard.current = null }
+  })
 
   const blocks = blocksOf(draft)
   const cards = data.entries.filter(item => item.id !== entry.id)
@@ -177,7 +188,7 @@ export function CardEditor({ entry, editing, data, persist, close, child }: {
   const supportsFinance = kind === 'payment' || kind === 'purchase'
   const parents = cards.filter(item => kindOf(data, item) === kind)
   const children = cards.filter(item => item.parentCard === draft.id)
-  return <Dialog className="card-dialog" title={editing ? 'Карточка' : 'Новая карточка'} close={() => void finish(close, true)}>
+  return <Dialog showBack className="card-dialog" title={editing ? 'Карточка' : 'Новая карточка'} close={() => void finish(close, true)}>
     <form inert={submitting} onInvalidCapture={event => {
       const field = event.target as HTMLInputElement
       setError(field.validationMessage)

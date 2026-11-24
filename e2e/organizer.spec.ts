@@ -11,7 +11,8 @@ const addBlock = async (page: Page, value: string) => {
   await page.getByRole('button', { name: 'Добавить блок' }).click()
 }
 async function importText(page: Page, json: string) {
-  await page.locator('.sidebar input[type=file]').setInputFiles({
+  await page.getByRole('button', { name: 'Настройки', exact: true }).click()
+  await page.locator('.app-settings input[type=file]').setInputFiles({
     name: 'backup.json', mimeType: 'application/json', buffer: Buffer.from(json),
   })
 }
@@ -47,11 +48,13 @@ test('вложенные папки, автосохранение, вложен�
   await page.getByRole('button', { name: 'Готово', exact: true }).click()
   await expect(page.getByRole('link', { name: 'Электронная версия' })).toHaveAttribute('href', 'https://example.org/contract')
 
+  await page.getByRole('button', { name: 'Настройки', exact: true }).click()
   const downloadPromise = page.waitForEvent('download')
   await page.getByRole('button', { name: 'Экспорт JSON' }).click()
   const backup = await readFile((await (await downloadPromise).path())!, 'utf8')
   expect(JSON.parse(backup).entries[0].blocks.find((block: Block) => block.type === 'file').file.base64)
     .toBe(Buffer.from('Точное содержимое вложения').toString('base64'))
+  await page.getByRole('button', { name: 'Назад', exact: true }).click()
   await page.getByRole('button', { name: 'Удалить «Договор поставки»' }).click()
   await page.getByRole('button', { name: 'Подтвердить' }).click()
   await expect(page.getByRole('heading', { name: 'Договор поставки' })).toHaveCount(0)
@@ -60,6 +63,7 @@ test('вложенные папки, автосохранение, вложен�
 
   await importText(page, '{"version":2,"places":[],"entries":[{}]}')
   await expect(page.getByRole('alert')).toBeVisible()
+  await page.getByRole('button', { name: 'Назад', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Договор поставки' })).toBeVisible()
   await page.getByRole('button', { name: 'Удалить «Договор поставки»' }).click()
   await page.getByRole('button', { name: 'Подтвердить' }).click()

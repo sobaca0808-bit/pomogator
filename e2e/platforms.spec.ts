@@ -3,7 +3,7 @@ import { _android } from 'playwright'
 
 const widgets = ['Ближайшие дела', 'Предстоящие платежи', 'Активные проекты', 'Недавние карточки', 'Избранные ссылки']
 
-async function checkOrganizer(page: Page, url: string, pointer: 'mouse' | 'touch') {
+async function checkOrganizer(page: Page, url: string, pointer: 'mouse' | 'touch', systemBack?: () => Promise<unknown>) {
   await page.goto(url)
   const activate = (target: ReturnType<Page['getByRole']>) => pointer === 'touch' ? target.tap() : target.click()
   const button = (name: string) => page.getByRole('button', { name, exact: true })
@@ -19,7 +19,10 @@ async function checkOrganizer(page: Page, url: string, pointer: 'mouse' | 'touch
   for (const name of widgets) {
     await activate(button(name))
     await expect(heading(name)).toBeVisible()
-    await activate(nav('Обзор'))
+    if (systemBack && name === widgets[0]) {
+      await systemBack()
+      await expect(heading('Обзор')).toBeVisible()
+    } else await activate(nav('Обзор'))
   }
   await expect(page.locator('html')).toHaveAttribute('data-test-pointer', pointer)
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(await page.evaluate(() => innerWidth))
@@ -68,7 +71,7 @@ test('Android Chrome: сенсорные нажатия, навигация и �
     const context = await device.launchBrowser({ hasTouch: true })
     try {
       const page = context.pages()[0] ?? await context.newPage()
-      await checkOrganizer(page, baseURL!, 'touch')
+      await checkOrganizer(page, baseURL!, 'touch', () => device.shell('input keyevent KEYCODE_BACK'))
     } finally { await context.close() }
   } finally { await device.close() }
 })
