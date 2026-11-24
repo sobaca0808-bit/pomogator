@@ -3,9 +3,10 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { exportBackup } from '../src/backup'
 import { createCard, type Block, type Kind } from '../src/cards'
-import { saveEntry, savePlace, seed, type Data } from '../src/model'
+import { saveEntry, seed } from '../src/model'
+import { navigateSection } from './navigation-support'
+import { demo } from './demo-data'
 
-const nav = (page: Page, name: string) => page.getByRole('navigation', { name: 'Разделы', exact: true }).getByRole('button', { name, exact: true })
 const addBlock = async (page: Page, value: string) => {
   await page.getByLabel('Тип блока').selectOption(value)
   await page.getByRole('button', { name: 'Добавить блок' }).click()
@@ -19,7 +20,7 @@ async function importText(page: Page, json: string) {
 
 test('вложенные папки, автосохранение, вложение, экспорт, импорт и отмена удаления', async ({ page }) => {
   await page.goto('/')
-  await nav(page, 'Документы').click()
+  await navigateSection(page, 'Документы')
   for (const title of ['Работа', 'Договоры']) {
     await page.getByRole('button', { name: 'Папка', exact: true }).click()
     await page.getByLabel('Название').fill(title)
@@ -101,7 +102,7 @@ test('настройки виджетов, календарь и клавиат�
   await expect(page.locator('.overview-grid h2').first()).toHaveText('Ближайшие дела')
   await page.keyboard.press('Control+k')
   await expect(page.getByRole('searchbox')).toBeFocused()
-  await nav(page, 'Календарь').click()
+  await navigateSection(page, 'Календарь')
   await expect(page.getByRole('heading', { name: 'Календарь' })).toBeVisible()
   await page.getByRole('button', { name: 'Карточка на эту дату' }).click()
   await page.getByRole('button', { name: 'Задача', exact: true }).click()
@@ -110,31 +111,6 @@ test('настройки виджетов, календарь и клавиат�
   await expect(page.getByRole('button', { name: /Встреча в календаре/ })).toBeVisible()
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
 })
-
-const date = (value: string): Block => ({ id: 'date', type: 'date', value })
-const time = (value: string): Block => ({ id: 'time', type: 'time', value })
-const status = (value: 'planned' | 'active' | 'done'): Block => ({ id: 'status', type: 'status', value })
-const link = (value: string, label: string): Block => ({ id: 'link', type: 'link', value, label })
-function demo() {
-  const demoCard = (data: Data, kind: Kind, parent: string, title: string, blocks: Block[], options = {}) =>
-    saveEntry(data, { ...createCard(kind, parent), title, blocks, ...options })
-  let data = savePlace(seed(), { id: 'home', parent: 'projects', title: 'Дом и семья', icon: 'folder' })
-  data = demoCard(data, 'project', 'projects', 'Обновить рабочее место', [
-    status('active'), date('2026-12-04'), { id: 'check', type: 'checklist', items: [
-      { text: 'Снять размеры стола', done: true }, { text: 'Выбрать светильник', done: true }, { text: 'Собрать заказ', done: false },
-    ] }, { id: 'sum', type: 'amount', value: '28000' },
-  ])
-  data = demoCard(data, 'project', 'projects', 'План поездки в Казань', [status('active'), date('2026-12-11')])
-  data = demoCard(data, 'task', 'tasks', 'Подготовить материалы встречи', [date('2026-11-23'), time('14:00'), status('active')], { priority: 'high' })
-  data = demoCard(data, 'task', 'tasks', 'Забрать заказ', [date('2026-11-23'), time('18:30'), status('planned')])
-  data = demoCard(data, 'task', 'tasks', 'Проверить смету на декабрь', [date('2026-11-25'), time('11:00'), status('planned')])
-  data = demoCard(data, 'task', 'tasks', 'Обновить список дел', [date('2026-11-27'), status('planned')], { repeat: 'weekly' })
-  data = demoCard(data, 'payment', 'finance', 'Домашний интернет', [date('2026-11-24'), { id: 'sum', type: 'amount', value: '850' }, status('planned')], { repeat: 'monthly', category: 'Связь' })
-  data = demoCard(data, 'payment', 'finance', 'Коммунальные услуги', [date('2026-11-28'), { id: 'sum', type: 'amount', value: '4720' }, status('planned')], { repeat: 'monthly', category: 'Жильё' })
-  data = demoCard(data, 'note', 'notes', 'Идеи для выходных', [{ id: 'text', type: 'text', value: 'Музей, прогулка и ужин с друзьями.', format: 'paragraph' }])
-  data = demoCard(data, 'link', 'services', 'Расписание поездов', [link('https://www.rzd.ru/', 'Открыть расписание')], { favorite: true })
-  return demoCard(data, 'link', 'services', 'Репозиторий ПОМОГАТОРА', [link('https://github.com/sobaca0808-bit/pomogator', 'GitHub')], { favorite: true })
-}
 
 test('основные экраны на компьютере и телефоне', async ({ page }, testInfo) => {
   const screenshots = process.env.POMOGATOR_SCREENSHOTS || testInfo.outputDir
@@ -146,17 +122,17 @@ test('основные экраны на компьютере и телефон�
   await expect(page.getByRole('heading', { name: 'Избранные ссылки' })).toBeVisible()
   await expect(page.getByText('Подготовить материалы встречи').first()).toBeVisible()
   await page.screenshot({ path: join(screenshots, '01-overview-desktop.png'), animations: 'disabled' })
-  await nav(page, 'Календарь').click()
+  await navigateSection(page, 'Календарь')
   await expect(page.getByRole('button', { name: /Подготовить материалы встречи/ })).toBeVisible()
   await page.screenshot({ path: join(screenshots, '02-calendar-desktop.png'), animations: 'disabled' })
-  await nav(page, 'Мои проекты').click()
+  await navigateSection(page, 'Мои проекты')
   await page.getByRole('button', { name: 'Редактировать «Обновить рабочее место»' }).click()
   await expect(page.getByLabel('Название')).toHaveValue('Обновить рабочее место')
   await page.screenshot({ path: join(screenshots, '03-card-desktop.png'), animations: 'disabled' })
   await page.keyboard.press('Escape')
   await expect(page.getByRole('dialog')).toHaveCount(0)
   await page.setViewportSize({ width: 390, height: 844 })
-  await nav(page, 'Обзор').click()
+  await navigateSection(page, 'Обзор')
   await expect(page.getByRole('heading', { name: 'Обзор' })).toBeVisible()
   await page.screenshot({ path: join(screenshots, '04-overview-mobile.png'), fullPage: true, animations: 'disabled' })
 })
@@ -204,7 +180,7 @@ test('пять виджетов открывают полные разделы �
     await page.getByRole('button', { name: new RegExp(row) }).click()
     await expect(page.getByLabel('Название')).toHaveValue(row)
     await page.getByRole('button', { name: 'Закрыть', exact: true }).click()
-    await nav(page, 'Обзор').click()
+    await navigateSection(page, 'Обзор')
   }
   const payment = page.locator('.widget-payments').getByText('Домашний интернет', { exact: true })
   await payment.scrollIntoViewIfNeeded()
@@ -249,7 +225,7 @@ test('Готово повторяет неудачное автосохране�
   await page.getByRole('button', { name: 'Готово', exact: true }).click()
   await expect(page.getByRole('dialog')).toHaveCount(0)
   await page.reload()
-  await nav(page, 'Финансы').click()
+  await navigateSection(page, 'Финансы')
   await page.getByRole('button', { name: 'Редактировать «Проверка платежа»' }).click()
   await expect(page.getByLabel('Название')).toHaveValue('Проверка платежа')
   await expect(page.getByLabel('Тип карточки')).toHaveValue('payment')
@@ -271,7 +247,7 @@ test('все типы карточек сохраняют выбранную п�
     const page = first.pages()[0]
     await page.goto('/')
     for (const type of types) {
-      await nav(page, 'Финансы').click()
+      await navigateSection(page, 'Финансы')
       await page.getByRole('button', { name: 'Новая карточка' }).click()
       await page.getByLabel('Тип карточки').selectOption(type)
       await page.getByLabel('Папка', { exact: true }).selectOption('notes')
@@ -284,7 +260,7 @@ test('все типы карточек сохраняют выбранную п�
   try {
     const page = second.pages()[0]
     await page.goto('/')
-    await nav(page, 'Заметки').click()
+    await navigateSection(page, 'Заметки')
     for (const type of types) {
       await page.getByRole('button', { name: 'Редактировать «Перезапуск ' + type + '»', exact: true }).click()
       await expect(page.getByLabel('Тип карточки')).toHaveValue(type)

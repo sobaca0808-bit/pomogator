@@ -4,11 +4,12 @@ import { readFileSync } from 'node:fs'
 import { exportBackup } from '../src/backup'
 import { createCard, makeBlock } from '../src/cards'
 import { saveEntry, savePlace, seed } from '../src/model'
+import { navigateSection } from './navigation-support'
 
 const button = (page: Page, name: string) => page.getByRole('button', { name, exact: true })
 const heading = (page: Page, name: string) => page.getByRole('heading', { name, exact: true, level: 1 })
 const settings = (page: Page) => button(page, 'Настройки')
-const back = (page: Page) => page.getByRole('main').getByRole('button', { name: 'Назад', exact: true })
+const back = (page: Page) => page.locator('.section-bar').getByRole('button', { name: 'Назад', exact: true })
 
 for (const touch of [false, true]) {
   test(`назад, прокрутка и защита редактора · ${touch ? 'сенсорный экран' : 'мышь'}`, async ({ browser, baseURL }) => {
@@ -26,7 +27,7 @@ for (const touch of [false, true]) {
       })
       await activate(button(page, 'Подтвердить'))
       await expect(heading(page, 'Обзор')).toBeVisible()
-      await activate(button(page, 'Заметки'))
+      await navigateSection(page, 'Заметки', activate)
       await activate(page.getByRole('button', { name: /^Вложенная папка 0 пап/ }))
       await expect(heading(page, 'Вложенная папка')).toBeVisible()
       await page.goBack()
@@ -85,7 +86,7 @@ test('ссылка, сроки, обе темы и фактический ном
   })
   await button(page, 'Подтвердить').click()
   await expect(heading(page, 'Обзор')).toBeVisible()
-  await button(page, 'Мои дела').click()
+  await navigateSection(page, 'Мои дела')
   const card = (title: string) => page.getByRole('article').filter({ has: page.getByRole('heading', { name: title, exact: true }) })
   for (const [title, label] of [['Вчера', 'Просрочено'], ['Сегодня', 'Сегодня'], ['Завтра', 'Скоро'], ['Позже', 'Предстоит'], ['Завершено', 'Выполнено']])
     await expect(card(title).locator('.deadline strong')).toHaveText(label)
@@ -97,7 +98,7 @@ test('ссылка, сроки, обе темы и фактический ном
   await expect(target).toHaveURL('https://example.org/test-link')
   await target.close()
   await expect(page.getByRole('dialog')).toHaveCount(0)
-  await button(page, 'Финансы').click()
+  await navigateSection(page, 'Финансы')
   await expect(card('Оплаченный счёт').locator('.deadline strong')).toHaveText('Оплачено')
 
   await settings(page).click()
@@ -106,7 +107,7 @@ test('ссылка, сроки, обе темы и фактический ном
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
   await page.reload()
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
-  await button(page, 'Финансы').click()
+  await navigateSection(page, 'Финансы')
   await button(page, 'Редактировать «Оплаченный счёт»').click()
   await expect(page.getByRole('dialog')).toHaveCSS('color-scheme', 'light')
   await page.getByRole('dialog').getByRole('button', { name: 'Назад' }).click()
