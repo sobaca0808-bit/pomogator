@@ -4,15 +4,15 @@ import { downloadFile } from './attachments'
 import { exportBackup, importBackup } from './backup'
 import { CardEditor } from './CardEditor'
 import { CardView } from './CardView'
-import { blocksOf, cardStatus, createCard, kindName, kinds, kindOf, preferences, rootFor, setStatus, type Kind, type Preferences } from './cards'
+import { blocksOf, cardStatus, createCard, kindName, kinds, kindOf, preferences, rootFor, setStatus, widgetNames, type Kind, type Preferences } from './cards'
 import { Dialog, Glyph, PlaceEditor } from './editors'
 import { contents, deleteEntry, deletePlace, orderPlace, pathTo, restoreDeleted, saveEntry, savePlace, search,
   type Change, type Data, type Entry, type Place } from './model'
-import { Calendar, Finance, Overview } from './Overview'
+import { Calendar, Finance, Overview, WidgetSection, type WidgetView } from './Overview'
 import { dayKey, dueReminders } from './schedule'
 import { openStorage, transact } from './storage'
 
-type View = 'home' | 'folders' | 'calendar'
+type View = 'home' | 'folders' | 'calendar' | WidgetView
 type Modal = { kind: 'place'; value: Place; editing: boolean } |
   { kind: 'entry'; value: Entry; editing: boolean } |
   { kind: 'quick'; day: string } |
@@ -166,7 +166,7 @@ export function App() {
   const children = data?.places.filter(item => item.parent === parent) ?? []
   const entries = data?.entries.filter(entry => entry.parent === parent) ?? []
   const result = data && query.trim() ? search(data, query) : undefined
-  const heading = result ? 'Результаты поиска' : view === 'home' ? 'Обзор' : view === 'calendar' ? 'Календарь' : place?.title ?? 'Все разделы'
+  const heading = result ? 'Результаты поиска' : view === 'home' ? 'Обзор' : view === 'calendar' ? 'Календарь' : view === 'folders' ? place?.title ?? 'Все разделы' : widgetNames[view]
 
   function newPlace(parentId: string | null) {
     show({ kind: 'place', editing: false, value: { id: crypto.randomUUID(), parent: parentId,
@@ -317,8 +317,9 @@ export function App() {
               <FileText size={22} /><span><strong>{entry.title}</strong>
                 <small>{pathTo(data, entry.parent).map(part => part.title).join(' / ')}</small></span></button>)}
             {!result.places.length && !result.entries.length && <p className="empty">Совпадений не найдено</p>}
-          </div> : view === 'home' ? <Overview data={data} today={today} open={open} update={updatePrefs} busy={busy} /> :
-            view === 'calendar' ? <Calendar data={data} today={today} open={open} create={day => show({ kind: 'quick', day })} /> : <>
+          </div> : view === 'home' ? <Overview data={data} today={today} open={open} navigate={openView} update={updatePrefs} busy={busy} /> :
+            view === 'calendar' ? <Calendar data={data} today={today} open={open} create={day => show({ kind: 'quick', day })} /> :
+            view !== 'folders' ? <WidgetSection data={data} today={today} widget={view} open={open} /> : <>
               {place?.id === 'finance' && <Finance data={data} open={open} />}
               {children.length > 0 && <div className="grid">{children.map(renderPlace)}</div>}
               {entries.length > 0 && <div className="entries">{entries.map(entry => <CardView key={entry.id} entry={entry} data={data}
@@ -344,7 +345,7 @@ export function App() {
     {modal?.kind === 'place' && <PlaceEditor place={modal.value} close={close}
       busy={busy} error={modalError} save={value => void commit(snapshot => savePlace(snapshot, value, modal.editing), true)} />}
     {modal?.kind === 'entry' && data && <CardEditor key={modal.value.id} entry={modal.value} data={data} editing={modal.editing}
-      close={close} child={entry => newEntry(entry.parent, entry.kind, '', entry.id)} persist={async (value, editing, revision, generation) => {
+      close={() => setModal(undefined)} child={entry => newEntry(entry.parent, entry.kind, '', entry.id)} persist={async (value, editing, revision, generation) => {
         const next = await apply(snapshot => {
           if (snapshot.generation !== generation) throw new Error('База заменена в другой вкладке. Откройте карточку заново.')
           return saveEntry(snapshot, value, editing, revision)

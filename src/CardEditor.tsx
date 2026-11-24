@@ -91,6 +91,7 @@ export function CardEditor({ entry, editing, data, persist, close, child }: {
 }) {
   const [draft, setDraft] = useState<Entry>(() => ({ ...entry, kind: kindOf(data, entry), blocks: blocksOf(entry) }))
   const generation = useRef(data.generation)
+  const template = useRef(draft.blocks)
   const [saved, setSaved] = useState(draft)
   const [record, setRecord] = useState(editing ? entry : undefined)
   const [saving, setSaving] = useState(false)
@@ -99,6 +100,7 @@ export function CardEditor({ entry, editing, data, persist, close, child }: {
   const [removed, setRemoved] = useState<{ block: Block; index: number }>()
   const [submitting, setSubmitting] = useState(false)
   const pending = useRef<Promise<boolean> | null>(null)
+  const finishing = useRef(false)
   const savedRef = useRef(saved)
   const recordRef = useRef(record)
   const latest = useRef(draft)
@@ -113,7 +115,6 @@ export function CardEditor({ entry, editing, data, persist, close, child }: {
   }
 
   async function save(value: Entry) {
-    if (pending.current && !await pending.current) return false
     if (value === savedRef.current) return true
     const invalid = !value.title.trim() ? 'Введите название карточки.' : validateBlocks(blocksOf(value))
     if (invalid) { setError(invalid); return false }
@@ -142,7 +143,9 @@ export function CardEditor({ entry, editing, data, persist, close, child }: {
 
   useEffect(() => {
     if (!dirty || !draft.title.trim() || error || saving || submitting) return
-    const timer = setTimeout(() => void save(draft), 600)
+    const timer = setTimeout(() => {
+      if (latest.current === draft && !pending.current && !finishing.current) void save(draft)
+    }, 600)
     return () => clearTimeout(timer)
   }, [draft, dirty, error, saving, submitting])
 
@@ -154,10 +157,17 @@ export function CardEditor({ entry, editing, data, persist, close, child }: {
   }, [dirty])
 
   async function finish(next: () => void, allowDiscard = false) {
-    if (submitting) return
+    if (finishing.current) return
+    finishing.current = true
     setSubmitting(true)
-    if (await save(latest.current) || (allowDiscard && window.confirm('Закрыть карточку и потерять несохранённые изменения?'))) next()
-    else setSubmitting(false)
+    try {
+      // A failed autosave must not consume the explicit save request.
+      await pending.current
+      if (await save(latest.current) || (allowDiscard && window.confirm('Закрыть карточку и потерять несохранённые изменения?'))) next()
+    } finally {
+      finishing.current = false
+      setSubmitting(false)
+    }
   }
 
   const blocks = blocksOf(draft)
@@ -168,7 +178,10 @@ export function CardEditor({ entry, editing, data, persist, close, child }: {
   const parents = cards.filter(item => kindOf(data, item) === kind)
   const children = cards.filter(item => item.parentCard === draft.id)
   return <Dialog className="card-dialog" title={editing ? 'Карточка' : 'Новая карточка'} close={() => void finish(close, true)}>
-    <form inert={submitting} onSubmit={event => { event.preventDefault(); void finish(close) }}>
+    <form inert={submitting} onInvalidCapture={event => {
+      const field = event.target as HTMLInputElement
+      setError(field.validationMessage)
+    }} onSubmit={event => { event.preventDefault(); void finish(close) }}>
       <div className="card-editor-top">
         <label>Название<input autoFocus required value={draft.title} onChange={event => changed({ title: event.target.value })} /></label>
         <button type="button" aria-label="В избранном" aria-pressed={draft.favorite === true} onClick={() => changed({ favorite: !draft.favorite })}>
@@ -177,10 +190,14 @@ export function CardEditor({ entry, editing, data, persist, close, child }: {
       <div className="form-columns">
         <label>Тип карточки<select value={kind} onChange={event => {
           const type = event.target.value as Kind
-          changed({ kind: type, parentCard: undefined, blocks: !record && draft.blocks === saved.blocks
-            ? createCard(type, draft.parent, firstValue(draft, 'date')).blocks : draft.blocks })
+          let blocks = latest.current.blocks
+          if (!recordRef.current && blocks === template.current) {
+            blocks = createCard(type, draft.parent, firstValue(draft, 'date')).blocks
+            template.current = blocks
+          }
+          changed({ kind: type, parentCard: undefined, blocks })
         }}>{kinds.map(value => <option key={value} value={value}>{kindName[value]}</option>)}</select></label>
-        <label>Папка<select value={draft.parent} onChange={event => changed({ parent: event.target.value })}>
+        <label>Папка<select aria-label="Папка" value={draft.parent} onChange={event => changed({ parent: event.target.value })}>
           {data.places.map(place => <option key={place.id} value={place.id}>{pathTo(data, place.id).map(item => item.title).join(' / ')}</option>)}
         </select></label>
       </div>
@@ -244,7 +261,7 @@ export function CardEditor({ entry, editing, data, persist, close, child }: {
       </details>}
       {error && <p className="error" role="alert">{error}</p>}
       <div className="editor-footer">
-        <span className="muted" role="status">{saving ? 'Сохранение…' : error ? 'Есть несохранённые изменения' :
+        <span className="muted" role="status">{saving || submitting ? 'Сохранение…' : error ? 'Есть несохранённые изменения' :
           dirty ? 'Ожидает сохранения' : record ? 'Сохранено в этом браузере' : 'Введите название для автосохранения'}</span>
         <button type="submit" className="primary" disabled={submitting || !draft.title.trim()}>Готово</button>
       </div>

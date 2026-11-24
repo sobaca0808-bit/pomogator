@@ -11,36 +11,54 @@ import { dayEntries, dayKey, fromDay, shiftDay, upcoming } from './schedule'
 const icons = { today: CalendarDays, tasks: ListTodo, payments: Wallet, projects: BriefcaseBusiness, recent: Clock3, favorites: Star }
 const longDate = { dateStyle: 'full' } as const
 
-function Row({ data, entry, detail, open, ratio }: { data: Data; entry: Entry; detail?: string; open: (entry: Entry) => void; ratio?: number }) {
-  return <button className="summary-row" onClick={() => open(entry)}>
+function Row({ data, entry, detail, open, ratio }: { data: Data; entry: Entry; detail?: string; open?: (entry: Entry) => void; ratio?: number }) {
+  const content = <>
     <span><strong>{entry.title}</strong><small>{detail || kindName[kindOf(data, entry)]}</small></span>
     {ratio !== undefined ? <small className="ratio">{ratio}%</small> : <ChevronRight size={16} />}
-  </button>
+  </>
+  return open ? <button className="summary-row" onClick={() => open(entry)}>{content}</button> :
+    <div className="summary-row">{content}</div>
 }
 
-export function Overview({ data, open, update, busy, today }: {
-  data: Data; open: (entry: Entry) => void; update: (change: (value: Preferences) => Preferences) => void; busy: boolean; today: string
+export type WidgetView = Exclude<Widget, 'today'>
+const empty = { today: 'На сегодня ничего не запланировано', tasks: 'Ближайших дел нет', payments: 'Предстоящих платежей нет',
+  projects: 'Активных проектов нет', recent: 'Здесь появятся ваши карточки', favorites: 'Отметьте звёздочкой нужную ссылку' }
+
+function widgetRows(data: Data, today: string, widget: Widget, limit?: number): { entry: Entry; detail?: string; ratio?: number }[] {
+  const matches = (kind: 'task' | 'payment', after: string) => upcoming(data, kind, after, limit ?? Infinity)
+  switch (widget) {
+    case 'today': return dayEntries(data, today).filter(entry => cardStatus(entry) !== 'done').slice(0, limit).map(entry => ({
+      entry, detail: [firstValue(entry, 'time'), kindName[kindOf(data, entry)]].filter(Boolean).join(' · '),
+    }))
+    case 'tasks': return matches('task', shiftDay(today, 1)).map(({ entry, day }) => ({ entry, detail: shortDate(day) }))
+    case 'payments': return matches('payment', today).map(({ entry, day }) => {
+      const value = firstValue(entry, 'amount')
+      return { entry, detail: [shortDate(day), value && value.replace('.', ',') + ' ₽'].filter(Boolean).join(' · ') }
+    })
+    case 'projects': return data.entries.filter(entry => kindOf(data, entry) === 'project' && cardStatus(entry) !== 'done')
+      .slice(0, limit).map(entry => ({ entry, ratio: progress(entry), detail: firstValue(entry, 'date') ? shortDate(firstValue(entry, 'date')) : 'Проект' }))
+    case 'recent': return [...data.entries].sort((a, b) => b.updated.localeCompare(a.updated)).slice(0, limit).map(entry => ({ entry }))
+    case 'favorites': return data.entries.filter(entry => kindOf(data, entry) === 'link' && entry.favorite).slice(0, limit)
+      .map(entry => ({ entry, detail: firstValue(entry, 'link') }))
+  }
+}
+
+export function WidgetSection({ data, today, widget, open }: {
+  data: Data; today: string; widget: WidgetView; open: (entry: Entry) => void
+}) {
+  const rows = widgetRows(data, today, widget)
+  return <section className="widget">
+    {rows.length ? <div className="summary-list">{rows.map(row => <Row key={row.entry.id} data={data} open={open} {...row} />)}</div> :
+      <p className="widget-empty">{empty[widget]}</p>}
+  </section>
+}
+
+export function Overview({ data, open, navigate, update, busy, today }: {
+  data: Data; open: (entry: Entry) => void; navigate: (widget: WidgetView) => void;
+  update: (change: (value: Preferences) => Preferences) => void; busy: boolean; today: string
 }) {
   const [configure, setConfigure] = useState(false)
   const prefs = preferences(data)
-  const rows: Record<Widget, { entry: Entry; detail?: string; ratio?: number }[]> = {
-    today: dayEntries(data, today).filter(entry => cardStatus(entry) !== 'done').slice(0, 4).map(entry => ({
-      entry, detail: [firstValue(entry, 'time'), kindName[kindOf(data, entry)]].filter(Boolean).join(' · '),
-    })),
-    tasks: upcoming(data, 'task', shiftDay(today, 1), 4).map(({ entry, day }) => ({ entry, detail: shortDate(day) })),
-    payments: upcoming(data, 'payment', today, 4).map(({ entry, day }) => {
-      const value = firstValue(entry, 'amount')
-      return { entry, detail: [shortDate(day), value && value.replace('.', ',') + ' ₽'].filter(Boolean).join(' · ') }
-    }),
-    projects: data.entries.filter(entry => kindOf(data, entry) === 'project' && cardStatus(entry) !== 'done').slice(0, 4).map(entry => ({
-      entry, ratio: progress(entry), detail: firstValue(entry, 'date') ? shortDate(firstValue(entry, 'date')) : 'Проект',
-    })),
-    recent: [...data.entries].sort((a, b) => b.updated.localeCompare(a.updated)).slice(0, 4).map(entry => ({ entry })),
-    favorites: data.entries.filter(entry => kindOf(data, entry) === 'link' && entry.favorite).slice(0, 4)
-      .map(entry => ({ entry, detail: firstValue(entry, 'link') })),
-  }
-  const empty = { today: 'На сегодня ничего не запланировано', tasks: 'Ближайших дел нет', payments: 'Предстоящих платежей нет',
-    projects: 'Активных проектов нет', recent: 'Здесь появятся ваши карточки', favorites: 'Отметьте звёздочкой нужную ссылку' }
   const visible = prefs.order.filter(widget => !prefs.hidden.includes(widget))
   return <>
     <div className="overview-toolbar">
@@ -49,10 +67,12 @@ export function Overview({ data, open, update, busy, today }: {
     </div>
     <div className="overview-grid">{visible.map(widget => {
       const Icon = icons[widget]
+      const rows = widgetRows(data, today, widget, 4)
       return <section className={`widget widget-${widget}`} key={widget}>
         <header><span className="widget-icon"><Icon size={19} /></span><h2>{widgetNames[widget]}</h2></header>
-        {rows[widget].length ? <div className="summary-list">{rows[widget].map(row => <Row key={row.entry.id} data={data} open={open} {...row} />)}</div> :
+        {rows.length ? <div className="summary-list">{rows.map(row => <Row key={row.entry.id} data={data} open={widget === 'today' ? open : undefined} {...row} />)}</div> :
           <p className="widget-empty">{empty[widget]}</p>}
+        {widget !== 'today' && <button className="widget-open" aria-label={widgetNames[widget]} onClick={() => navigate(widget)} />}
       </section>
     })}</div>
     {!visible.length && <p className="empty">Все виджеты скрыты. Откройте настройки виджетов, чтобы вернуть их.</p>}

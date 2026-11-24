@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test'
+import { chromium, expect, test, type Page } from '@playwright/test'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { exportBackup } from '../src/backup'
@@ -71,6 +71,7 @@ test('вложенные папки, автосохранение, вложен�
   await importText(page, backup)
   await page.getByRole('button', { name: 'Подтвердить' }).click()
   await expect(page.getByRole('heading', { name: 'Обзор' })).toBeVisible()
+  await page.getByRole('button', { name: 'Недавние карточки', exact: true }).click()
   await page.getByRole('button', { name: /Договор поставки/ }).click()
   const filePromise = page.waitForEvent('download')
   await page.getByRole('button', { name: 'Скачать delivery.txt' }).click()
@@ -161,6 +162,7 @@ test('устаревший редактор не перезаписывает з
   const original = saveEntry(seed(), { ...createCard('note', 'notes'), title: 'Исходная заметка' })
   await importText(page, await exportBackup(original))
   await page.getByRole('button', { name: 'Подтвердить' }).click()
+  await page.getByRole('button', { name: 'Недавние карточки', exact: true }).click()
   await page.getByRole('button', { name: /Исходная заметка/ }).click()
   await expect(page.getByLabel('Название')).toHaveValue('Исходная заметка')
 
@@ -169,11 +171,121 @@ test('устаревший редактор не перезаписывает з
   const replacement = { ...original, entries: [{ ...original.entries[0], title: 'Восстановленная заметка' }] }
   await importText(second, await exportBackup(replacement))
   await second.getByRole('button', { name: 'Подтвердить' }).click()
+  await second.getByRole('button', { name: 'Недавние карточки', exact: true }).click()
   await expect(second.getByRole('button', { name: /Восстановленная заметка/ })).toBeVisible()
 
   await page.getByLabel('Название').fill('Правка из старого окна')
   await expect(page.getByRole('alert')).toHaveText('База заменена в другой вкладке. Откройте карточку заново.')
   await page.reload()
+  await page.getByRole('button', { name: 'Недавние карточки', exact: true }).click()
   await expect(page.getByRole('button', { name: /Восстановленная заметка/ })).toBeVisible()
   await expect(page.getByRole('button', { name: /Правка из старого окна/ })).toHaveCount(0)
+})
+
+test('пять виджетов открывают полные разделы по нажатию на фон и строки', async ({ page }) => {
+  await page.clock.setFixedTime(new Date('2026-11-23T10:00:00Z'))
+  await page.goto('/')
+  await importText(page, await exportBackup(demo()))
+  await page.getByRole('button', { name: 'Подтвердить' }).click()
+  for (const [heading, row] of [
+    ['Ближайшие дела', 'Проверить смету на декабрь'],
+    ['Предстоящие платежи', 'Домашний интернет'],
+    ['Активные проекты', 'Обновить рабочее место'],
+    ['Недавние карточки', 'Подготовить материалы встречи'],
+    ['Избранные ссылки', 'Расписание поездов'],
+  ]) {
+    const widget = page.getByRole('button', { name: heading, exact: true })
+    await widget.click({ position: { x: 24, y: 8 } })
+    await expect(page.getByRole('heading', { name: heading, level: 1 })).toBeVisible()
+    await page.getByRole('button', { name: new RegExp(row) }).click()
+    await expect(page.getByLabel('Название')).toHaveValue(row)
+    await page.getByRole('button', { name: 'Закрыть', exact: true }).click()
+    await nav(page, 'Обзор').click()
+  }
+  const payment = page.locator('.widget-payments').getByText('Домашний интернет', { exact: true })
+  await payment.scrollIntoViewIfNeeded()
+  const rect = (await payment.boundingBox())!
+  await page.mouse.click(rect.x + rect.width / 2, rect.y + rect.height / 2)
+  await expect(page.getByRole('heading', { name: 'Предстоящие платежи', level: 1 })).toBeVisible()
+})
+
+test('Готово повторяет неудачное автосохранение и сохраняет все данные платежа', async ({ page }) => {
+  await page.addInitScript(() => {
+    const original = IDBObjectStore.prototype.put
+    let first = true
+    IDBObjectStore.prototype.put = function (...args) {
+      if (first && args[1] === 'data' && args[0]?.entries?.length) {
+        first = false
+        // Leave the transaction pending so "Готово" is pressed before it aborts.
+        const xhr = this.get('data')
+        const until = performance.now() + 5000
+        const wait = () => {
+          if (document.querySelector('form[inert]') || performance.now() > until) this.transaction.abort()
+          else this.get('data').onsuccess = wait
+        }
+        xhr.onsuccess = wait
+        return xhr
+      }
+      return original.apply(this, args)
+    }
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Новая карточка' }).click()
+  await page.getByRole('button', { name: 'Заметка', exact: true }).click()
+  await page.getByLabel('Тип карточки').selectOption('payment')
+  await page.getByLabel('Папка', { exact: true }).selectOption('finance')
+  await page.getByLabel('Название').fill('Проверка платежа')
+  await page.getByLabel('Сумма (₽)').fill('1500,25')
+  await page.getByRole('dialog').locator('input[type=date]').fill('2027-01-15')
+  await page.getByText('Свойства карточки', { exact: true }).click()
+  await page.getByLabel('Категория').fill('Связь')
+  await page.getByLabel('Операция').selectOption('income')
+  await page.getByLabel('Повтор').selectOption('monthly')
+  await expect(page.getByText('Сохранение…', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Готово', exact: true }).click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await page.reload()
+  await nav(page, 'Финансы').click()
+  await page.getByRole('button', { name: 'Редактировать «Проверка платежа»' }).click()
+  await expect(page.getByLabel('Название')).toHaveValue('Проверка платежа')
+  await expect(page.getByLabel('Тип карточки')).toHaveValue('payment')
+  await expect(page.getByLabel('Папка', { exact: true })).toHaveValue('finance')
+  await expect(page.getByLabel('Сумма (₽)')).toHaveValue('1500.25')
+  await expect(page.getByRole('dialog').locator('input[type=date]')).toHaveValue('2027-01-15')
+  await page.getByText('Свойства карточки', { exact: true }).click()
+  await expect(page.getByLabel('Категория')).toHaveValue('Связь')
+  await expect(page.getByLabel('Операция')).toHaveValue('income')
+  await expect(page.getByLabel('Повтор')).toHaveValue('monthly')
+})
+
+test('все типы карточек сохраняют выбранную папку при перезапуске браузера', async ({ baseURL }, testInfo) => {
+  const types = ['project', 'task', 'payment', 'purchase', 'note', 'document', 'link'] as const
+  const profile = testInfo.outputPath('browser-profile')
+  const launch = () => chromium.launchPersistentContext(profile, { baseURL, executablePath: process.env.POMOGATOR_CHROMIUM })
+  const first = await launch()
+  try {
+    const page = first.pages()[0]
+    await page.goto('/')
+    for (const type of types) {
+      await nav(page, 'Финансы').click()
+      await page.getByRole('button', { name: 'Новая карточка' }).click()
+      await page.getByLabel('Тип карточки').selectOption(type)
+      await page.getByLabel('Папка', { exact: true }).selectOption('notes')
+      await page.getByLabel('Название').fill('Перезапуск ' + type)
+      await page.getByRole('button', { name: 'Готово', exact: true }).click()
+      await expect(page.getByRole('dialog')).toHaveCount(0)
+    }
+  } finally { await first.close() }
+  const second = await launch()
+  try {
+    const page = second.pages()[0]
+    await page.goto('/')
+    await nav(page, 'Заметки').click()
+    for (const type of types) {
+      await page.getByRole('button', { name: 'Редактировать «Перезапуск ' + type + '»', exact: true }).click()
+      await expect(page.getByLabel('Тип карточки')).toHaveValue(type)
+      await expect(page.getByLabel('Папка', { exact: true })).toHaveValue('notes')
+      await page.getByRole('button', { name: 'Закрыть', exact: true }).click()
+    }
+  } finally { await second.close() }
 })

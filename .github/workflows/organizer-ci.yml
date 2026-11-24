@@ -1,6 +1,8 @@
 name: ПОМОГАТОР — проверка органайзера
 
 on:
+  push:
+    branches: [organizer-v0.2-fixes]
   pull_request:
     paths:
       - 'src/**'
@@ -38,4 +40,39 @@ jobs:
           path: |
             dist/
             screenshots/
+          if-no-files-found: error
+
+  windows-package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+          cache: false
+      - run: npm ci
+      - run: npm run build -- --base=./
+      - name: Build the Windows x64 launcher
+        shell: pwsh
+        run: |
+          Copy-Item dist windows/organizer/dist -Recurse
+          New-Item -Type Directory package | Out-Null
+          $env:GOARCH = 'amd64'
+          $env:CGO_ENABLED = '0'
+          go build -trimpath -o package/Pomogator.exe windows/organizer/main.go
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item windows/organizer/README.md package/
+      - run: npx playwright install chromium
+      - name: Test the packaged Windows executable
+        run: npm run test:e2e
+        env:
+          POMOGATOR_TEST_EXE: package/Pomogator.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Pomogator-organizer-win-x64-test
+          path: package/
           if-no-files-found: error

@@ -212,6 +212,7 @@ main { padding-top: 1.25rem; }
 .widget-favorites .widget-icon { background: #efc77530; color: #ffe1a0; }
 .widget-empty { color: var(--muted); padding: .35rem 0 .6rem; font-size: .9rem; }
 .summary-row {
+  display: inline-flex; align-items: center;
   padding: .65rem .35rem; min-height: 51px; width: 100%; gap: .5rem; justify-content: space-between;
   border: 0; border-radius: 7px; background: transparent; overflow-wrap: anywhere;
 }
@@ -334,4 +335,9 @@ summary { cursor: pointer; padding-block: .45rem; color: #c8d6df; }
 }
 @media (prefers-reduced-motion: reduce) {
   button { transition: none; }
+}
+
+.overview-grid > .widget { position: relative; }
+.widget-open, .widget-open:hover:not(:disabled) {
+  position: absolute; inset: 0; width: 100%; border: 0; border-radius: inherit; background: transparent;
 }
