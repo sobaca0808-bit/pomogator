@@ -392,6 +392,14 @@ Test("sing-box matches only Windows socket errors to the actual VPN peer and kee
     Assert(subject.Started && denial.Length == 1 && events.Single().Contains("WinSock 10013") &&
         !events.Single().Contains("192.0.2.7") && subject.Take(out _).Length == 0);
 });
+Test("Report a lost TUN before probe errors and classify a core crash without raw text", () => {
+    var diagnostic = new SingBoxDiagnostic(IPAddress.Parse("192.0.2.7"), 443);
+    diagnostic.Read("fatal error: fixture-token-impossible-to-repeat");
+    Assert(diagnostic.Termination == "авария среды выполнения Go" && diagnostic.Take(out _).Length == 0);
+    var probe = new TunProbe(true, "cache returned IPv4", 7);
+    var checks = new TunChecks(probe, probe, probe, SessionFailure: "Канал помощника TUN закрылся.");
+    Assert(!checks.Success && checks.FailedStage.Contains("TUN") && checks.Failure.Contains("закрылся"));
+});
 Test("Only the authenticated diagnostic inlet can reach the pinned destination", () => {
     var endpoint = new TunControlEndpoint(34004, "fixture-user", "fixture-password", "1.1.1.1", 443);
     using var config = JsonDocument.Parse(TunConfig.Engine(Guid.NewGuid(), IPAddress.Parse("203.0.113.71"), IPAddress.Parse("192.0.2.31"), "Fixture uplink",

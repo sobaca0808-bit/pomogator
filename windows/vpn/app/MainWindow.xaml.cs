@@ -357,6 +357,8 @@ public partial class MainWindow : Window
                 tunStage = "проверка DNS и HTTPS";
                 Detail.Text = "Проверяем HTTPS и DNS через Wintun sing-box…";
                 tunChecks = await TunConnectivity.Run(tun, source.Token);
+                if (tunChecks.After is { } checkedState)
+                    tunObservation = checkedState with { WaitedMilliseconds = tunObservation?.WaitedMilliseconds ?? 0 };
                 Connection.Record(Check.Https, tunChecks.Https.Success ? CheckResult.Passed : CheckResult.Failed);
                 foreach (var line in tunChecks.Lines()) AddLog(line);
                 if (!tunChecks.Success)
@@ -439,7 +441,7 @@ public partial class MainWindow : Window
             lastCheck = DateTimeOffset.Now;
             if (tunMode)
             {
-                if (tun is { } session && !session.Running)
+                if (tun is { } session)
                     tunEngineNote = await session.ReadEngineStop() ?? tunEngineNote;
                 tunEnd = Explain(error);
             }
@@ -597,11 +599,11 @@ public partial class MainWindow : Window
             if (tun is { } active)
             {
                 var found = TunWindows.Observe(active.Record);
-                if (!active.Running || !found.Ready ||
+                if (!active.Running || active.ReplyChannelClosed || !found.Ready ||
                     !TunWindows.Same(active.Record.Before, TunWindows.Capture(IPAddress.Parse(active.Record.Peer))))
                 {
                     tunObservation = found with { WaitedMilliseconds = tunObservation?.WaitedMilliseconds ?? 0 };
-                    var helperStopped = !active.Running;
+                    var helperStopped = !active.Running || active.ReplyChannelClosed;
                     tunStage = helperStopped ? "контроль работы sing-box TUN" : "контроль интерфейса, DNS и маршрутов";
                     if (helperStopped)
                     {
@@ -609,7 +611,7 @@ public partial class MainWindow : Window
                         if (tun != active) return;
                         tunEngineNote = reason;
                     }
-                    Stop(true, (helperStopped ? "Помощник TUN завершился." :
+                    Stop(true, (helperStopped ? tunEngineNote ?? "Помощник TUN завершился." :
                         found.Failure ?? "Состояние исходного интерфейса изменилось.") + " Повторите подключение.");
                     return;
                 }
@@ -687,6 +689,8 @@ public partial class MainWindow : Window
                 var latest = await TunConnectivity.Run(session, token);
                 if (token.IsCancellationRequested || core != process) return;
                 tunChecks = latest;
+                if (latest.After is { } checkedState)
+                    tunObservation = checkedState with { WaitedMilliseconds = tunObservation?.WaitedMilliseconds ?? 0 };
                 tunHttps = latest.Https.Success;
                 result = latest.Success ? TimeSpan.FromMilliseconds(latest.Https.Milliseconds) : null;
                 if (!latest.Success) tunFailure = latest.Failure;

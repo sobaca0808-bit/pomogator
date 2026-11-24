@@ -22,6 +22,7 @@ internal static class TunControlProbe
                 throw new HttpRequestException("Unexpected control destination.");
             if (!WindowsLifetime.OwnsLoopback(endpoint.Port, pid))
                 throw new IOException("The TUN engine no longer owns the control listener.");
+            observe?.Invoke("control listener verified");
 
             var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
             try

@@ -99,6 +99,9 @@ internal static class TunWindows
             Uplink: record.Before.Uplink, ExpectedDns: record.InstalledDns);
         try
         {
+            observation = observation with { PeerRoute = Index(IPAddress.Parse(record.Peer)),
+                ResolverRoute = Index(IPAddress.Parse(record.InstalledDns)),
+                InternetRoute = Index(publicProbe ?? IPAddress.Parse(TunConfig.InternetProbe)) };
             var adapter = Find(record.Id);
             if (adapter == null) return observation;
             observation = observation with { Status = adapter.OperationalStatus };
@@ -110,9 +113,6 @@ internal static class TunWindows
                 Ipv4 = addresses.Select(item => item.Address + "/" + item.PrefixLength).ToArray(), AddressState = address == null ? null :
                 $"/{address.PrefixLength}, {address.DuplicateAddressDetectionState}",
                 AddressReady = address is { PrefixLength: TunConfig.PrefixLength, DuplicateAddressDetectionState: DuplicateAddressDetectionState.Preferred } };
-            observation = observation with { PeerRoute = Index(IPAddress.Parse(record.Peer)),
-                ResolverRoute = Index(IPAddress.Parse(record.InstalledDns)),
-                InternetRoute = Index(publicProbe ?? IPAddress.Parse(TunConfig.InternetProbe)) };
             return observation with { Dns = properties.DnsAddresses.Select(ip => ip.ToString()).ToArray() };
         }
         catch (Exception error) when (error is NetworkInformationException or SocketException)

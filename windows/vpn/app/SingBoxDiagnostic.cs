@@ -12,6 +12,8 @@ internal sealed class SingBoxDiagnostic(IPAddress peer, int port)
     private readonly Dictionary<int, int> counts = new();
     private int started;
     internal bool Started => Volatile.Read(ref started) != 0;
+    private string? termination;
+    internal string? Termination => Volatile.Read(ref termination);
     private DateTimeOffset? firstDenial;
     private DateTimeOffset? lastDenial;
     private static readonly (int Code, string Pattern)[] SocketErrors = [
@@ -23,6 +25,10 @@ internal sealed class SingBoxDiagnostic(IPAddress peer, int port)
     internal void Read(string line)
     {
         if (line.Contains("sing-box started", StringComparison.OrdinalIgnoreCase)) Volatile.Write(ref started, 1);
+        if (line.StartsWith("panic:", StringComparison.Ordinal) || line.StartsWith("fatal error:", StringComparison.Ordinal))
+            Volatile.Write(ref termination, "авария среды выполнения Go");
+        else if (line.StartsWith("Exception 0x", StringComparison.Ordinal))
+            Volatile.Write(ref termination, "исключение Windows в процессе ядра");
         if (!peerEndpoint.IsMatch(line) || !line.Contains("connectex", StringComparison.OrdinalIgnoreCase)) return;
         foreach (var (code, pattern) in SocketErrors)
         {

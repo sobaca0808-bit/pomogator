@@ -33,6 +33,7 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
     internal TunControlEndpoint? Control { get; private set; }
     internal TunRecovery Record { get; } = record;
     internal bool Running => helper is { HasExited: false };
+    internal bool ReplyChannelClosed => stopNotice?.IsCompleted == true;
 
     private static string PipeName(Guid id) => "PomogatorTun-" + id.ToString("N");
 
@@ -120,7 +121,8 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
             while (true)
             {
                 var reply = await Read<TunReply>(channel, CancellationToken.None);
-                if (reply.Sequence == 0) return reply.EngineNote;
+                if (reply.Sequence == 0) return reply.Events is { Length: > 0 }
+                    ? string.Join(" ", new[] { reply.EngineNote }.Concat(reply.Events).OfType<string>()) : reply.EngineNote;
                 if (pendingSamples.TryRemove(reply.Sequence, out var sample)) sample.TrySetResult(reply.Events);
             }
         }
@@ -135,7 +137,12 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
     internal async Task<string?> ReadEngineStop()
     {
         if (stopNotice is { } pending && await Task.WhenAny(pending, Task.Delay(250)) == pending)
-            return await pending ?? EngineNote;
+        {
+            if (await pending is { } note) return note;
+            if (helper is { HasExited: true } stopped)
+                return $"Помощник TUN закрыл канал · код 0x{unchecked((uint)stopped.ExitCode):X8}.";
+            return "Канал помощника TUN закрылся без сообщения о завершении ядра.";
+        }
         return EngineNote;
     }
 
@@ -160,6 +167,7 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
         TunConsole? console = null;
         TunObservation? observation = null;
         bool launchingTun = false;
+        bool readySent = false;
         string? engineNote = null;
         try
         {
@@ -186,7 +194,7 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
                 profile.Security is not ("tls" or "reality") || profile.Id == Guid.Empty || profile.Port is < 1 or > 65535) return 1;
             var diagnostic = new SingBoxDiagnostic(peer, profile.Port);
             if (!IPAddress.TryParse(record.Before.SourceIpv4, out var source) || !record.Before.HasSource(source))
-                throw new VpnError("Не подтверждён исходный IPv4 для подключения Xray. TUN не запущен.");
+                throw new VpnError("Не подтверждён исходный IPv4 для соединения sing-box. TUN не запущен.");
             if (!TunWindows.Vacant(record) || TunWindows.OtherVpn() || SystemProxy.AnyInUse() ||
                 !TunWindows.MatchesBaseline(request.Before, TunWindows.Capture(peer)))
                 throw new VpnError("Перед запуском изменился рабочий интерфейс или появился другой VPN. Настройки не применены.");
@@ -210,8 +218,10 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
             var wait = TunReadiness.Wait(() =>
             {
                 var state = TunWindows.Observe(record);
-                return observation = state.Ready && !diagnostic.Started
-                    ? state with { ErrorCode = "TUN_ENGINE_NOT_READY" } : state;
+                if (state.Ready && !diagnostic.Started) state = state with { ErrorCode = "TUN_ENGINE_NOT_READY" };
+                if (state.Ready && !WindowsLifetime.OwnsLoopback(controlPort, engine.ProcessId))
+                    state = state with { ErrorCode = "TUN_CONTROL_NOT_READY" };
+                return observation = state;
             },
                 () => engine.Running, TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(300), alive.Token);
             if (await Task.WhenAny(wait, runtime) == runtime) alive.Cancel();
@@ -222,38 +232,9 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
                 throw new VpnError(failure);
             }
             await Send(channel, new TunReply(true, "", observation, EnginePid: engine.ProcessId, Control: control), boot.Token);
-            Task<string[]>? wfp = null;
-            while (engine.Running)
-            {
-                if (await Task.WhenAny(runtime, Task.Delay(250)) != runtime) continue;
-                if (!runtime.IsCompletedSuccessfully || runtime.Result <= 0) return 0;
-                var events = diagnostic.Take(out var denials);
-                if (denials.Length > 0)
-                {
-                    var evidence = new[] { "WFP · предыдущее чтение ещё выполняется." };
-                    if (wfp == null || wfp.IsCompleted)
-                    {
-                        wfp = Task.Run(() =>
-                        {
-                            try { return TunWfpDiagnostic.Read(image, peer, profile.Port, source, denials); }
-                            catch (Exception error) { return [$"WFP · чтение не завершено · код 0x{error.HResult:X8}."]; }
-                        });
-                        evidence = await Task.WhenAny(wfp, Task.Delay(750)) == wfp ? await wfp :
-                            ["WFP · истекло время ожидания чтения."];
-                    }
-                    events = events.Concat(evidence).ToArray();
-                }
-                using var notice = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-                await Send(channel, new TunReply(true, "", Sequence: runtime.Result, Events: events), notice.Token);
-                runtime = Read<int>(channel, CancellationToken.None);
-            }
-            if (!runtime.IsCompleted && engine.ExitCode is { } exit)
-            {
-                engineNote = EngineExit(exit);
-                using var notice = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-                await Send(channel, new TunReply(false, "", EngineNote: engineNote), notice.Token);
-            }
-            return 0;
+            readySent = true;
+            return await RunRuntime(channel, runtime, engine, diagnostic,
+                denials => TunWfpDiagnostic.Read(image, peer, profile.Port, source, denials));
         }
         catch (Exception error)
         {
@@ -264,7 +245,9 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
                     var message = launchingTun && engine == null && error is VpnError ?
                         "sing-box не завершил запуск Wintun. Подробности в отчёте." :
                         error is VpnError ? error.Message : "Windows отклонила TUN. Код 0x" + error.HResult.ToString("X8") + ".";
-                    await Send(channel, new TunReply(false, message, observation, engineNote), boot.Token);
+                    using var notice = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                    var note = readySent ? $"Помощник TUN остановлен при обмене данными · код 0x{error.HResult:X8}." : engineNote;
+                    await Send(channel, new TunReply(false, message, observation, note), notice.Token);
                 }
             }
             catch { }
@@ -292,12 +275,61 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
         }
     }
 
+    internal static async Task<int> RunRuntime(Stream channel, Task<int> request, Xray engine,
+        SingBoxDiagnostic diagnostic, Func<TunDialDenial[], string[]> readWfp)
+    {
+        using var monitoring = new CancellationTokenSource();
+        var exited = engine.WaitForExitAsync(monitoring.Token);
+        Task<string[]>? wfp = null;
+        try
+        {
+            while (await Task.WhenAny(exited, request) == request && engine.Running)
+            {
+                int sequence;
+                try { sequence = await request; }
+                catch (EndOfStreamException) { return 0; }
+                if (sequence <= 0) throw new IOException();
+                var events = diagnostic.Take(out var denials);
+                if (denials.Length > 0)
+                {
+                    var evidence = new[] { "WFP · предыдущее чтение ещё выполняется." };
+                    if (wfp == null || wfp.IsCompleted)
+                    {
+                        wfp = Task.Run(() =>
+                        {
+                            try { return readWfp(denials); }
+                            catch (Exception error) { return [$"WFP · чтение не завершено · код 0x{error.HResult:X8}."]; }
+                        });
+                        evidence = await Task.WhenAny(wfp, exited, Task.Delay(750)) == wfp ? await wfp :
+                            ["WFP · чтение не завершилось за отведённое время."];
+                    }
+                    events = events.Concat(evidence).ToArray();
+                }
+                await Reply(new TunReply(true, "", Sequence: sequence, Events: events));
+                request = Read<int>(channel, CancellationToken.None);
+            }
+
+            await exited;
+            var note = EngineExit(engine.ExitCode.GetValueOrDefault());
+            if (diagnostic.Termination is { } termination) note += " " + termination + ".";
+            await Reply(new TunReply(false, "", EngineNote: note, Events: diagnostic.Take(out _)));
+            return 1;
+        }
+        finally { monitoring.Cancel(); }
+
+        async Task Reply(TunReply reply)
+        {
+            using var notice = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            await Send(channel, reply, notice.Token);
+        }
+    }
+
     private static string EngineExit(int code) => $"sing-box завершился · код 0x{unchecked((uint)code):X8}.";
 
     private static TunControlEndpoint PrivateControl(int port) => new(port, "pomogator",
         Convert.ToHexString(RandomNumberGenerator.GetBytes(24)), TunConfig.InternetProbe, 443);
 
-    private static async Task Send<T>(Stream socket, T message, CancellationToken token)
+    internal static async Task Send<T>(Stream socket, T message, CancellationToken token)
     {
         var data = JsonSerializer.SerializeToUtf8Bytes(message);
         try
@@ -312,7 +344,7 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
         finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(data); }
     }
 
-    private static async Task<T> Read<T>(Stream socket, CancellationToken token)
+    internal static async Task<T> Read<T>(Stream socket, CancellationToken token)
     {
         var header = new byte[4];
         await socket.ReadExactlyAsync(header, token);

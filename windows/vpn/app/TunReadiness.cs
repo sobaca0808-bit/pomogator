@@ -13,6 +13,7 @@ internal sealed record TunObservation(Guid Id, string Alias, OperationalStatus? 
 
     internal string? Failure => ErrorCode == "TUN_XRAY_EXITED" ? "Ядро TUN завершилось во время ожидания Wintun." :
         ErrorCode == "TUN_ENGINE_NOT_READY" ? "Сетевое ядро не подтвердило завершение запуска TUN и фильтров." :
+        ErrorCode == "TUN_CONTROL_NOT_READY" ? "Windows не подтвердила, что контрольный локальный порт принадлежит sing-box." :
         ErrorCode == "TUN_NO_SNAPSHOT" ? "Ожидание Wintun не дошло до снимка параметров Windows." :
         ErrorCode != null ? "Windows не прочитала параметры Wintun. Код " + ErrorCode + "." :
         Status == null ? "Windows не показала ожидаемый интерфейс Wintun." :

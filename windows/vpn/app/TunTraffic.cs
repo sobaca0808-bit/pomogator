@@ -1,17 +1,8 @@
-using System.IO;
-
 namespace Pomogator.Vpn;
 
 internal sealed record TunTrafficSample(TunPacketSample? Windows, TunXraySample? Xray)
 {
-    internal static async Task<TunTrafficSample> Capture(Guid id, int port, int pid, CancellationToken token)
-    {
-        var windows = TunPacketCounters.Read(id);
-        var xray = await TunXrayCounters.Read(Path.Combine(AppContext.BaseDirectory, "xray.exe"), port, pid, token);
-        return new TunTrafficSample(windows, xray);
-    }
-
-    internal IEnumerable<string> Describe(string phase, TunTrafficSample earlier, bool explainFailure = true)
+    internal IEnumerable<string> Describe(string phase, TunTrafficSample earlier, bool explainFailure = true, bool includeXray = true)
     {
         var sent = Difference(Windows?.SentByWindows, earlier.Windows?.SentByWindows);
         var received = Difference(Windows?.ReceivedByWindows, earlier.Windows?.ReceivedByWindows);
@@ -24,8 +15,9 @@ internal sealed record TunTrafficSample(TunPacketSample? Windows, TunXraySample?
             $"{Format(Difference(Windows?.InputDiscards, earlier.Windows?.InputDiscards))}; " +
             $"ошибки TX/RX: {Format(Difference(Windows?.OutputErrors, earlier.Windows?.OutputErrors))}/" +
             $"{Format(Difference(Windows?.InputErrors, earlier.Windows?.InputErrors))}.";
-        yield return $"{phase} · байты полезной нагрузки Xray TUN ↑/↓: {Format(tunUp)}/{Format(tunDown)}; " +
-            $"байты транспорта VLESS ↑/↓: {Format(vpnUp)}/{Format(vpnDown)}.";
+        if (includeXray)
+            yield return $"{phase} · байты полезной нагрузки Xray TUN ↑/↓: {Format(tunUp)}/{Format(tunDown)}; " +
+                $"байты транспорта VLESS ↑/↓: {Format(vpnUp)}/{Format(vpnDown)}.";
         if (!explainFailure) yield break;
         var indication = sent == 0 ? "Windows не зарегистрировала исходящие пакеты на Wintun." :
             tunUp == 0 && sent > 0 ? "Wintun видел исходящие пакеты, полезная нагрузка на входе Xray не зарегистрирована." :

@@ -16,6 +16,7 @@ public sealed class Xray : IDisposable
     public int ProcessId => process.Id;
     public bool Running => !disposed && !process.HasExited;
     public int? ExitCode => !disposed && process.HasExited ? process.ExitCode : null;
+    public Task WaitForExitAsync(CancellationToken token) => process.WaitForExitAsync(token);
 
     private Xray(Process process, int port, Func<int, int, bool>? ownsPort)
     { this.process = process; Port = port; this.ownsPort = ownsPort; }

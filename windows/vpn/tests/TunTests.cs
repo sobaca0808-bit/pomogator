@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
+using System.IO.Pipes;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Security;
@@ -407,11 +408,12 @@ internal static class NativeTunTests
             dns.ToString(), new { type = "tcp", tag = "private-dns", server = dns.ToString(), detour = "vpn" });
         using var console = new TunConsole();
         Process? process = null;
+        var diagnostic = new SingBoxDiagnostic(uplink, upstreamPort);
         IDisposable Track(Process child) { process = child; return WindowsLifetime.Attach(child); }
         async Task<Xray> Start()
         {
             Require(TunWindows.Vacant(record), "sing-box test adapter still exists.");
-            var diagnostic = new SingBoxDiagnostic(uplink, upstreamPort);
+            diagnostic = new SingBoxDiagnostic(uplink, upstreamPort);
             var engine = await Xray.StartAsync(executable, config, port, token, Track, WindowsLifetime.OwnsLoopback,
                 inheritConsole: true, startupSeconds: 24, diagnosticLine: diagnostic.Read);
             try
@@ -442,6 +444,18 @@ internal static class NativeTunTests
                 sent.EnsureSuccessStatusCode();
                 Require((await sent.Content.ReadAsByteArrayAsync(token)).SequenceEqual(output), "sing-box HTTPS payload changed.");
                 await response;
+                var loopback = AnswerHttps(webServer, cert, host, input, output, token);
+                using var controlBody = new ByteArrayContent(input);
+                using (var controlHttp = TunControlProbe.Client(control, active.ProcessId, host, (_, candidate, _, errors) =>
+                    candidate?.GetCertHashString() == cert.Thumbprint && (errors & SslPolicyErrors.RemoteCertificateNameMismatch) == 0))
+                using (var confirmed = await ReceiveControl(controlHttp, new Uri($"https://{host}:{webPort}/fixture"),
+                    controlBody, loopback, token))
+                {
+                    confirmed.EnsureSuccessStatusCode();
+                    Require((await confirmed.Content.ReadAsByteArrayAsync(token)).SequenceEqual(output),
+                        "The control inlet of the live sing-box TUN did not reach the fixture through VLESS.");
+                }
+                await loopback;
                 using var dnsFixture = CancellationTokenSource.CreateLinkedTokenSource(token);
                 var answered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                 var dnsReply = AnswerDnsTcp(dnsServer, TunDns.Query(TunConnectivity.ControlName)[2..], dnsFixture.Token, answered);
@@ -467,11 +481,23 @@ internal static class NativeTunTests
         await Restore();
         using (var crashed = await Start())
         {
+            var pipeName = "PmtTunFixture-" + Guid.NewGuid().ToString("N");
+            using var server = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1,
+                PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            using var peer = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+            await Task.WhenAll(server.WaitForConnectionAsync(token), peer.ConnectAsync(token));
+            var worker = TunSession.RunRuntime(peer, TunSession.Read<int>(peer, token), crashed, diagnostic,
+                _ => throw new InvalidOperationException("The fixture did not request a WFP query."));
+            await TunSession.Send(server, 1, token);
+            var sample = await TunSession.Read<TunReply>(server, token);
+            Require(sample.Success && sample.Sequence == 1, "Worker did not answer a diagnostic request while TUN was live.");
             process!.Kill();
-            await process.WaitForExitAsync(token);
+            var stopped = await TunSession.Read<TunReply>(server, token);
+            Require(!stopped.Success && stopped.Sequence == 0 && stopped.EngineNote?.Contains("код 0x") == true &&
+                await worker == 1, "Worker did not report the sing-box exit before Wintun recovery.");
         }
         await Restore();
-        Console.WriteLine("PASS Native sing-box TUN: duplex HTTPS/VLESS, DNS interception over VLESS, IPv6 probe, graceful/crash restoration");
+        Console.WriteLine("PASS Native sing-box TUN: duplex HTTPS/VLESS, same-engine CONNECT, DNS, IPv6, crash notification and restoration");
 
         async Task Restore()
         {

@@ -17,20 +17,22 @@ internal sealed record TunProbe(bool Success, string Outcome, long Milliseconds)
 }
 
 internal sealed record TunChecks(TunProbe Resolver, TunProbe Windows, TunProbe Https, string[]? Traffic = null,
-    TunProbe? DirectPinned = null, TunProbe? SameEngine = null, TunProbe? Ipv6 = null)
+    TunProbe? DirectPinned = null, TunProbe? SameEngine = null, TunProbe? Ipv6 = null, TunObservation? After = null,
+    string? SessionFailure = null)
 {
-    internal bool Success => Resolver.Success && Windows.Success && Https.Success && Ipv6 is not { Success: false };
+    internal bool Success => SessionFailure == null && Resolver.Success && Windows.Success && Https.Success && Ipv6 is not { Success: false };
     private bool BothHttpsFailed => DirectPinned is { Success: false } && SameEngine is { Success: false } && !Https.Success;
-    internal string FailedStage => Ipv6 is { Success: false } ? "проверка защиты IPv6" : BothHttpsFailed ? "исходящий HTTPS через VLESS при активном TUN" :
+    internal string FailedStage => SessionFailure != null ? "повторная проверка состояния TUN" :
+        Ipv6 is { Success: false } ? "проверка защиты IPv6" : BothHttpsFailed ? "исходящий HTTPS через VLESS при активном TUN" :
         !Resolver.Success ? "запрос к DNS на Wintun" :
         !Windows.Success ? "системное разрешение DNS" : "HTTPS через Wintun";
-    internal string Failure => Ipv6 is { Success: false } ? "Защита IPv6 не подтверждена. Туннель остановлен." : BothHttpsFailed ?
+    internal string Failure => SessionFailure ?? (Ipv6 is { Success: false } ? "Защита IPv6 не подтверждена. Туннель остановлен." : BothHttpsFailed ?
         "Обе HTTPS-пробы по IPv4 завершились с ошибкой. Проверьте исходящий маршрут и соединение sing-box с VPN-сервером." :
         !Resolver.Success && !Windows.Success ?
         "DNS-сервер TUN и системный DNS Windows не подтвердили разрешение имени." :
         !Resolver.Success ? "DNS-сервер TUN не подтвердил ответ через виртуальный интерфейс." :
         !Windows.Success ? "DNS-сервер ответил через Wintun, но системный DNS Windows не разрешил контрольное имя." :
-        "DNS подтверждён, но контрольный HTTPS через Wintun не прошёл.";
+        "DNS подтверждён, но контрольный HTTPS через Wintun не прошёл.");
 
     internal IEnumerable<string> Lines()
     {
@@ -60,22 +62,38 @@ internal static class TunConnectivity
         PinnedHttps(validation => TunControlProbe.Client(new TunControlEndpoint(port, "", "", TunConfig.InternetProbe, 443),
             pid, TunConfig.InternetProbeHost, validation), token);
 
-    internal static Task<TunProbe> CheckControl(TunControlEndpoint endpoint, int pid, CancellationToken token) =>
-        PinnedHttps(validation => TunControlProbe.Client(endpoint, pid, TunConfig.InternetProbeHost, validation), token);
+    internal static async Task<TunProbe> CheckControl(TunControlEndpoint endpoint, int pid, CancellationToken token)
+    {
+        var stage = "проверка владельца локального порта";
+        var result = await PinnedHttps(validation => TunControlProbe.Client(endpoint, pid, TunConfig.InternetProbeHost, validation,
+            step => stage = step switch {
+                "loopback connected" => "CONNECT к локальному входу",
+                "authenticated CONNECT established" => "TLS и HTTPS после CONNECT",
+                _ => "TCP к локальному входу"
+            }), token);
+        return result.Success ? result : result with { Outcome = result.Outcome + " · этап: " + stage };
+    }
 
     internal static async Task<TunChecks> Run(TunSession session, CancellationToken token)
     {
         var record = session.Record;
-        var adapter = TunWindows.Find(record.Id) ?? throw new VpnError("Интерфейс Wintun исчез перед проверкой трафика.");
-        var index = TunWindows.Index(adapter);
-        var resolver = IPAddress.Parse(record.InstalledDns);
+        var before = TunWindows.Observe(record);
         var lines = new List<string>();
+        if (before.Failure is { } beforeFailure)
+        {
+            var skipped = new TunProbe(false, "пропущено из-за состояния TUN", 0);
+            var ended = await session.ReadEngineStop();
+            return new TunChecks(skipped, skipped, skipped, After: before,
+                SessionFailure: ended ?? beforeFailure);
+        }
+        var index = before.Index;
+        var resolver = IPAddress.Parse(record.InstalledDns);
         var ipv6 = await CheckIPv6(token);
         lines.Add(ipv6.Line("IPv6 без прокси при активном TUN"));
-        _ = await session.SampleEvents(token); // Discard events before this diagnostic interval.
-        Task<TunTrafficSample> Capture() => TunTrafficSample.Capture(record.Id, 0, session.EnginePid, token);
+        await AddEngineEvents("Перед HTTPS-пробами");
+        TunTrafficSample Capture() => new(TunPacketCounters.Read(record.Id), null);
 
-        var previous = await Capture();
+        var previous = Capture();
         // Compare the two DNS-independent probes before launching our own DNS retries.
         TunProbe? control = null;
         if (session.Control is { } endpoint)
@@ -84,8 +102,8 @@ internal static class TunConnectivity
             var trace = await ObservePeer(probe, session, token);
             control = await probe;
             lines.Add(trace);
-            var afterControl = await Capture();
-            lines.AddRange(afterControl.Describe("HTTPS локальный вход sing-box", previous, explainFailure: false));
+            var afterControl = Capture();
+            lines.AddRange(afterControl.Describe("HTTPS локальный вход sing-box", previous, explainFailure: false, includeXray: false));
             previous = afterControl;
             await AddEngineEvents("HTTPS локальный вход sing-box");
         }
@@ -93,8 +111,8 @@ internal static class TunConnectivity
 
         var pinned = await PinnedHttps(validation => TunWindows.Http(record.Id, validation,
             TunConfig.InternetProbeHost, IPAddress.Parse(TunConfig.InternetProbe)), token);
-        var afterHttps = await Capture();
-        lines.AddRange(afterHttps.Describe("HTTPS Wintun", previous, !pinned.Success));
+        var afterHttps = Capture();
+        lines.AddRange(afterHttps.Describe("HTTPS Wintun", previous, !pinned.Success, includeXray: false));
         await AddEngineEvents("HTTPS Wintun");
 
         var direct = CheckResolver(resolver, index, token);
@@ -102,8 +120,8 @@ internal static class TunConnectivity
         await Task.WhenAll(direct, windows);
         var directResult = await direct;
         var windowsResult = await windows;
-        var afterDns = await Capture();
-        lines.AddRange(afterDns.Describe("DNS", afterHttps, !directResult.Success || !windowsResult.Success));
+        var afterDns = Capture();
+        lines.AddRange(afterDns.Describe("DNS", afterHttps, !directResult.Success || !windowsResult.Success, includeXray: false));
         await AddEngineEvents("DNS");
 
         var https = pinned;
@@ -118,7 +136,11 @@ internal static class TunConnectivity
             }
             catch (VpnError) { lines.Add("Резервная HTTPS-проба · интерфейс Wintun больше недоступен."); }
         }
-        return new TunChecks(directResult, windowsResult, https, lines.ToArray(), pinned, control, ipv6);
+        var after = TunWindows.Observe(record);
+        var failure = !https.Success || !directResult.Success || session.ReplyChannelClosed
+            ? await session.ReadEngineStop() : null;
+        return new TunChecks(directResult, windowsResult, https, lines.ToArray(), pinned, control, ipv6, after,
+            failure ?? after.Failure);
 
         async Task AddEngineEvents(string phase)
         {
