@@ -1,6 +1,7 @@
 import { blocksOf, kinds, kindOf, priorities, repeatValues, states, widgets, withLegacyFields,
   type Block, type CardFields, type Widget } from './cards'
 import { icons, importData, safeLink, validAmount, validDate, type Data } from './model'
+import { readShortcuts } from './shortcuts'
 
 const object = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -118,13 +119,14 @@ export function importBackup(text: string): Data {
       seen.add(id)
     }
   }
-  if (raw.preferences === undefined) return { ...base, entries }
+  const shortcuts = raw.shortcuts === undefined ? undefined : readShortcuts(raw.shortcuts)
+  if (raw.preferences === undefined) return { ...base, entries, shortcuts }
   const prefs = raw.preferences
   const validWidgetList = (list: unknown): list is Widget[] => Array.isArray(list) &&
     list.every(item => member(widgets, item)) && new Set(list).size === list.length
   if (!object(prefs) || !validWidgetList(prefs.order) || prefs.order.length !== widgets.length ||
       !validWidgetList(prefs.hidden) || !Array.isArray(prefs.seenReminders) || !prefs.seenReminders.every(string)) throw invalid()
-  return { ...base, entries, preferences: { order: prefs.order, hidden: prefs.hidden, seenReminders: prefs.seenReminders } }
+  return { ...base, entries, shortcuts, preferences: { order: prefs.order, hidden: prefs.hidden, seenReminders: prefs.seenReminders } }
 }
 
 async function encodeBlock(block: Block) {
@@ -143,7 +145,7 @@ export async function exportBackup(data: Data): Promise<string> {
     for (const block of blocksOf(entry)) blocks.push(await encodeBlock(block))
     entries.push({ ...withLegacyFields(entry), blocks })
   }
-  return JSON.stringify({ version: 2, places: data.places, entries, preferences: data.preferences }, null, 2)
+  return JSON.stringify({ version: 2, places: data.places, entries, preferences: data.preferences, shortcuts: data.shortcuts }, null, 2)
 }
 
 export function validateBlocks(blocks: Block[]): string | undefined {

@@ -8,6 +8,8 @@ import { blocksOf, cardStatus, createCard, kindName, kinds, kindOf, preferences,
 import { Dialog, Glyph, PlaceEditor } from './editors'
 import { contents, deleteEntry, deletePlace, orderPlace, pathTo, restoreDeleted, saveEntry, savePlace, search,
   type Change, type Data, type Entry, type Place } from './model'
+import { CenterTile, MyCenter, ShortcutEditor } from './MyCenter'
+import { moveShortcut, removeShortcut, saveShortcut, type Shortcut } from './shortcuts'
 import { Calendar, Finance, Overview, WidgetSection } from './Overview'
 import { dayKey, dueReminders } from './schedule'
 import { useNavigation, type View } from './navigation'
@@ -17,6 +19,7 @@ import { openStorage, transact } from './storage'
 type Modal = { kind: 'place'; value: Place; editing: boolean } |
   { kind: 'entry'; value: Entry; editing: boolean } |
   { kind: 'quick'; day: string } |
+  { kind: 'shortcut'; value: Shortcut; previous?: Shortcut; generation?: string } |
   { kind: 'confirm'; title: string; message: string; action: Change; done?: () => void }
 const databaseName = import.meta.env.VITE_POMOGATOR_STORAGE || 'pomogator'
 const messageOf = (cause: unknown) => cause instanceof Error ? cause.message : 'Неизвестная ошибка.'
@@ -152,7 +155,7 @@ export function App() {
     try {
       const replacement = importBackup(await file.text())
       show({ kind: 'confirm', title: 'Заменить локальные данные?',
-        message: 'Разделы, карточки, вложения и настройки будут заменены содержимым файла. Для сохранения текущей базы сначала экспортируйте JSON.',
+        message: 'Разделы, карточки, ярлыки, вложения и настройки будут заменены содержимым файла. Для сохранения текущей базы сначала экспортируйте JSON.',
         action: () => ({ ...replacement, generation: crypto.randomUUID() }), done: () => { setUndo(undefined); openView('home') } })
     } catch (cause) { setError(messageOf(cause)) }
   }
@@ -168,7 +171,12 @@ export function App() {
   const children = data?.places.filter(item => item.parent === parent) ?? []
   const entries = data?.entries.filter(entry => entry.parent === parent) ?? []
   const result = data && query.trim() ? search(data, query) : undefined
-  const heading = result ? 'Результаты поиска' : view === 'home' ? 'Обзор' : view === 'calendar' ? 'Календарь' : view === 'settings' ? 'Настройки' : view === 'folders' ? place?.title ?? 'Все разделы' : widgetNames[view]
+  const heading = result ? 'Результаты поиска' : view === 'home' ? 'Обзор' : view === 'calendar' ? 'Календарь' : view === 'settings' ? 'Настройки' : view === 'center' ? 'Мой центр' : view === 'folders' ? place?.title ?? 'Все разделы' : widgetNames[view]
+
+  function editShortcut(item?: Shortcut) {
+    show({ kind: 'shortcut', previous: item, generation: data?.generation,
+      value: item ?? { id: crypto.randomUUID(), title: '', url: '', icon: 'custom' } })
+  }
 
   function newPlace(parentId: string | null) {
     show({ kind: 'place', editing: false, value: { id: crypto.randomUUID(), parent: parentId,
@@ -295,7 +303,7 @@ export function App() {
           </nav>}
           <header className="page-header">
             <div><h1>{heading}</h1>{view === 'home' && !result && <p>Один раз настроил — всё под рукой</p>}</div>
-            {!result && view !== 'settings' && <div className="actions">
+            {!result && view !== 'settings' && view !== 'center' && <div className="actions">
               {place && <button onClick={() => newPlace(parent)}><Plus size={18} /> Папка</button>}
               <button className="primary" onClick={() => {
                 if (parent) newEntry(parent)
@@ -318,7 +326,20 @@ export function App() {
               <FileText size={22} /><span><strong>{entry.title}</strong>
                 <small>{pathTo(data, entry.parent).map(part => part.title).join(' / ')}</small></span></button>)}
             {!result.places.length && !result.entries.length && <p className="empty">Совпадений не найдено</p>}
-          </div> : view === 'home' ? <Overview data={data} today={today} open={open} navigate={openView} update={updatePrefs} busy={busy} /> :
+          </div> : view === 'home' ? <>
+            <CenterTile open={() => openView('center')} />
+            <Overview data={data} today={today} open={open} navigate={openView} update={updatePrefs} busy={busy} />
+          </> :
+            view === 'center' ? <MyCenter shortcuts={data.shortcuts ?? []} busy={busy} edit={editShortcut}
+              move={(item, offset) => void commit(snapshot => moveShortcut(snapshot, item.id, offset))}
+              remove={item => {
+                const generation = data.generation
+                show({ kind: 'confirm', title: `Удалить ярлык «${item.title}»?`, message: 'Ярлык будет удалён из «Моего центра».',
+                  action: snapshot => {
+                    if (snapshot.generation !== generation) throw new Error('База заменена в другой вкладке.')
+                    return removeShortcut(snapshot, item)
+                  } })
+              }} /> :
             view === 'calendar' ? <Calendar data={data} today={today} open={open} create={day => show({ kind: 'quick', day })} /> :
             view === 'settings' ? <section className="widget app-settings">
               <label className="check-item"><input type="checkbox" checked={theme === 'light'}
@@ -359,6 +380,11 @@ export function App() {
     </Dialog>}
     {modal?.kind === 'place' && <PlaceEditor place={modal.value} close={close} guard={navigation.guard}
       busy={busy} error={modalError} save={value => void commit(snapshot => savePlace(snapshot, value, modal.editing), true)} />}
+    {modal?.kind === 'shortcut' && <ShortcutEditor key={modal.value.id} value={modal.value} editing={Boolean(modal.previous)}
+      close={close} guard={navigation.guard} busy={busy} error={modalError} save={value => void commit(snapshot => {
+        if (snapshot.generation !== modal.generation) throw new Error('База заменена в другой вкладке. Откройте ярлык заново.')
+        return saveShortcut(snapshot, value, modal.previous)
+      }, true)} />}
     {modal?.kind === 'entry' && data && <CardEditor key={modal.value.id} entry={modal.value} data={data} editing={modal.editing}
       close={close} guard={navigation.guard} child={entry => newEntry(entry.parent, entry.kind, '', entry.id)} persist={async (value, editing, revision, generation) => {
         const next = await apply(snapshot => {

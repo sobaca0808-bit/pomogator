@@ -1,3 +1,4 @@
+import type { Shortcut } from './shortcuts'
 import { blocksOf, blockStrings, kindName, kindOf, withLegacyFields, type CardFields, type Preferences } from './cards'
 
 export const icons = ['projects', 'finance', 'tasks', 'notes', 'docs', 'services', 'folder', 'star'] as const
@@ -8,7 +9,7 @@ export type Entry = CardFields & {
   checklist: { text: string; done: boolean }[]
   date: string; amount: string; created: string; updated: string
 }
-export type Data = { version: 1; places: Place[]; entries: Entry[]; preferences?: Preferences; generation?: string }
+export type Data = { version: 1; places: Place[]; entries: Entry[]; preferences?: Preferences; shortcuts?: Shortcut[]; generation?: string }
 export type Change = (data: Data) => Data
 
 const defaults = [
