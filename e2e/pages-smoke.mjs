@@ -97,11 +97,18 @@ try {
   const names = await page.evaluate(async () => (await indexedDB.databases()).map(database => database.name).sort())
   expect(names).toEqual(process.env.POMOGATOR_V01_URL ? [previousDatabase, database].sort() : [database])
 
-  if (process.env.EXPECTED_VERSION === '0.2.2') {
+  if (['0.2.2', '0.2.3'].includes(process.env.EXPECTED_VERSION)) {
     await activate(page.getByRole('button', { name: 'Обзор', exact: true }))
     const center = () => page.getByRole('button', { name: 'Мой центр', exact: true })
     const panel = page.getByRole('region', { name: 'Мои ярлыки' })
     await activate(center())
+    if (process.env.EXPECTED_VERSION === '0.2.3') {
+      const bar = page.locator('.section-bar')
+      await expect(bar.getByRole('heading', { name: 'Мой центр', exact: true })).toBeVisible()
+      await expect(bar.getByRole('button', { name: 'Назад', exact: true })).toBeVisible()
+      await expect(bar).toHaveCSS('position', 'sticky')
+      await expect(bar).toHaveCSS('backdrop-filter', /blur/)
+    }
     expect(await panel.getByRole('link').count()).toBe(0)
     await activate(panel.getByRole('button', { name: 'Добавить ярлык', exact: true }))
     const editor = page.getByRole('dialog')
