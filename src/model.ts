@@ -91,11 +91,18 @@ export function saveEntry(data: Data, entry: Entry, editing = false, expectedRev
   if (entry.blocks) {
     saved.revision = (existing?.revision ?? 0) + 1
     saved.history = [{ at: updated, note: !existing ? 'Карточка создана' :
-      existing.parent !== entry.parent ? 'Карточка перемещена' : 'Карточка обновлена' }, ...(existing?.history ?? [])].slice(0, 30)
+      existing.parent !== entry.parent ? 'Карточка перемещена' : 'Карточка обновлена' }, ...(existing?.history ?? [])]
+    if (!existing || existing.parent === entry.parent) saved.history = saved.history.slice(0, 30)
   }
   return { ...data, entries: editing
     ? data.entries.map(item => item.id === entry.id ? saved : item)
     : [...data.entries, saved] }
+}
+
+export function moveEntry(data: Data, previous: Entry, parent: string): Data {
+  const entry = data.entries.find(item => item.id === previous.id)
+  if (!entry) throw new Error('Карточка уже удалена.')
+  return saveEntry(data, { ...entry, kind: kindOf(data, entry), blocks: blocksOf(entry), parent }, true, previous.revision ?? 0)
 }
 
 export function deleteEntry(data: Data, id: string): Data {

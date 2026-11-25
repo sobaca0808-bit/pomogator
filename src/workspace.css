@@ -305,7 +305,7 @@ dialog::backdrop { background: var(--glass-scrim); }
 .new-card { min-height: 48px; white-space: nowrap; border-radius: 15px; }
 .overview-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 24px;
   align-items: start;
 }
@@ -497,3 +497,8 @@ dialog::backdrop { background: var(--glass-scrim); }
 .capture-attachment { display: flex; align-items: center; gap: 8px; }
 .capture-attachment { min-width: 0; justify-content: space-between; overflow-wrap: anywhere; }
 .capture-dialog .editor-footer > button { margin-left: auto; }
+
+.home-create { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-block: 8px 16px; }
+.capture-button, .add-section { min-height: 44px; }
+.add-section { margin-top: 12px; }
+.header-search { margin-top: 8px; }

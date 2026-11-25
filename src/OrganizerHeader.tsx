@@ -1,5 +1,6 @@
 import { useRef, type ReactNode } from 'react'
 import { CalendarDays, House, LayoutGrid, Menu, Search, Settings, type LucideIcon } from 'lucide-react'
+import { BrandMark } from './BrandMark'
 import { Glyph } from './editors'
 import type { Place } from './model'
 import type { View } from './navigation'
@@ -60,7 +61,7 @@ export function OrganizerHeader({ roots, activeView, activeRoot, openView, navig
   return <header className="app-header glass-surface" role="banner">
     <div className="app-header-row">
       <button className="brand" onClick={() => openView('home')}>
-        <span className="brand-icon"><LayoutGrid size={20} aria-hidden="true" /></span>ПОМОГАТОР
+        <BrandMark size={38} />ПОМОГАТОР
       </button>
       <nav className="primary-navigation" aria-label="Главное меню">{renderMainLinks()}</nav>
       <div className="header-actions">

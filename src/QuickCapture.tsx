@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
-import { Inbox, Paperclip, Plus, X } from 'lucide-react'
-import { emptyCapture, inboxTitle, type CaptureDraft } from './capture'
+import { Paperclip, Plus, X } from 'lucide-react'
+import { emptyCapture, type CaptureDraft } from './capture'
 import { Dialog } from './editors'
 import { pathTo, type Data } from './model'
 
@@ -25,17 +25,10 @@ export function useCaptureDraft(key: string) {
   return { draft, change }
 }
 
-export function CaptureActions({ count, open, capture, active }: {
-  count: number; open: () => void; capture: () => void; active: boolean
-}) {
-  return <div className="capture-actions actions">
-    <button className="primary capture-trigger" type="button" title="Быстрый захват" aria-label="Быстрый захват" onClick={capture}>
-      <Plus size={21} aria-hidden="true" />
-    </button>
-    <button className="glass-surface inbox-trigger" type="button" onClick={open} aria-current={active ? 'page' : undefined}>
-      <Inbox size={19} aria-hidden="true" />{inboxTitle}<span className="inbox-count">{count}</span>
-    </button>
-  </div>
+export function CaptureActions({ capture }: { capture: () => void }) {
+  return <button className="glass-surface capture-button" type="button" onClick={capture}>
+    <Plus size={18} aria-hidden="true" />Быстрый захват
+  </button>
 }
 
 export function QuickCapture({ draft, change, data, inboxId, busy, error, save, close }: {
