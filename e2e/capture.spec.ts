@@ -38,7 +38,7 @@ for (const width of [390, 1366]) {
       await capture()
       await expect(dialog.getByLabel('Текст', { exact: true })).toHaveValue('Взять билеты\nУтром')
       await expect(dialog.getByLabel('Тип записи')).toHaveValue('task')
-      await dialog.getByLabel('Фото или файл').setInputFiles({ name: 'plan.txt', mimeType: 'text/plain', buffer: Buffer.from('План поездки') })
+      await dialog.locator('input[type=file]').setInputFiles({ name: 'plan.txt', mimeType: 'text/plain', buffer: Buffer.from('План поездки') })
       await screen('dark')
       await button('Сохранить запись').click()
       await expect(dialog).toHaveCount(0)

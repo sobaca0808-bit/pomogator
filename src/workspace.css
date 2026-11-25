@@ -494,6 +494,6 @@ dialog::backdrop { background: var(--glass-scrim); }
   background: var(--glass-tint);
   font-variant-numeric: tabular-nums;
 }
-.capture-file span, .capture-attachment { display: flex; align-items: center; gap: 8px; }
+.capture-attachment { display: flex; align-items: center; gap: 8px; }
 .capture-attachment { min-width: 0; justify-content: space-between; overflow-wrap: anywhere; }
 .capture-dialog .editor-footer > button { margin-left: auto; }

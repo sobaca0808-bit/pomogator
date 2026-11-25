@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { Inbox, Paperclip, Plus, X } from 'lucide-react'
 import { emptyCapture, inboxTitle, type CaptureDraft } from './capture'
 import { Dialog } from './editors'
@@ -42,6 +42,7 @@ export function QuickCapture({ draft, change, data, inboxId, busy, error, save, 
   draft: CaptureDraft; change: (value: CaptureDraft) => void; data: Data; inboxId: string; busy: boolean;
   error: string; save: () => void; close: () => void
 }) {
+  const fileInput = useRef<HTMLInputElement>(null)
   return <Dialog className="capture-dialog" title="Быстрый захват" close={close}>
     <form onSubmit={event => { event.preventDefault(); save() }}>
       <label>Текст<textarea aria-label="Текст" autoFocus rows={4} value={draft.text} disabled={busy}
@@ -60,13 +61,16 @@ export function QuickCapture({ draft, change, data, inboxId, busy, error, save, 
             <option key={place.id} value={place.id}>{pathTo(data, place.id).map(item => item.title).join(' / ')}</option>)}
         </select></label>
       </div>
-      <label className="capture-file"><span><Paperclip size={16} aria-hidden="true" /> Фото или файл</span>
-        <input type="file" disabled={busy} onChange={event => {
+      <div className="actions">
+        <button type="button" disabled={busy} onClick={() => fileInput.current?.click()}>
+          <Paperclip size={16} aria-hidden="true" /> {draft.file ? 'Заменить вложение' : 'Фото или файл'}
+        </button>
+        <input ref={fileInput} hidden type="file" disabled={busy} onChange={event => {
           const file = event.target.files?.[0]
           if (file) change({ ...draft, file })
           event.target.value = ''
         }} />
-      </label>
+      </div>
       {draft.file && <div className="capture-attachment"><span>{draft.file.name}</span>
         <button type="button" className="icon-button" aria-label="Убрать вложение" disabled={busy}
           onClick={() => change({ ...draft, file: undefined })}><X size={18} /></button>
