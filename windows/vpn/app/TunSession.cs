@@ -200,7 +200,7 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
             // high-integrity token, executable, endpoint and outbound as the combined engine.
             using var alive = CancellationTokenSource.CreateLinkedTokenSource(boot.Token);
             var runtime = Read<int>(channel, CancellationToken.None);
-            var image = Path.Combine(AppContext.BaseDirectory, "xray.exe");
+            var image = Path.Combine(AppContext.BaseDirectory, TunConfig.Executable);
             TunReference? reference = null;
             TunControlEndpoint? referenceEndpoint = null;
             try
@@ -237,7 +237,8 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
             var config = TunConfig.Engine(id, peer, source, uplink, profile, port, diagnosticsPort, control);
             var start = Xray.StartAsync(image, config, port,
                 alive.Token, WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback, inheritConsole: true, startupSeconds: 24,
-                diagnosticLine: diagnostic.Read, startupExit: diagnostic.Exited);
+                diagnosticLine: diagnostic.Read, startupExit: diagnostic.Exited,
+                tunEgress: TunEgress.ForProfile(peer, source, record.Before.Uplink, profile));
             if (await Task.WhenAny(start, runtime) == runtime) alive.Cancel();
             engine = await start;
             // Xray starts tagged listeners in unspecified order. Its startup marker appears only

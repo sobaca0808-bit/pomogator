@@ -7,7 +7,7 @@ internal sealed record TunTrafficSample(TunPacketSample? Windows, TunXraySample?
     internal static async Task<TunTrafficSample> Capture(Guid id, int port, int pid, CancellationToken token)
     {
         var windows = TunPacketCounters.Read(id);
-        var xray = await TunXrayCounters.Read(Path.Combine(AppContext.BaseDirectory, "xray.exe"), port, pid, token);
+        var xray = await TunXrayCounters.Read(Path.Combine(AppContext.BaseDirectory, TunConfig.Executable), port, pid, token);
         return new TunTrafficSample(windows, xray);
     }
 

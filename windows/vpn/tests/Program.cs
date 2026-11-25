@@ -231,6 +231,31 @@ Test("TUN splits public IPv4 routes around the pinned peer and LAN", () => {
         .GetProperty("address").GetString() == peer.ToString());
     Assert(settings.GetProperty("autoSystemWfpBlockLeak").EnumerateArray().Any(entry => entry.GetString() == "[::/0]:all"));
 });
+Test("TUN reports the failing source or WFP setup without retaining raw engine details", () => {
+    var diagnostic = new TunEngineDiagnostic();
+    diagnostic.Read("TUN source IPv4 is not preferred on the uplink: fixture-private-data");
+    Assert(diagnostic.Description!.Contains("исходного IPv4") && !diagnostic.Description.Contains("fixture-private-data"));
+    diagnostic.Read("FwpmFilterAdd0 failed: fixture-private-data");
+    Assert(diagnostic.Description!.Contains("WFP") && !diagnostic.Description.Contains("fixture-private-data"));
+});
+Test("The TUN helper sets the child transport scope and proxy launches discard inherited scope", () => {
+    var info = new ProcessStartInfo { UseShellExecute = false };
+    const string peer = "POMOGATOR_TUN_PEER", source = "POMOGATOR_TUN_SOURCE", index = "POMOGATOR_TUN_IFINDEX";
+    var egress = new TunEgress(new IPEndPoint(IPAddress.Parse("203.0.113.57"), 8443), IPAddress.Parse("192.0.2.9"), 371);
+    TunEgress.Configure(info, egress);
+    Assert(info.Environment[peer] == "203.0.113.57:8443" && info.Environment[source] == "192.0.2.9" && info.Environment[index] == "371");
+    const string protocol = "POMOGATOR_TUN_PROTOCOL";
+    Assert(info.Environment[protocol] == "tcp");
+    foreach (var (options, expected) in new[] { ("tls&type=xhttp&alpn=h3", "udp"), ("tls&type=xhttp&alpn=h3,h2", "tcp"),
+        ("tls&type=tcp&alpn=h3", "tcp"), ("tls&type=xhttp", "tcp") })
+    {
+        var profile = Profiles.Parse(Base + "?security=" + options);
+        TunEgress.Configure(info, TunEgress.ForProfile(egress.Peer.Address, egress.Source, egress.InterfaceIndex, profile));
+        Assert(info.Environment[protocol] == expected);
+    }
+    TunEgress.Configure(info, null);
+    Assert(!info.Environment.ContainsKey(protocol) && !info.Environment.ContainsKey(peer) && !info.Environment.ContainsKey(source) && !info.Environment.ContainsKey(index));
+});
 await TestAsync("TUN waits for a slow adapter, tentative IPv4, planned routes and delayed DNS", async () => {
     var expected = new TunObservation(Guid.NewGuid(), "fixture", Uplink: 7, ExpectedDns: TunConfig.Resolver);
     var up = expected with { Status = System.Net.NetworkInformation.OperationalStatus.Up, Index = 42 };
@@ -470,6 +495,25 @@ Test("Link a WFP block only to an unambiguous ConnectEx tuple from the denied se
     diagnostic.TakeEvents(out denials);
     Assert(denials.Single().LocalPort == 0);
 });
+Test("WFP counts peer drops with missing or different images separately from Xray", () => {
+    var now = DateTimeOffset.UtcNow;
+    var source = TunWfpDiagnostic.Address(IPAddress.Parse("192.0.2.16"));
+    var attempt = new TunDialDenial(7419, source, 49521, now.AddSeconds(-1), now);
+    var uncertain = new TunWfpUnattributedDrop[] {
+        new(now, OtherImage: false), new(now, OtherImage: true), new(now.AddMilliseconds(-200), OtherImage: true),
+        new(now.AddSeconds(-2), OtherImage: false), new(now.AddSeconds(2), OtherImage: true)
+    };
+    var report = TunWfpDiagnostic.Correlate([attempt], [], source, capped: true, unattributed: uncertain);
+    Assert(report.Any(line => line.Contains("для образа Xray") && line.Contains("не найдено")));
+    var counts = report.Single(line => line.Contains("другой образ"));
+    Assert(counts.Contains("образ не определён: 1") && counts.Contains("другой образ: 2") &&
+        counts.Contains("не установлена") && !report.Any(line => line.Contains("7419") || line.Contains("49521") ||
+        line.Contains("192.0.2.16")) && report.Any(line => line.Contains("512")));
+    var confirmed = new TunWfpDrop(now, source, 49521, 31, 48, true, "TEST WFP");
+    var mixed = TunWfpDiagnostic.Correlate([attempt], [confirmed], source, unattributed: uncertain);
+    Assert(mixed.Length == 2 && mixed.Single(line => line.Contains("7419")).Contains("фильтр 31") && mixed.Contains(counts));
+    Assert(TunWfpDiagnostic.Correlate([attempt], [], unattributed: uncertain.Skip(3)).Single().Contains("не найдено"));
+});
 Test("TUN detects overlay and UBoost, while PPPoE is a valid uplink", () => {
     Assert(!TunWindows.Conflicts(new[] { ("PPPoE", true, System.Net.NetworkInformation.NetworkInterfaceType.Ppp) }));
     Assert(TunWindows.Conflicts(new[] { ("UBoost", true, System.Net.NetworkInformation.NetworkInterfaceType.Ethernet) }));
@@ -625,10 +669,11 @@ else Console.WriteLine("SKIP Core integration: set POMOGATOR_TEST_XRAY to the pi
 
 if (OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable("POMOGATOR_TEST_TUN") == "1")
 {
-    if (string.IsNullOrEmpty(executable)) throw new InvalidOperationException("Missing pinned Xray path for TUN CI.");
+    var tunnelExecutable = Environment.GetEnvironmentVariable("POMOGATOR_TEST_TUN_XRAY");
+    if (string.IsNullOrEmpty(tunnelExecutable)) throw new InvalidOperationException("Missing scoped TUN binary for Windows CI.");
     Test("Administrator guard rejects a Windows token with the Administrators SID disabled", NativeTunTests.CheckPrivilegeGuard);
-    await NativeTunTests.Run(executable);
-    passed++;
+    await TestAsync("Native Wintun, HTTPS over VLESS, DNS and recovery", () => NativeTunTests.Run(tunnelExecutable));
+    await TestAsync("Scoped TUN filter permits a physical TLS peer only to the tunnel transport", () => PhysicalPeerTests.Run(tunnelExecutable));
 }
 Console.WriteLine($"{passed} checks passed.");
 

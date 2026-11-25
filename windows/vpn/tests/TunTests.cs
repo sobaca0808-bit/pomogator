@@ -70,7 +70,10 @@ internal static class NativeTunTests
         var dnsPort = ((IPEndPoint)udpDestination.Client.LocalEndPoint!).Port;
         using var tcpDnsDestination = new TcpListener(IPAddress.Loopback, dnsPort);
         tcpDnsDestination.Start();
-        using var timeLimit = new CancellationTokenSource(TimeSpan.FromSeconds(75));
+        using var timeLimit = new CancellationTokenSource(TimeSpan.FromSeconds(100));
+        using var dohCertificate = CreateCertificate(DohFixture.Host);
+        await using var doh = new DohFixture(dohCertificate);
+        await doh.StartAsync(timeLimit.Token);
 
         var upstreamPort = Xray.FreePort();
         var upstreamReady = Xray.FreePort();
@@ -91,10 +94,12 @@ internal static class NativeTunTests
                     } }
                 }
             },
-            outbounds = new object[] { new { tag = "block", protocol = "blackhole" }, Redirect("web", httpPort), Redirect("dns", dnsPort) },
+            outbounds = new object[] { new { tag = "block", protocol = "blackhole" }, Redirect("web", httpPort), Redirect("dns", dnsPort),
+                Redirect("doh", doh.Port) },
             routing = new { rules = new object[] {
                 new { type = "field", ip = new[] { webTarget }, port = httpPort.ToString(), network = "tcp", outboundTag = "web" },
-                new { type = "field", ip = new[] { dnsTarget }, port = "53", network = "tcp,udp", outboundTag = "dns" }
+                new { type = "field", ip = new[] { dnsTarget }, port = "53", network = "tcp,udp", outboundTag = "dns" },
+                new { type = "field", domain = new[] { "full:" + DohFixture.Host }, port = "443", network = "tcp", outboundTag = "doh" }
             } }
         });
         using var upstream = await Xray.StartAsync(executable, upstreamConfig, upstreamReady, timeLimit.Token,
@@ -139,14 +144,35 @@ internal static class NativeTunTests
 
         // The test peer listens on the runner's non-loopback IPv4 and uses an ephemeral pinned certificate.
         using var console = new TunConsole();
-        var fixture = TunConfig.CreateEngine(fixtureId, fixtureRoutes, new[] { "198.51.100.0/24:all", "[2001:db8:9::/48]:all", uplinkAddress + "/32:all" },
+        var filters = new[] { "198.51.100.0/24:all", "[2001:db8:9::/48]:all", uplinkAddress + "/32:all" };
+        var egress = new TunEgress(new IPEndPoint(uplinkAddress, upstreamPort), uplinkAddress, snapshot.Uplink);
+        var fixture = TunConfig.CreateEngine(fixtureId, fixtureRoutes, filters,
             outbound, readiness, dnsTarget, diagnosticsPort: diagnosticsPort, control: control, peer: uplinkAddress);
         var seenIndex = 0;
         Process? child = null;
         IDisposable Track(Process process) { child = process; return WindowsLifetime.Attach(process); }
 
+        var scopeRejected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            using var unscoped = await Xray.StartAsync(executable, fixture, readiness, timeLimit.Token,
+                WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback, inheritConsole: true, diagnosticLine: line =>
+                {
+                    if (line.Contains("invalid TUN peer endpoint", StringComparison.Ordinal))
+                        scopeRejected.TrySetResult();
+                });
+            // The loopback listener can briefly be ready while the TUN handler is still starting.
+            await scopeRejected.Task.WaitAsync(TimeSpan.FromSeconds(8), timeLimit.Token);
+        }
+        catch (VpnError error) when (error.FailedCheck == Check.Xray) { }
+        await scopeRejected.Task.WaitAsync(TimeSpan.FromSeconds(3), timeLimit.Token);
+        Require(await TunWindows.WaitClean(recovery, TimeSpan.FromSeconds(5)) &&
+            TunWindows.MatchesBaseline(snapshot, TunWindows.Capture(peer)),
+            "Refusing a missing TUN peer scope left an adapter or changed the uplink.");
+        Console.WriteLine("PASS Native TUN refused an unscoped peer without changing routes or DNS");
+
         using (var failed = await Xray.StartAsync(executable, fixture, readiness, timeLimit.Token, Track,
-            WindowsLifetime.OwnsLoopback, inheritConsole: true, startupSeconds: 24))
+            WindowsLifetime.OwnsLoopback, inheritConsole: true, startupSeconds: 24, tunEgress: egress))
         {
             try
             {
@@ -164,7 +190,7 @@ internal static class NativeTunTests
 
         var engineDiagnostic = new TunEngineDiagnostic(uplinkAddress, upstreamPort, rawTransport: true);
         using (var tunnel = await Xray.StartAsync(executable, fixture, readiness, timeLimit.Token, Track,
-            WindowsLifetime.OwnsLoopback, inheritConsole: true, startupSeconds: 24, diagnosticLine: line =>
+            WindowsLifetime.OwnsLoopback, inheritConsole: true, startupSeconds: 24, tunEgress: egress, diagnosticLine: line =>
             {
                 engineDiagnostic.Read(line);
                 // Capture only fixed markers. The test needs to distinguish local CONNECT, dispatch and VLESS.
@@ -351,18 +377,30 @@ internal static class NativeTunTests
         Require(seenIndex != 0, "No TUN interface was observed.");
 
         var crashDiagnostic = new TunEngineDiagnostic();
-        using (var crashed = await Xray.StartAsync(executable, fixture, readiness, timeLimit.Token, Track,
-            WindowsLifetime.OwnsLoopback, inheritConsole: true, startupSeconds: 24, diagnosticLine: crashDiagnostic.Read))
+        // The pinned Xray DoH client validates the OS trust chain. Trust just this short-lived,
+        // single-host certificate in the disposable native test VM and remove it even on test failure.
+        using var trustedLeaf = new X509Certificate2(dohCertificate.RawData);
+        using var roots = new X509Store(StoreName.Root, StoreLocation.LocalMachine);
+        roots.Open(OpenFlags.ReadWrite);
+        var dohConfig = TunConfig.CreateEngine(fixtureId, fixtureRoutes, filters, outbound, readiness, dnsTarget,
+            dnsOverHttps: $"https://{DohFixture.Host}/dns-query", control: control, peer: uplinkAddress);
+        roots.Add(trustedLeaf);
+        try
         {
+            using var crashed = await Xray.StartAsync(executable, dohConfig, readiness, timeLimit.Token, Track,
+                WindowsLifetime.OwnsLoopback, inheritConsole: true, startupSeconds: 24, diagnosticLine: crashDiagnostic.Read,
+                tunEgress: egress);
             var active = await TunReadiness.Wait(() =>
             {
                 var state = TunWindows.Observe(recovery, web);
                 return state.Ready && !crashDiagnostic.Started ? state with { ErrorCode = "TUN_ENGINE_NOT_READY" } : state;
             }, () => crashed.Running, TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(150), timeLimit.Token);
             Require(active.Ready, "TUN did not become ready before the simulated crash: " + active.Failure);
+            await doh.CheckThroughWintun(active.Index, dns, timeLimit.Token);
             child!.Kill();
             await child.WaitForExitAsync(timeLimit.Token);
         }
+        finally { roots.Remove(trustedLeaf); }
         if (!await TunWindows.WaitClean(recovery, TimeSpan.FromSeconds(3)))
         {
             if (TunWindows.Find(fixtureId)?.GetIPProperties().DnsAddresses.Contains(dns) == true)

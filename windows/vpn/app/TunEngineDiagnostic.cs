@@ -38,7 +38,12 @@ internal sealed class TunEngineDiagnostic(IPAddress? peer = null, int port = 0, 
         sockets?.Read(line);
         if (line.Contains("core: Xray ", StringComparison.Ordinal) && line.EndsWith(" started", StringComparison.Ordinal))
             Interlocked.Exchange(ref started, 1);
-        var known = line.Contains("unable to set routes", StringComparison.OrdinalIgnoreCase) ? "установка маршрутов" :
+        bool Has(string fragment) => line.Contains(fragment, StringComparison.OrdinalIgnoreCase);
+        var known = Has("invalid TUN peer endpoint") || Has("invalid TUN transport protocol") ? "проверка адреса, порта и транспорта VPN-сервера" :
+            Has("invalid TUN uplink interface index") || Has("TUN uplink interface unavailable") ? "проверка исходящего интерфейса Windows" :
+            Has("invalid TUN uplink source address") || Has("TUN source IPv4 is not preferred on the uplink") ? "проверка исходного IPv4 на выбранном интерфейсе" :
+            Has("FwpmFilterAdd") || Has("unable to block") ? "установка временной защиты TUN в WFP" :
+            Has("unable to set routes") ? "установка маршрутов" :
             line.Contains("unable to set ips", StringComparison.OrdinalIgnoreCase) ? "назначение IPv4" :
             line.Contains("unable to set DNS", StringComparison.OrdinalIgnoreCase) ? "назначение DNS" :
             line.Contains("unable to set metric and MTU", StringComparison.OrdinalIgnoreCase) ? "назначение метрики и MTU" :
@@ -46,7 +51,6 @@ internal sealed class TunEngineDiagnostic(IPAddress? peer = null, int port = 0, 
                 line.Contains("Wintun", StringComparison.OrdinalIgnoreCase) ? "создание адаптера Wintun" : null;
         if (known != null) Volatile.Write(ref detail, known);
 
-        bool Has(string fragment) => line.Contains(fragment, StringComparison.OrdinalIgnoreCase);
         if (Has("Hit route rule: [pmt-control-vless]")) Interlocked.Increment(ref counters[0]);
         if (Has("Hit route rule: [pmt-control-block]")) Interlocked.Increment(ref counters[1]);
         if (Has("transport/internet/tcp: failed to dial to dest"))
