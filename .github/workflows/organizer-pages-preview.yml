@@ -290,9 +290,13 @@ jobs:
           [[ "$html" == *"$EXPECTED_COMMIT"* ]]
           node e2e/pages-smoke.mjs
           node e2e/pages-upgrade.mjs verify "$RUNNER_TEMP/pages-before/pages-before.json"
-          status=$(curl --silent --show-error --max-time 20 --output /dev/null --write-out '%{http_code}' "$PAGES_ROOT")
+          for attempt in {1..10}; do
+            status=$(curl --silent --show-error --max-time 20 --output /dev/null --write-out '%{http_code}' "$PAGES_ROOT" || true)
+            echo "Pages root HTTP $status (attempt $attempt)"
+            [[ "$status" == 404 ]] && break
+            sleep 6
+          done
           test "$status" = 404
-          echo "Pages root still returns HTTP 404."
 
       - name: Verify the separately published preview and storage isolation
         env:
@@ -373,7 +377,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   android-install:
-    needs: [build, verify]
+    needs: [build, deploy]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -396,7 +400,13 @@ jobs:
           arch: x86_64
           profile: pixel_7
           disable-animations: true
-          script: node e2e/pages-smoke.mjs
+          script: |
+            for attempt in {1..18}; do
+              html=$(curl -fsS --max-time 10 "$POMOGATOR_PAGES_URL" || true)
+              [[ "$html" == *"$EXPECTED_COMMIT"* ]] && break
+              sleep 5
+            done
+            [[ "$html" == *"$EXPECTED_COMMIT"* ]] && node e2e/pages-smoke.mjs
         env:
           POMOGATOR_ANDROID: '1'
           POMOGATOR_CURRENT_PREVIEW: '1'
