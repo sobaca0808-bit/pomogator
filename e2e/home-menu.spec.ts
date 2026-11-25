@@ -21,7 +21,7 @@ test('компактное меню и действия с разделами н
     await expect(toggle).toBeFocused()
 
     const title = 'Долгосрочные семейные проекты'
-    await button('Добавить раздел').tap()
+    await button('Новый раздел').tap()
     await page.getByLabel('Название').fill(title)
     await button('Сохранить').tap()
     const card = sections.getByRole('article').filter({ hasText: title })
@@ -31,7 +31,7 @@ test('компактное меню и действия с разделами н
     expect((await card.getByRole('button', { name: new RegExp(title) }).boundingBox())!.height).toBeGreaterThanOrEqual(44)
     await actions.tap()
     await button(`Передвинуть «${title}» выше`).tap()
-    await expect(sections.getByRole('article').nth(5)).toContainText(title)
+    await expect(sections.getByRole('article').nth(6)).toContainText(title)
 
     await actions.tap()
     await button(`Настроить «${title}»`).tap()

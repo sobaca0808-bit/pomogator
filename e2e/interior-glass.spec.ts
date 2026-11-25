@@ -58,7 +58,7 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 1366, height: 960 
         }
       }
 
-      await checkGlass('.overview-intro', '01-overview-dark')
+      await checkGlass('.center-tile', '01-overview-dark')
       for (const section of ['Мои проекты', 'Мои дела', 'Заметки', 'Документы', 'Мои сервисы']) {
         await navigateSection(page, section, activate)
         await expect(heading()).toHaveText(section)
@@ -90,7 +90,7 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 1366, height: 960 
       await checkGlass('.app-settings', '06-settings-light')
       await page.reload()
       await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
-      await checkGlass('.overview-intro', '07-overview-light')
+      await checkGlass('.center-tile', '07-overview-light')
       await activate(button(page, 'Мой центр'))
       await checkGlass('.shortcut-card', '08-center-light')
       await activate(button(page, 'Добавить ярлык'))
@@ -105,6 +105,7 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 1366, height: 960 
       await activate(dialog.getByRole('button', { name: 'Отмена', exact: true }))
       await activate(discard.getByRole('button', { name: 'Закрыть без сохранения' }))
       await expect(dialog).toHaveCount(0)
+      await page.getByRole('button', { name: 'Найти', exact: true }).click()
       await page.getByRole('searchbox').fill(title)
       await checkGlass('.results .result')
     } finally { await context.close() }

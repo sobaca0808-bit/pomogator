@@ -51,8 +51,9 @@ export function CardLinks({ blocks, payment = false }: { blocks: Block[]; paymen
   })}</div>
 }
 
-export function CardView({ entry, data, today, open, remove, toggle, complete, favorite }: {
+export function CardView({ entry, data, today, open, remove, toggle, complete, favorite, move, share }: {
   entry: Entry; data: Data; today: string; open: (entry: Entry) => void; remove: () => void;
+  move: () => void; share: () => void
   toggle: (id: string, index: number) => void; complete: () => void; favorite: () => void
 }) {
   const kind = kindOf(data, entry)
@@ -93,8 +94,9 @@ export function CardView({ entry, data, today, open, remove, toggle, complete, f
     {kind === 'project' && <div className="card-progress"><progress value={progress(entry)} max={100} aria-label="Выполнение проекта" />
       <small>{progress(entry)}%</small></div>}
     <div className="card-body">{blocks.filter(block => block.type !== 'link' && (!isDeadline || block.type !== 'date')).map(block => <Body key={block.id} block={block} data={data} open={open} toggle={toggle} />)}</div>
+    <div className="actions"><button onClick={move}>Переместить</button><button onClick={share}>Поделиться</button></div>
     {parent && <button className="related" onClick={() => open(parent)}>В составе · {parent.title}</button>}
-    {children.length > 0 && <details className="editor-options"><summary>{kind === 'project' ? 'Подпроекты' : 'Подзадачи'} · {children.length}</summary>
+    {children.length > 0 && <details className="editor-options"><summary>{kind === 'project' ? (children.every(child => kindOf(data, child) === 'project') ? 'Подпроекты' : 'Карточки проекта') : 'Подзадачи'} · {children.length}</summary>
       <div className="related-list">{children.map(child => <button className="related" key={child.id} onClick={() => open(child)}>{child.title}</button>)}</div>
     </details>}
     {(kind === 'project' || kind === 'task') && <div className="actions">

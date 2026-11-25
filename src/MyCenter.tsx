@@ -1,5 +1,6 @@
 import { useLayoutEffect, useState, type RefObject } from 'react'
-import { ArrowDown, ArrowUp, ChevronRight, ExternalLink, Globe, LayoutGrid, Link2, Mail, Music2, Pencil, Plus, Trash2 } from 'lucide-react'
+import { BrandMark } from './BrandMark'
+import { ArrowDown, ArrowUp, ChevronRight, ExternalLink, Globe, Link2, Mail, Music2, Pencil, Plus, Trash2 } from 'lucide-react'
 import { siDiscord, siGithub, siGmail, siGooglemaps, siNotion, siSteam, siTelegram, siVk, siWhatsapp, siYoutube } from 'simple-icons'
 import { Dialog, useDiscardDialog } from './editors'
 import { shortcutCatalog, shortcutUrl, type Shortcut, type ShortcutIcon } from './shortcuts'
@@ -23,7 +24,7 @@ function ShortcutGlyph({ icon }: { icon: ShortcutIcon }) {
 
 export function CenterTile({ open, count }: { open: () => void; count: number }) {
   return <button className="center-tile glass-surface" type="button" onClick={open} aria-label="Мой центр">
-    <span className="widget-icon center-tile-icon"><LayoutGrid size={24} aria-hidden="true" /></span>
+    <BrandMark size={48} />
     <span className="center-tile-label"><strong>Мой центр</strong><small>{count ? `Сохранено ярлыков: ${count}` : 'Быстрый доступ к сайтам и приложениям'}</small></span>
     <ChevronRight size={22} aria-hidden="true" />
   </button>

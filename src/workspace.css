@@ -305,7 +305,7 @@ dialog::backdrop { background: var(--glass-scrim); }
 .new-card { min-height: 48px; white-space: nowrap; border-radius: 15px; }
 .overview-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 24px;
   align-items: start;
 }
@@ -480,4 +480,30 @@ dialog::backdrop { background: var(--glass-scrim); }
   .glass-surface, dialog.glass-surface { background: Canvas; border-color: CanvasText; -webkit-backdrop-filter: none; backdrop-filter: none; }
   .shell::before { display: none; }
   .disclosure[open] > summary, .app-header button[aria-current=page] { border-color: Highlight; }
+}
+
+.capture-actions { margin-bottom: 16px; }
+.capture-trigger { width: 44px; min-height: 44px; padding: 0; }
+.inbox-trigger { border-radius: var(--control-radius); }
+.inbox-count {
+  display: grid;
+  place-items: center;
+  min-width: 24px;
+  padding-inline: 4px;
+  border-radius: 8px;
+  background: var(--glass-tint);
+  font-variant-numeric: tabular-nums;
+}
+.capture-attachment { display: flex; align-items: center; gap: 8px; }
+.capture-attachment { min-width: 0; justify-content: space-between; overflow-wrap: anywhere; }
+.capture-dialog .editor-footer > button { margin-left: auto; }
+
+.home-create { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-block: 8px 16px; }
+.capture-button, .add-section { min-height: 44px; }
+.add-section { margin-top: 12px; }
+.header-search { margin-top: 8px; }
+
+@media (pointer: coarse) {
+  /* Keep the submit button in the scrollable form on touch keyboards. */
+  .card-dialog .editor-footer { position: static; }
 }

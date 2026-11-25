@@ -192,6 +192,8 @@ export function CardEditor({ entry, editing, data, persist, close, child, guard 
   const supportsFinance = kind === 'payment' || kind === 'purchase'
   const parents = cards.filter(item => kindOf(data, item) === kind)
   const children = cards.filter(item => item.parentCard === draft.id)
+  const projects = kind === 'note' || kind === 'task' ? cards.filter(item => kindOf(data, item) === 'project') : []
+  const project = projects.find(item => item.id === draft.parentCard)
   return <><Dialog showBack className="card-dialog" title={editing ? 'Карточка' : 'Новая карточка'} close={() => void finish(close, true)}>
     <form inert={submitting} onInvalidCapture={event => {
       const field = event.target as HTMLInputElement
@@ -212,10 +214,18 @@ export function CardEditor({ entry, editing, data, persist, close, child, guard 
           }
           changed({ kind: type, parentCard: undefined, blocks })
         }}>{kinds.map(value => <option key={value} value={value}>{kindName[value]}</option>)}</select></label>
-        <label>Папка<select aria-label="Папка" value={draft.parent} onChange={event => changed({ parent: event.target.value })}>
+        <label>Папка<select aria-label="Папка" value={draft.parent} onChange={event =>
+          changed({ parent: event.target.value, parentCard: project ? undefined : draft.parentCard })}>
           {data.places.map(place => <option key={place.id} value={place.id}>{pathTo(data, place.id).map(item => item.title).join(' / ')}</option>)}
         </select></label>
       </div>
+      {projects.length > 0 && <label>Проект<select value={project?.id ?? ''} onChange={event => {
+        const selected = projects.find(item => item.id === event.target.value)
+        changed({ parent: selected?.parent ?? draft.parent, parentCard: selected?.id })
+      }}>
+        <option value="">Без проекта</option>
+        {projects.map(item => <option key={item.id} value={item.id}>{item.title}</option>)}
+      </select></label>}
       <details className="editor-options">
         <summary>Свойства карточки</summary>
         <div className="form-columns">
@@ -233,9 +243,9 @@ export function CardEditor({ entry, editing, data, persist, close, child, guard 
           {supportsFinance && <label>Операция<select value={draft.direction ?? (Number(firstValue(draft, 'amount')) > 0 ? 'income' : 'expense')} onChange={event =>
             changed({ direction: event.target.value as Entry['direction'] })}><option value="expense">Расход</option><option value="income">Доход</option></select></label>}
           {supportsParent && <label>{kind === 'task' ? 'Родительская задача' : 'Родительский проект'}
-            <select value={draft.parentCard ?? ''} onChange={event => changed({ parentCard: event.target.value || undefined })}>
+            <select value={project ? '' : draft.parentCard ?? ''} onChange={event => changed({ parentCard: event.target.value || undefined })}>
               <option value="">Нет</option>
-              {draft.parentCard && !parents.some(item => item.id === draft.parentCard) && <option value={draft.parentCard}>Карточка недоступна</option>}
+              {draft.parentCard && !project && !parents.some(item => item.id === draft.parentCard) && <option value={draft.parentCard}>Карточка недоступна</option>}
               {parents.map(item => <option key={item.id} value={item.id}>{item.title}</option>)}
             </select></label>}
         </div>

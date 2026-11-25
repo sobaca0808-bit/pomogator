@@ -35,12 +35,12 @@ export function savePlace(data: Data, place: Place, editing = false): Data {
     : [...data.places, place] }
 }
 
-export function orderPlace(data: Data, id: string, offset: -1 | 1): Data {
+export function orderPlace(data: Data, id: string, offset: -1 | 1, skip?: string): Data {
   const places = [...data.places]
   const index = places.findIndex(place => place.id === id)
   if (index === -1) return data
   for (let next = index + offset; next >= 0 && next < places.length; next += offset) {
-    if (places[next].parent === places[index].parent) {
+    if (places[next].id !== skip && places[next].parent === places[index].parent) {
       [places[index], places[next]] = [places[next], places[index]]
       break
     }
@@ -91,11 +91,18 @@ export function saveEntry(data: Data, entry: Entry, editing = false, expectedRev
   if (entry.blocks) {
     saved.revision = (existing?.revision ?? 0) + 1
     saved.history = [{ at: updated, note: !existing ? 'Карточка создана' :
-      existing.parent !== entry.parent ? 'Карточка перемещена' : 'Карточка обновлена' }, ...(existing?.history ?? [])].slice(0, 30)
+      existing.parent !== entry.parent ? 'Карточка перемещена' : 'Карточка обновлена' }, ...(existing?.history ?? [])]
+    if (!existing || existing.parent === entry.parent) saved.history = saved.history.slice(0, 30)
   }
   return { ...data, entries: editing
     ? data.entries.map(item => item.id === entry.id ? saved : item)
     : [...data.entries, saved] }
+}
+
+export function moveEntry(data: Data, previous: Entry, parent: string): Data {
+  const entry = data.entries.find(item => item.id === previous.id)
+  if (!entry) throw new Error('Карточка уже удалена.')
+  return saveEntry(data, { ...entry, kind: kindOf(data, entry), blocks: blocksOf(entry), parent }, true, previous.revision ?? 0)
 }
 
 export function deleteEntry(data: Data, id: string): Data {

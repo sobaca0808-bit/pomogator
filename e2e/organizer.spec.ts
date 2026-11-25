@@ -41,6 +41,7 @@ test('вложенные папки, автосохранение, вложен�
   await page.getByRole('button', { name: 'Поднять блок «Тег»' }).click()
   await expect(page.getByRole('status').filter({ hasText: 'Сохранено в этом браузере' })).toBeVisible()
   await page.reload()
+  await page.getByRole('button', { name: 'Найти', exact: true }).click()
   await page.getByRole('searchbox').fill('ПОСТАВЩИК')
   await page.getByRole('button', { name: /Договор поставки/ }).click()
   await expect(page.getByLabel('Название')).toHaveValue('Договор поставки')

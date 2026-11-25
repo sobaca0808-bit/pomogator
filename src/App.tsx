@@ -1,25 +1,30 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { ArrowDown, ArrowLeft, ArrowUp, Bell, CalendarDays, ChevronRight, Download, Ellipsis, FileText, FolderOpen, Pencil, Plus, Search, Trash2, Undo2, Upload, X } from 'lucide-react'
+import { ArrowDown, ArrowLeft, ArrowUp, Bell, Inbox, ChevronRight, Download, Ellipsis, FileText, FolderOpen, Pencil, Plus, Search, Trash2, Undo2, Upload, X } from 'lucide-react'
 import { downloadFile } from './attachments'
 import { exportBackup, importBackup } from './backup'
 import { CardEditor } from './CardEditor'
 import { CardView } from './CardView'
+import { emptyCapture, inboxFor, saveCapture, withInbox } from './capture'
+import { CaptureActions, QuickCapture, useCaptureDraft } from './QuickCapture'
 import { blocksOf, cardStatus, createCard, kindName, kinds, kindOf, preferences, rootFor, setStatus, widgetNames, type Kind, type Preferences } from './cards'
 import { Dialog, Glyph, PlaceEditor } from './editors'
-import { contents, deleteEntry, deletePlace, orderPlace, pathTo, restoreDeleted, saveEntry, savePlace, search,
+import { contents, deleteEntry, deletePlace, moveEntry, orderPlace, pathTo, restoreDeleted, saveEntry, savePlace, search,
   type Change, type Data, type Entry, type Place } from './model'
 import { CenterTile, MyCenter, ShortcutEditor } from './MyCenter'
 import { Disclosure, OrganizerHeader } from './OrganizerHeader'
 import { moveShortcut, removeShortcut, saveShortcut, type Shortcut } from './shortcuts'
+import { MoveCard, ShareFallback, shareCard } from './CardActions'
 import { Calendar, Finance, Overview, WidgetSection } from './Overview'
-import { dayKey, dueReminders, fromDay } from './schedule'
+import { dayKey, dueReminders } from './schedule'
 import { useNavigation, type View } from './navigation'
 import { buildLabel } from './version'
 import { openStorage, transact } from './storage'
 
 type Modal = { kind: 'place'; value: Place; editing: boolean } |
   { kind: 'entry'; value: Entry; editing: boolean } |
+  { kind: 'move' | 'share'; entry: Entry; generation?: string } |
   { kind: 'quick'; day: string } |
+  { kind: 'capture'; generation?: string } |
   { kind: 'shortcut'; value: Shortcut; previous?: Shortcut; generation?: string } |
   { kind: 'confirm'; title: string; message: string; action: Change; done?: () => void }
 const databaseName = import.meta.env.VITE_POMOGATOR_STORAGE || 'pomogator'
@@ -27,6 +32,7 @@ const messageOf = (cause: unknown) => cause instanceof Error ? cause.message : '
 
 export function App() {
   const [data, setData] = useState<Data>()
+  const capture = useCaptureDraft(databaseName + '-capture-draft')
   const writing = useRef(false)
   const navigation = useNavigation<Modal>(() => !writing.current)
   const { view, folder: current, query } = navigation.frame
@@ -53,6 +59,8 @@ export function App() {
   const channel = useRef<BroadcastChannel>(null)
   const input = useRef<HTMLInputElement>(null)
   const searchInput = useRef<HTMLInputElement>(null)
+  const [searchOpen, setSearchOpen] = useState(false)
+  function revealSearch() { setSearchOpen(true); searchInput.current?.focus() }
   const pageTitle = useRef<HTMLHeadingElement>(null)
   const notified = useRef(new Set<string>())
   const today = dayKey(new Date(now))
@@ -65,7 +73,7 @@ export function App() {
       if (!database.current) return
       try {
         const next = await transact(database.current)
-        if (active) setData(next)
+        if (active) setData(withInbox(next))
       } catch (cause) { report(cause) }
     }
     openStorage(databaseName).then(db => {
@@ -103,7 +111,7 @@ export function App() {
     const shortcut = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k' && !modal && !document.querySelector('dialog[open]')) {
         event.preventDefault()
-        searchInput.current?.focus()
+        revealSearch()
       }
     }
     window.addEventListener('keydown', shortcut)
@@ -128,8 +136,8 @@ export function App() {
 
   async function apply(change: Change) {
     if (!database.current) throw new Error('Локальная база недоступна.')
-    const next = await transact(database.current, change)
-    setData(next)
+    const next = await transact(database.current, snapshot => change(withInbox(snapshot)))
+    setData(withInbox(next))
     channel.current?.postMessage('updated')
     return next
   }
@@ -143,7 +151,6 @@ export function App() {
     setNotice('')
     try {
       await apply(change)
-      setNotice('Изменения сохранены')
       if (fromModal) navigation.dismiss(done)
       else done?.()
     } catch (cause) {
@@ -176,15 +183,18 @@ export function App() {
     } catch (cause) { setError(messageOf(cause)) }
   }
 
-  function openView(next: View) { navigation.open(next) }
+  function openView(next: View) { setSearchOpen(false); navigation.open(next) }
 
-  function navigate(id: string | null) { navigation.open('folders', id) }
+  function navigate(id: string | null) { setSearchOpen(false); navigation.open('folders', id) }
 
   const path = data && current ? pathTo(data, current) : []
   const place = path.at(-1)
   const parent = place?.id ?? null
-  const roots = data?.places.filter(item => item.parent === null) ?? []
-  const children = data?.places.filter(item => item.parent === parent) ?? []
+  const inbox = data && inboxFor(data)
+  const inInbox = Boolean(inbox && parent === inbox.id)
+  const inboxCount = inbox ? data!.entries.filter(item => item.parent === inbox.id).length : 0
+  const roots = data?.places.filter(item => item.parent === null && item.id !== inbox?.id) ?? []
+  const children = data?.places.filter(item => item.parent === parent && item.id !== inbox?.id) ?? []
   const entries = data?.entries.filter(entry => entry.parent === parent) ?? []
   const result = data && query.trim() ? search(data, query) : undefined
   const home = view === 'home' && !result
@@ -254,67 +264,59 @@ export function App() {
   }
 
   function renderPlace(item: Place) {
-    const siblings = data!.places.filter(candidate => candidate.parent === item.parent)
+    const siblings = data!.places.filter(candidate => candidate.parent === item.parent && candidate.id !== inbox?.id)
     const index = siblings.findIndex(candidate => candidate.id === item.id)
     const folderCount = data!.places.filter(candidate => candidate.parent === item.id).length
     const entryCount = data!.entries.filter(entry => entry.parent === item.id).length
     return <article className={`place-card glass-surface tone-${item.icon}`} key={item.id}>
       <button className="place-open" onClick={() => navigate(item.id)}>
-        <span className="tile"><Glyph icon={item.icon} /></span>
+        <span className="tile">{item.id === inbox?.id ? <Inbox size={22} /> : <Glyph icon={item.icon} />}</span>
         <span className="place-label"><strong>{item.title}</strong>
-          <small>{folderCount} пап. · {entryCount} карт.</small>
+          <small>{item.id === inbox?.id ? inboxCount + ' карт.' : folderCount + ' пап. · ' + entryCount + ' карт.'}</small>
         </span>
         <ChevronRight className="card-chevron" size={16} aria-hidden="true" />
       </button>
+      {item.id === inbox?.id ? undo && <button className="icon-button" title="Отменить удаление" aria-label="Отменить удаление" disabled={busy}
+        onClick={() => void commit(undo, false, () => { setUndo(undefined); setNotice('Удаление отменено') })}><Undo2 size={18} /></button> :
       <Disclosure className="place-menu" label={`Действия «${item.title}»`} icon={Ellipsis}>
         <button aria-label={`Настроить «${item.title}»`} onClick={() => show({ kind: 'place', value: item, editing: true })}><Pencil size={16} /> Настроить</button>
-        <button aria-label={`Передвинуть «${item.title}» выше`} disabled={busy || index === 0} onClick={() => void commit(snapshot => orderPlace(snapshot, item.id, -1))}><ArrowUp size={17} /> Выше</button>
-        <button aria-label={`Передвинуть «${item.title}» ниже`} disabled={busy || index === siblings.length - 1} onClick={() => void commit(snapshot => orderPlace(snapshot, item.id, 1))}><ArrowDown size={17} /> Ниже</button>
+        <button aria-label={`Передвинуть «${item.title}» выше`} disabled={busy || index === 0} onClick={() => void commit(snapshot => orderPlace(snapshot, item.id, -1, inboxFor(snapshot).id))}><ArrowUp size={17} /> Выше</button>
+        <button aria-label={`Передвинуть «${item.title}» ниже`} disabled={busy || index === siblings.length - 1} onClick={() => void commit(snapshot => orderPlace(snapshot, item.id, 1, inboxFor(snapshot).id))}><ArrowDown size={17} /> Ниже</button>
         <button className="remove-place" aria-label={`Удалить «${item.title}»`} onClick={() => removePlace(item)}><Trash2 size={16} /> Удалить</button>
-      </Disclosure>
+      </Disclosure>}
     </article>
   }
 
   const close = () => { if (!writing.current) navigation.dismiss() }
   return <div className="shell">
     <OrganizerHeader roots={roots} activeView={result ? undefined : view} activeRoot={result ? undefined : path[0]?.id}
-      openView={openView} navigate={navigate} focusSearch={() => searchInput.current?.focus()}>
+      openView={openView} navigate={navigate} focusSearch={revealSearch}>
       {!home && <div className="section-bar">
         {navigation.canBack && view !== 'home' &&
           <button className="back-button" onClick={navigation.back}><ArrowLeft size={18} /> Назад</button>}
         <h1 ref={pageTitle} tabIndex={-1}>{heading}</h1>
       </div>}
+      {(searchOpen || query) && <div className="search header-search">
+        <Search size={20} aria-hidden="true" />
+        <input autoFocus ref={searchInput} type="search" aria-label="Поиск по органайзеру" value={query}
+          placeholder="Поиск по органайзеру" onChange={event => setQuery(event.target.value)}
+          onKeyDown={event => { if (event.key === 'Escape') { setSearchOpen(false); setQuery(''); document.querySelector<HTMLButtonElement>('[aria-label="Найти"]')?.focus() } }} />
+        <button className="icon-button" aria-label="Закрыть поиск" onClick={() => { setQuery(''); setSearchOpen(false) }}><X size={18} /></button>
+      </div>}
     </OrganizerHeader>
     <main className={home ? undefined : 'interior'}>
-      <div className={home ? 'overview-intro glass-surface' : 'workspace-search'}>
-        {home && <div className="overview-title">
-          <p><CalendarDays size={16} aria-hidden="true" />
-            {fromDay(today).toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'long' })}</p>
-          <h1 ref={pageTitle} tabIndex={-1}>{heading}</h1>
-        </div>}
-        <div className="search">
-          <Search aria-hidden="true" size={20} />
-          <input ref={searchInput} type="search" aria-label="Поиск по органайзеру" placeholder="Поиск по органайзеру" value={query}
-            onChange={event => setQuery(event.target.value)} />
-          {query ? <button className="icon-button" aria-label="Очистить поиск" onClick={() => setQuery('')}><X size={18} /></button> : <kbd>Ctrl K</kbd>}
-        </div>
-        {home && <button className="primary new-card" disabled={!data} onClick={() =>
-          roots.length ? show({ kind: 'quick', day: '' }) : newPlace(null)}>
-          <Plus size={19} aria-hidden="true" />{roots.length ? 'Новая карточка' : 'Новый раздел'}
-        </button>}
-      </div>
+      {home && <h1 ref={pageTitle} className="sr-only" tabIndex={-1}>{heading}</h1>}
       {showScrollTop && <button className="scroll-top glass-surface" aria-label="Наверх" onClick={() => {
           pageTitle.current?.focus({ preventScroll: true })
           window.scrollTo({ top: 0, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' })
         }}><ArrowUp size={19} aria-hidden="true" /><span>Наверх</span></button>}
       <div className="workspace">
         {error && <p className="glass-surface error banner" role="alert">{error}</p>}
-        {(notice || undo) && <div className={undo || notice.includes('копия') || notice === 'Удаление отменено' ? 'glass-surface feedback' : 'sr-only'}>
-          <span role="status">{notice || 'Доступна отмена последнего удаления'}</span>
-          {undo && <button disabled={busy} onClick={() => void commit(undo, false, () => { setUndo(undefined); setNotice('Удаление отменено') })}><Undo2 size={16} /> Отменить удаление</button>}
-        </div>}
+        {notice && <p className="sr-only" role="status">{notice}</p>}
         {!data && !error && <p role="status">Загрузка локальной базы…</p>}
         {data && <>
+          {!home && !result && view !== 'settings' && <CaptureActions capture={() => show({ kind: 'capture', generation: data.generation })} />}
+          {!home && undo && inbox && <div className="grid">{renderPlace(inbox)}</div>}
           {!result && place && <nav className="breadcrumbs" aria-label="Расположение">
             <button onClick={() => navigate(null)}>Все разделы</button>
             {path.map(part => <span key={part.id}><ChevronRight size={14} />
@@ -323,7 +325,7 @@ export function App() {
           </nav>}
           {!result && !home && view !== 'settings' && view !== 'center' && <div className="page-header">
             <div className="actions">
-              {place && <button onClick={() => newPlace(parent)}><Plus size={18} /> Папка</button>}
+              {place && !inInbox && <button onClick={() => newPlace(parent)}><Plus size={18} /> Папка</button>}
               <button className="primary" onClick={() => {
                 if (parent) newEntry(parent)
                 else if (view === 'folders' || !roots.length) newPlace(null)
@@ -348,11 +350,13 @@ export function App() {
           </div> : view === 'home' ? <div className="overview-layout">
             <section className="overview-sections" aria-labelledby="overview-sections-title">
               <CenterTile open={() => openView('center')} count={data.shortcuts?.length ?? 0} />
-              <div className="overview-section-heading">
-                <h2 id="overview-sections-title">Разделы</h2>
-                <button className="glass-surface" aria-label="Добавить раздел" onClick={() => newPlace(null)}><Plus size={16} aria-hidden="true" /> Раздел</button>
+              <div className="home-create">
+                <button className="primary new-card" onClick={() => show({ kind: 'quick', day: '' })}><Plus size={18} />Новая карточка</button>
+                <CaptureActions capture={() => show({ kind: 'capture', generation: data.generation })} />
               </div>
-              {roots.length > 0 && <div className="grid overview-places">{roots.map(renderPlace)}</div>}
+              <h2 id="overview-sections-title" className="sr-only">Разделы</h2>
+              <div className="grid overview-places">{inbox && renderPlace(inbox)}{roots.map(renderPlace)}</div>
+              <button className="glass-surface add-section" onClick={() => newPlace(null)}><Plus size={16} />Новый раздел</button>
             </section>
             <Overview data={data} today={today} open={open} navigate={openView} update={updatePrefs} busy={busy} />
           </div> :
@@ -384,6 +388,8 @@ export function App() {
               {place?.id === 'finance' && <Finance data={data} open={open} />}
               {children.length > 0 && <div className="grid">{children.map(renderPlace)}</div>}
               {entries.length > 0 && <div className="entries">{entries.map(entry => <CardView key={entry.id} entry={entry} data={data} today={today}
+                move={() => show({ kind: 'move', entry, generation: data.generation })}
+                share={() => void shareCard(entry, () => show({ kind: 'share', entry }))}
                 open={open} remove={() => confirmation(`Удалить «${entry.title}»?`, 'Карточка и её вложения будут удалены.',
                   snapshot => deleteEntry(snapshot, entry.id))}
                 favorite={() => mutate(entry, latest => ({ ...latest, blocks: blocksOf(latest), favorite: !latest.favorite }))}
@@ -398,9 +404,20 @@ export function App() {
       </div>
       <footer role="contentinfo" className="build-label">{buildLabel}</footer>
     </main>
+    {modal?.kind === 'move' && data && <MoveCard entry={modal.entry} data={data} busy={busy} error={modalError} close={close}
+      move={parent => void commit(snapshot => {
+        if (snapshot.generation !== modal.generation) throw new Error('База заменена. Откройте карточку заново.')
+        return moveEntry(snapshot, modal.entry, parent)
+      }, true)} />}
+    {modal?.kind === 'share' && <ShareFallback entry={modal.entry} close={close} />}
+    {modal?.kind === 'capture' && data && inbox && <QuickCapture {...capture} data={data}
+      inboxId={inbox.id} busy={busy} error={modalError} close={close} save={() => void commit(snapshot => {
+        if (snapshot.generation !== modal.generation) throw new Error('База заменена в другой вкладке. Откройте быстрый захват заново.')
+        return saveCapture(snapshot, capture.draft)
+      }, true, () => capture.change(emptyCapture))} />}
     {modal?.kind === 'quick' && <Dialog title="Выберите тип карточки" close={close}>
       <div className="quick-list">{kinds.map(kind => <button key={kind} onClick={() => {
-        const selected = roots.find(root => root.id === rootFor[kind]) ?? roots[0]
+        const selected = roots.find(root => root.id === rootFor[kind]) ?? roots[0] ?? inbox
         if (selected) newEntry(selected.id, kind, modal.day)
       }}>{kindName[kind]}</button>)}</div>
     </Dialog>}
