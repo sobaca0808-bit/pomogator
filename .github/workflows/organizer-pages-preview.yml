@@ -392,6 +392,16 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+      - name: Wait for the published revision before starting Android
+        env:
+          EXPECTED_COMMIT: ${{ needs.build.outputs.source }}
+        run: |
+          for attempt in {1..18}; do
+            html=$(curl -fsS --max-time 10 "$POMOGATOR_PAGES_URL" || true)
+            [[ "$html" == *"$EXPECTED_COMMIT"* ]] && break
+            sleep 5
+          done
+          [[ "$html" == *"$EXPECTED_COMMIT"* ]]
       - name: Test installability in Android Chrome
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -400,13 +410,7 @@ jobs:
           arch: x86_64
           profile: pixel_7
           disable-animations: true
-          script: |
-            for attempt in {1..18}; do
-              html=$(curl -fsS --max-time 10 "$POMOGATOR_PAGES_URL" || true)
-              [[ "$html" == *"$EXPECTED_COMMIT"* ]] && break
-              sleep 5
-            done
-            [[ "$html" == *"$EXPECTED_COMMIT"* ]] && node e2e/pages-smoke.mjs
+          script: node e2e/pages-smoke.mjs
         env:
           POMOGATOR_ANDROID: '1'
           POMOGATOR_CURRENT_PREVIEW: '1'
