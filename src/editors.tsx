@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { ArrowLeft, X, BriefcaseBusiness, Wallet, ListTodo, NotebookPen, FileText, PanelsTopLeft, Folder, Star } from 'lucide-react'
 import { icons, type Place } from './model'
 
@@ -13,6 +13,7 @@ export function Glyph({ icon }: { icon: Place['icon'] }) {
 
 export function Dialog({ title, close, children, className, showBack }: { showBack?: boolean; title: string; close: () => void; children: ReactNode; className?: string }) {
   const ref = useRef<HTMLDialogElement>(null)
+  const titleId = useId()
   useEffect(() => {
     const dialog = ref.current!
     dialog.showModal()
@@ -36,14 +37,44 @@ export function Dialog({ title, close, children, className, showBack }: { showBa
       viewport.removeEventListener('scroll', fit)
     }
   }, [])
-  return <dialog className={className} ref={ref} onCancel={event => { event.preventDefault(); close() }} aria-labelledby="dialog-title">
+  return <dialog className={['glass-surface', className].filter(Boolean).join(' ')} ref={ref} onCancel={event => { event.preventDefault(); close() }} aria-labelledby={titleId}>
     <header className="dialog-header">
       <div className="dialog-title-group">{showBack && <button className="back-button" type="button" onClick={close}><ArrowLeft size={17} /> Назад</button>}
-        <h2 id="dialog-title">{title}</h2></div>
+        <h2 id={titleId}>{title}</h2></div>
       <button type="button" className="icon-button" aria-label="Закрыть" onClick={close}><X /></button>
     </header>
     {children}
   </dialog>
+}
+
+export function useDiscardDialog(message: string) {
+  const pending = useRef<{ promise: Promise<boolean>; resolve: (discard: boolean) => void }>(null)
+  const [visible, setVisible] = useState(false)
+  useEffect(() => () => { pending.current?.resolve(false) }, [])
+
+  function confirm() {
+    if (pending.current) return pending.current.promise
+    let resolve!: (discard: boolean) => void
+    const promise = new Promise<boolean>(settle => { resolve = settle })
+    pending.current = { promise, resolve }
+    setVisible(true)
+    return promise
+  }
+
+  function decide(discard: boolean) {
+    pending.current?.resolve(discard)
+    pending.current = null
+    setVisible(false)
+  }
+
+  const dialog = visible && <Dialog title="Несохранённые изменения" close={() => decide(false)}>
+    <p>{message}</p>
+    <div className="actions">
+      <button type="button" autoFocus onClick={() => decide(false)}>Продолжить редактирование</button>
+      <button type="button" className="danger" onClick={() => decide(true)}>Закрыть без сохранения</button>
+    </div>
+  </Dialog>
+  return { confirm, dialog }
 }
 
 export function PlaceEditor({ place, close, save, error, busy, guard }: {
@@ -52,14 +83,14 @@ export function PlaceEditor({ place, close, save, error, busy, guard }: {
 }) {
   const [title, setTitle] = useState(place.title)
   const [icon, setIcon] = useState(place.icon)
-  const canClose = () => !busy && ((title === place.title && icon === place.icon) ||
-    window.confirm('Закрыть папку и потерять несохранённые изменения?'))
+  const discard = useDiscardDialog('Закрыть редактор папки без сохранения изменений?')
+  const canClose = async () => !busy && ((title === place.title && icon === place.icon) || await discard.confirm())
   useLayoutEffect(() => {
     guard.current = canClose
     return () => { guard.current = null }
   })
-  const askClose = () => { if (canClose()) close() }
-  return <Dialog showBack className="place-dialog" title={place.title ? 'Настройки' : place.parent === null ? 'Новый раздел' : 'Новая папка'} close={askClose}>
+  const askClose = async () => { if (await canClose()) close() }
+  return <><Dialog showBack className="place-dialog" title={place.title ? 'Настройки' : place.parent === null ? 'Новый раздел' : 'Новая папка'} close={askClose}>
     <form onSubmit={event => {
       event.preventDefault()
       if (title.trim()) save({ ...place, title: title.trim(), icon })
@@ -76,7 +107,7 @@ export function PlaceEditor({ place, close, save, error, busy, guard }: {
       <div className="actions"><button type="button" onClick={askClose}>Отмена</button>
         <button className="primary" disabled={busy || !title.trim()}>Сохранить</button></div>
     </form>
-  </Dialog>
+  </Dialog>{discard.dialog}</>
 }
 
 export const formatTime = (value: string) => new Date(value).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' })

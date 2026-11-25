@@ -1,7 +1,7 @@
 import { useLayoutEffect, useState, type RefObject } from 'react'
 import { ArrowDown, ArrowUp, ChevronRight, ExternalLink, Globe, LayoutGrid, Link2, Mail, Music2, Pencil, Plus, Trash2 } from 'lucide-react'
 import { siDiscord, siGithub, siGmail, siGooglemaps, siNotion, siSteam, siTelegram, siVk, siWhatsapp, siYoutube } from 'simple-icons'
-import { Dialog } from './editors'
+import { Dialog, useDiscardDialog } from './editors'
 import { shortcutCatalog, shortcutUrl, type Shortcut, type ShortcutIcon } from './shortcuts'
 
 const brands = {
@@ -41,9 +41,9 @@ export function MyCenter({ shortcuts, busy, edit, remove, move }: {
         {arrange ? 'Готово' : 'Управлять ярлыками'}
       </button>}
     </div>
-    {!shortcuts.length && <p className="empty">Добавьте нужные ярлыки из каталога или укажите свою HTTPS-ссылку.</p>}
+    {!shortcuts.length && <p className="empty glass-surface">Добавьте нужные ярлыки из каталога или укажите свою HTTPS-ссылку.</p>}
     {shortcuts.length > 0 && <ul className="shortcut-grid">
-      {shortcuts.map((item, index) => <li key={item.id} className="widget shortcut-card">
+      {shortcuts.map((item, index) => <li key={item.id} className="widget glass-surface shortcut-card">
         <a className="shortcut-open" href={item.url} target="_blank" rel="noopener noreferrer">
           <ShortcutGlyph icon={item.icon} /><strong>{item.title}</strong><ExternalLink size={15} aria-hidden="true" />
         </a>
@@ -71,12 +71,13 @@ export function ShortcutEditor({ value, editing, busy, close, guard, error, save
   const [draft, setDraft] = useState(value)
   const dirty = draft.title !== value.title || draft.url !== value.url || draft.icon !== value.icon
   const url = shortcutUrl(draft.url)
-  const canClose = () => !busy && (!dirty || window.confirm('Закрыть ярлык и потерять несохранённые изменения?'))
+  const discard = useDiscardDialog('Закрыть редактор ярлыка без сохранения изменений?')
+  const canClose = async () => !busy && (!dirty || await discard.confirm())
   useLayoutEffect(() => {
     guard.current = canClose
     return () => { guard.current = null }
   })
-  const askClose = () => { if (canClose()) close() }
+  const askClose = async () => { if (await canClose()) close() }
 
   function select(icon: ShortcutIcon) {
     setDraft(current => {
@@ -90,7 +91,7 @@ export function ShortcutEditor({ value, editing, busy, close, guard, error, save
     })
   }
 
-  return <Dialog className="shortcut-dialog" title={editing ? 'Изменить ярлык' : 'Добавить ярлык'} close={askClose}>
+  return <><Dialog className="shortcut-dialog" title={editing ? 'Изменить ярлык' : 'Добавить ярлык'} close={askClose}>
     <form noValidate onSubmit={event => {
       event.preventDefault()
       if (!busy && draft.title.trim() && url) save({ ...draft, title: draft.title.trim(), url })
@@ -115,5 +116,5 @@ export function ShortcutEditor({ value, editing, busy, close, guard, error, save
       <div className="actions shortcut-editor-actions"><button type="button" onClick={askClose} disabled={busy}>Отмена</button>
         <button className="primary" disabled={busy || !draft.title.trim() || !url}>Сохранить ярлык</button></div>
     </form>
-  </Dialog>
+  </Dialog>{discard.dialog}</>
 }

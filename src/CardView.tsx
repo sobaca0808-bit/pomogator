@@ -39,6 +39,18 @@ function Body({ block, data, open, toggle }: { block: Block; data: Data; open: (
   }
 }
 
+export function CardLinks({ blocks, payment = false }: { blocks: Block[]; payment?: boolean }) {
+  const links = blocks.filter((block): block is Extract<Block, { type: 'link' }> => block.type === 'link' && safeLink(block.value))
+  if (!links.length) return null
+  return <div className="card-links">{links.map(link => {
+    const label = link.label.trim()
+    return <a className="card-link" key={link.id} href={link.value} target="_blank" rel="noopener noreferrer">
+      <ExternalLink size={17} aria-hidden="true" />
+      <span>{payment ? <><strong>{label || 'Сайт оплаты'}</strong><small>{link.value}</small></> : label || link.value}</span>
+    </a>
+  })}</div>
+}
+
 export function CardView({ entry, data, today, open, remove, toggle, complete, favorite }: {
   entry: Entry; data: Data; today: string; open: (entry: Entry) => void; remove: () => void;
   toggle: (id: string, index: number) => void; complete: () => void; favorite: () => void
@@ -48,11 +60,10 @@ export function CardView({ entry, data, today, open, remove, toggle, complete, f
   const tags = tagsOf(entry)
   const blocks = blocksOf(entry)
   const isDeadline = kind === 'task' || kind === 'project' || kind === 'payment'
-  const links = blocks.flatMap(block => block.type === 'link' && safeLink(block.value) ? [block] : [])
   const dates = isDeadline ? blocks.flatMap(block => block.type === 'date' && block.value ? [block] : []) : []
   const children = data.entries.filter(item => item.parentCard === entry.id)
   const parent = data.entries.find(item => item.id === entry.parentCard)
-  return <article className="entry">
+  return <article className="entry glass-surface">
     <div className="entry-heading">
       <span className={`tile tile-small tone-${entry.icon ?? kindIcon[kind]}`}><Glyph icon={entry.icon ?? kindIcon[kind]} /></span>
       <div className="entry-title"><small>{kindName[kind]}</small><h3>{entry.title}</h3></div>
@@ -78,13 +89,12 @@ export function CardView({ entry, data, today, open, remove, toggle, complete, f
         <strong>{label}</strong>
       </p>
     })}
-    {links.map(link => <a className="card-link" key={link.id} href={link.value} target="_blank" rel="noreferrer">
-      <ExternalLink size={17} />{link.label || link.value}</a>)}
+    <CardLinks blocks={blocks} payment={kind === 'payment'} />
     {kind === 'project' && <div className="card-progress"><progress value={progress(entry)} max={100} aria-label="Выполнение проекта" />
       <small>{progress(entry)}%</small></div>}
     <div className="card-body">{blocks.filter(block => block.type !== 'link' && (!isDeadline || block.type !== 'date')).map(block => <Body key={block.id} block={block} data={data} open={open} toggle={toggle} />)}</div>
     {parent && <button className="related" onClick={() => open(parent)}>В составе · {parent.title}</button>}
-    {children.length > 0 && <details><summary>{kind === 'project' ? 'Подпроекты' : 'Подзадачи'} · {children.length}</summary>
+    {children.length > 0 && <details className="editor-options"><summary>{kind === 'project' ? 'Подпроекты' : 'Подзадачи'} · {children.length}</summary>
       <div className="related-list">{children.map(child => <button className="related" key={child.id} onClick={() => open(child)}>{child.title}</button>)}</div>
     </details>}
     {(kind === 'project' || kind === 'task') && <div className="actions">

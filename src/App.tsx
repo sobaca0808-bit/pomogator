@@ -276,7 +276,7 @@ export function App() {
   }
 
   const close = () => { if (!writing.current) navigation.dismiss() }
-  return <div className="shell" data-workspace={view === 'home' || (view === 'folders' && !place) || undefined}>
+  return <div className="shell">
     <OrganizerHeader roots={roots} activeView={result ? undefined : view} activeRoot={result ? undefined : path[0]?.id}
       openView={openView} navigate={navigate} focusSearch={() => searchInput.current?.focus()}>
       {!home && <div className="section-bar">
@@ -285,7 +285,7 @@ export function App() {
         <h1 ref={pageTitle} tabIndex={-1}>{heading}</h1>
       </div>}
     </OrganizerHeader>
-    <main>
+    <main className={home ? undefined : 'interior'}>
       <div className={home ? 'overview-intro glass-surface' : 'workspace-search'}>
         {home && <div className="overview-title">
           <p><CalendarDays size={16} aria-hidden="true" />
@@ -308,8 +308,8 @@ export function App() {
           window.scrollTo({ top: 0, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' })
         }}><ArrowUp size={19} aria-hidden="true" /><span>Наверх</span></button>}
       <div className="workspace">
-        {error && <p className="error banner" role="alert">{error}</p>}
-        {(notice || undo) && <div className={undo || notice.includes('копия') || notice === 'Удаление отменено' ? 'feedback' : 'sr-only'}>
+        {error && <p className="glass-surface error banner" role="alert">{error}</p>}
+        {(notice || undo) && <div className={undo || notice.includes('копия') || notice === 'Удаление отменено' ? 'glass-surface feedback' : 'sr-only'}>
           <span role="status">{notice || 'Доступна отмена последнего удаления'}</span>
           {undo && <button disabled={busy} onClick={() => void commit(undo, false, () => { setUndo(undefined); setNotice('Удаление отменено') })}><Undo2 size={16} /> Отменить удаление</button>}
         </div>}
@@ -331,20 +331,20 @@ export function App() {
               }}><Plus size={20} /> {view === 'folders' && !place || !roots.length ? 'Новый раздел' : 'Новая карточка'}</button>
             </div>
           </div>}
-          {!result && reminders.slice(0, 3).map(reminder => <div className="reminder" key={reminder.key}>
+          {!result && reminders.slice(0, 3).map(reminder => <div className="glass-surface reminder" key={reminder.key}>
             <Bell size={18} /><button onClick={() => open(reminder.entry)}>{reminder.entry.title}</button>
             <button className="icon-button" aria-label={`Скрыть напоминание «${reminder.entry.title}»`} disabled={busy}
               onClick={() => updatePrefs(prefs => ({ ...prefs, seenReminders: [...prefs.seenReminders, reminder.key] }))}><X size={17} /></button>
           </div>)}
           {result ? <div className="results">
-            {result.places.map(item => <button key={item.id} className="result" onClick={() => navigate(item.id)}>
+            {result.places.map(item => <button key={item.id} className="result glass-surface" onClick={() => navigate(item.id)}>
               <Glyph icon={item.icon} /><span><strong>{item.title}</strong>
                 <small>{pathTo(data, item.id).slice(0, -1).map(part => part.title).join(' / ') || 'Раздел'}</small></span>
             </button>)}
-            {result.entries.map(entry => <button key={entry.id} className="result" onClick={() => { navigate(entry.parent); open(entry) }}>
+            {result.entries.map(entry => <button key={entry.id} className="result glass-surface" onClick={() => { navigate(entry.parent); open(entry) }}>
               <FileText size={22} /><span><strong>{entry.title}</strong>
                 <small>{pathTo(data, entry.parent).map(part => part.title).join(' / ')}</small></span></button>)}
-            {!result.places.length && !result.entries.length && <p className="empty">Совпадений не найдено</p>}
+            {!result.places.length && !result.entries.length && <p className="empty glass-surface">Совпадений не найдено</p>}
           </div> : view === 'home' ? <div className="overview-layout">
             <section className="overview-sections" aria-labelledby="overview-sections-title">
               <CenterTile open={() => openView('center')} count={data.shortcuts?.length ?? 0} />
@@ -367,7 +367,7 @@ export function App() {
                   } })
               }} /> :
             view === 'calendar' ? <Calendar data={data} today={today} open={open} create={day => show({ kind: 'quick', day })} /> :
-            view === 'settings' ? <section className="widget app-settings">
+            view === 'settings' ? <section className="widget glass-surface app-settings">
               <label className="check-item"><input type="checkbox" checked={theme === 'light'}
                 onChange={event => setTheme(event.target.checked ? 'light' : 'dark')} /> Светлая тема</label>
               <div className="actions">
@@ -391,7 +391,7 @@ export function App() {
                 toggle={(id, index) => mutate(entry, latest => ({ ...latest, blocks: blocksOf(latest).map(block =>
                   block.type === 'checklist' && block.id === id ? { ...block, items: block.items.map((item, i) =>
                     i === index ? { ...item, done: !item.done } : item) } : block) }))} />)}</div>}
-              {!children.length && !entries.length && place?.id !== 'finance' && <div className="empty"><FolderOpen size={28} />
+              {!children.length && !entries.length && place?.id !== 'finance' && <div className="empty glass-surface"><FolderOpen size={28} />
                 <p>{place ? 'Создайте папку или карточку в этом разделе.' : 'Создайте раздел, чтобы начать работу.'}</p></div>}
             </>}
         </>}
