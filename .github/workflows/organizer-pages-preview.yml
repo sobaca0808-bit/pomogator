@@ -335,10 +335,12 @@ jobs:
 
       - name: Verify 0.2.4 and its isolation from the previous preview
         env:
-          POMOGATOR_V01_URL: ${{ env.POMOGATOR_024_URL }}
-          POMOGATOR_PREVIOUS_DATABASE: pomogator-v024-pages
-          EXPECTED_COMMIT: ${{ needs.build.outputs.source }}
-          EXPECTED_VERSION: ${{ needs.build.outputs.version }}
+          POMOGATOR_PAGES_URL: ${{ env.POMOGATOR_024_URL }}
+          POMOGATOR_DATABASE: pomogator-v024-pages
+          POMOGATOR_V01_URL: ${{ env.POMOGATOR_023_URL }}
+          POMOGATOR_PREVIOUS_DATABASE: pomogator-v023-pages
+          EXPECTED_COMMIT: ${{ needs.build.outputs.redesign }}
+          EXPECTED_VERSION: '0.2.4'
         run: |
           curl --fail --silent --show-error --retry 8 --retry-delay 7 --retry-all-errors \
             --max-time 20 --output /dev/null "${POMOGATOR_PAGES_URL}build.json?v=$EXPECTED_COMMIT"
