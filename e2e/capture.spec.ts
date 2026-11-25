@@ -48,7 +48,7 @@ for (const width of [390, 1366]) {
       await expect(button('Скачать plan.txt')).toBeVisible()
       await screen('inbox')
       await button('Редактировать «Взять билеты»').click()
-      await dialog.getByLabel('Проект', { exact: true }).selectOption({ label: 'Поездка' })
+      await dialog.getByRole('combobox', { name: 'Проект', exact: true }).selectOption({ label: 'Поездка' })
       await button('Готово').click()
       await expect(dialog).toHaveCount(0)
       await expect(button(/Входящие\s*0/)).toBeVisible()
