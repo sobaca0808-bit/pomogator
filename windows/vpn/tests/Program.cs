@@ -244,8 +244,17 @@ Test("The TUN helper sets the child transport scope and proxy launches discard i
     var egress = new TunEgress(new IPEndPoint(IPAddress.Parse("203.0.113.57"), 8443), IPAddress.Parse("192.0.2.9"), 371);
     TunEgress.Configure(info, egress);
     Assert(info.Environment[peer] == "203.0.113.57:8443" && info.Environment[source] == "192.0.2.9" && info.Environment[index] == "371");
+    const string protocol = "POMOGATOR_TUN_PROTOCOL";
+    Assert(info.Environment[protocol] == "tcp");
+    foreach (var (options, expected) in new[] { ("tls&type=xhttp&alpn=h3", "udp"), ("tls&type=xhttp&alpn=h3,h2", "tcp"),
+        ("tls&type=tcp&alpn=h3", "tcp"), ("tls&type=xhttp", "tcp") })
+    {
+        var profile = Profiles.Parse(Base + "?security=" + options);
+        TunEgress.Configure(info, TunEgress.ForProfile(egress.Peer.Address, egress.Source, egress.InterfaceIndex, profile));
+        Assert(info.Environment[protocol] == expected);
+    }
     TunEgress.Configure(info, null);
-    Assert(!info.Environment.ContainsKey(peer) && !info.Environment.ContainsKey(source) && !info.Environment.ContainsKey(index));
+    Assert(!info.Environment.ContainsKey(protocol) && !info.Environment.ContainsKey(peer) && !info.Environment.ContainsKey(source) && !info.Environment.ContainsKey(index));
 });
 await TestAsync("TUN waits for a slow adapter, tentative IPv4, planned routes and delayed DNS", async () => {
     var expected = new TunObservation(Guid.NewGuid(), "fixture", Uplink: 7, ExpectedDns: TunConfig.Resolver);

@@ -238,7 +238,7 @@ internal sealed class TunSession(TunRecovery record) : IDisposable
             var start = Xray.StartAsync(image, config, port,
                 alive.Token, WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback, inheritConsole: true, startupSeconds: 24,
                 diagnosticLine: diagnostic.Read, startupExit: diagnostic.Exited,
-                tunEgress: new TunEgress(new IPEndPoint(peer, profile.Port), source, record.Before.Uplink));
+                tunEgress: TunEgress.ForProfile(peer, source, record.Before.Uplink, profile));
             if (await Task.WhenAny(start, runtime) == runtime) alive.Cancel();
             engine = await start;
             // Xray starts tagged listeners in unspecified order. Its startup marker appears only

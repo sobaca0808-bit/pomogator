@@ -39,7 +39,7 @@ internal sealed class TunEngineDiagnostic(IPAddress? peer = null, int port = 0, 
         if (line.Contains("core: Xray ", StringComparison.Ordinal) && line.EndsWith(" started", StringComparison.Ordinal))
             Interlocked.Exchange(ref started, 1);
         bool Has(string fragment) => line.Contains(fragment, StringComparison.OrdinalIgnoreCase);
-        var known = Has("invalid TUN peer endpoint") ? "проверка IPv4 и TCP-порта VPN-сервера" :
+        var known = Has("invalid TUN peer endpoint") || Has("invalid TUN transport protocol") ? "проверка адреса, порта и транспорта VPN-сервера" :
             Has("invalid TUN uplink interface index") || Has("TUN uplink interface unavailable") ? "проверка исходящего интерфейса Windows" :
             Has("invalid TUN uplink source address") || Has("TUN source IPv4 is not preferred on the uplink") ? "проверка исходного IPv4 на выбранном интерфейсе" :
             Has("FwpmFilterAdd") || Has("unable to block") ? "установка временной защиты TUN в WFP" :

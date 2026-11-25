@@ -8,24 +8,34 @@ namespace Pomogator.Vpn;
 public sealed record TunControlEndpoint(int Port, string User, string Password, string Destination, int DestinationPort);
 
 // Only the child that installs our TUN filters receives the verified transport tuple.
-public sealed record TunEgress(IPEndPoint Peer, IPAddress Source, int InterfaceIndex)
+public sealed record TunEgress(IPEndPoint Peer, IPAddress Source, int InterfaceIndex, ProtocolType Protocol = ProtocolType.Tcp)
 {
+    // Xray splithttp's decideHTTPVersion selects QUIC only for TLS with a single h3 ALPN.
+    public static TunEgress ForProfile(IPAddress peer, IPAddress source, int index, Profile profile) =>
+        new(new IPEndPoint(peer, profile.Port), source, index,
+            profile is { Security: "tls", Transport: "xhttp" } && profile.Option("alpn") == "h3"
+                ? ProtocolType.Udp : ProtocolType.Tcp);
+
     internal static void Configure(System.Diagnostics.ProcessStartInfo start, TunEgress? egress)
     {
         const string peer = "POMOGATOR_TUN_PEER";
         const string source = "POMOGATOR_TUN_SOURCE";
         const string index = "POMOGATOR_TUN_IFINDEX";
+        const string protocol = "POMOGATOR_TUN_PROTOCOL";
         // Reference and proxy processes must never inherit an unrelated session scope.
         if (egress == null)
         {
             start.Environment.Remove(peer);
             start.Environment.Remove(source);
             start.Environment.Remove(index);
+            start.Environment.Remove(protocol);
             return;
         }
         if (egress.Peer.AddressFamily != AddressFamily.InterNetwork || egress.Peer.Port == 0 ||
-            egress.Source.AddressFamily != AddressFamily.InterNetwork || egress.InterfaceIndex <= 0)
+            egress.Source.AddressFamily != AddressFamily.InterNetwork || egress.InterfaceIndex <= 0 ||
+            egress.Protocol is not (ProtocolType.Tcp or ProtocolType.Udp))
             throw new VpnError("Не подтверждены параметры исходящего IPv4-подключения для TUN.");
+        start.Environment[protocol] = egress.Protocol == ProtocolType.Udp ? "udp" : "tcp";
         start.Environment[peer] = egress.Peer.ToString();
         start.Environment[source] = egress.Source.ToString();
         start.Environment[index] = egress.InterfaceIndex.ToString(System.Globalization.CultureInfo.InvariantCulture);

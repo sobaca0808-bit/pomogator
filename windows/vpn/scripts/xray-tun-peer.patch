@@ -1,9 +1,9 @@
 diff --git a/proxy/tun/pomogator_windows.go b/proxy/tun/pomogator_windows.go
 new file mode 100644
-index 0000000..b0f1be6
+index 0000000..258f829
 --- /dev/null
 +++ b/proxy/tun/pomogator_windows.go
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,95 @@
 +package tun
 +
 +import (
@@ -27,9 +27,10 @@ index 0000000..b0f1be6
 +)
 +
 +type pomogatorPeer struct {
-+	server netip.AddrPort
-+	source netip.Addr
-+	uplink winipcfg.LUID
++	server   netip.AddrPort
++	source   netip.Addr
++	uplink   winipcfg.LUID
++	protocol uint8
 +}
 +
 +func readPomogatorPeer(tun winipcfg.LUID) (pomogatorPeer, error) {
@@ -45,6 +46,15 @@ index 0000000..b0f1be6
 +	if err != nil || index == 0 {
 +		return pomogatorPeer{}, errors.New("invalid TUN uplink interface index")
 +	}
++	var protocol uint8
++	switch os.Getenv("POMOGATOR_TUN_PROTOCOL") {
++	case "tcp":
++		protocol = windows.IPPROTO_TCP
++	case "udp":
++		protocol = windows.IPPROTO_UDP
++	default:
++		return pomogatorPeer{}, errors.New("invalid TUN transport protocol")
++	}
 +	uplink, err := winipcfg.LUIDFromIndex(uint32(index))
 +	if err != nil || uplink == 0 || uplink == tun {
 +		return pomogatorPeer{}, errors.New("TUN uplink interface unavailable")
@@ -53,7 +63,7 @@ index 0000000..b0f1be6
 +	if err != nil || row.DadState != winipcfg.DadStatePreferred {
 +		return pomogatorPeer{}, errors.New("TUN source IPv4 is not preferred on the uplink")
 +	}
-+	return pomogatorPeer{server, source, uplink}, nil
++	return pomogatorPeer{server, source, uplink, protocol}, nil
 +}
 +
 +type pomogatorAddFilter func(layer *windows.GUID, name string, flags, action uint32, weight uint8, conditions ...fwpmFilterCondition0) error
@@ -77,7 +87,7 @@ index 0000000..b0f1be6
 +	} {
 +		err := add(&fwpmLayerALEAuthConnectV4, identity.name, 0, fwpActionPermit, weightXray,
 +			condition(identity.field, fwpByteBlobType, uintptr(unsafe.Pointer(appID))),
-+			condition(&fwpmConditionIPProtocol, fwpUint8, windows.IPPROTO_TCP),
++			condition(&fwpmConditionIPProtocol, fwpUint8, uintptr(peer.protocol)),
 +			condition(&fwpmConditionIPRemoteAddress, fwpUint32, uintptr(binary.BigEndian.Uint32(server[:]))),
 +			condition(&fwpmConditionIPRemotePort, fwpUint16, uintptr(peer.server.Port())),
 +			condition(&fwpmConditionIPLocalAddress, fwpUint32, uintptr(binary.BigEndian.Uint32(source[:]))),
@@ -91,10 +101,10 @@ index 0000000..b0f1be6
 +}
 diff --git a/proxy/tun/pomogator_windows_test.go b/proxy/tun/pomogator_windows_test.go
 new file mode 100644
-index 0000000..bdc60ed
+index 0000000..368460c
 --- /dev/null
 +++ b/proxy/tun/pomogator_windows_test.go
-@@ -0,0 +1,100 @@
+@@ -0,0 +1,110 @@
 +package tun
 +
 +import (
@@ -108,16 +118,19 @@ index 0000000..bdc60ed
 +)
 +
 +func TestPomogatorPeerRequiresExplicitScope(t *testing.T) {
-+	for _, c := range []struct{ peer, source, index, want string }{
-+		{"", "", "", "invalid TUN peer endpoint"},
-+		{"[2001:db8::1]:443", "192.0.2.33", "7", "invalid TUN peer endpoint"},
-+		{"192.0.2.10:0", "192.0.2.33", "7", "invalid TUN peer endpoint"},
-+		{"192.0.2.10:443", "0.0.0.0", "7", "invalid TUN uplink source address"},
-+		{"192.0.2.10:443", "192.0.2.33", "0", "invalid TUN uplink interface index"},
++	for _, c := range []struct{ peer, source, index, protocol, want string }{
++		{"", "", "", "tcp", "invalid TUN peer endpoint"},
++		{"[2001:db8::1]:443", "192.0.2.33", "7", "tcp", "invalid TUN peer endpoint"},
++		{"192.0.2.10:0", "192.0.2.33", "7", "tcp", "invalid TUN peer endpoint"},
++		{"192.0.2.10:443", "0.0.0.0", "7", "tcp", "invalid TUN uplink source address"},
++		{"192.0.2.10:443", "192.0.2.33", "0", "tcp", "invalid TUN uplink interface index"},
++		{"192.0.2.10:443", "192.0.2.33", "7", "", "invalid TUN transport protocol"},
++		{"192.0.2.10:443", "192.0.2.33", "7", "any", "invalid TUN transport protocol"},
 +	} {
 +		t.Setenv("POMOGATOR_TUN_PEER", c.peer)
 +		t.Setenv("POMOGATOR_TUN_SOURCE", c.source)
 +		t.Setenv("POMOGATOR_TUN_IFINDEX", c.index)
++		t.Setenv("POMOGATOR_TUN_PROTOCOL", c.protocol)
 +		if _, err := readPomogatorPeer(0); err == nil || err.Error() != c.want {
 +			t.Fatalf("invalid scope error = %v, want %s", err, c.want)
 +		}
@@ -127,7 +140,14 @@ index 0000000..bdc60ed
 +// Inspect the native conditions supplied to BFE, including both identities.
 +// All seven fields are required on each permit; no unconstrained second rule.
 +func TestPomogatorPeerFilterScope(t *testing.T) {
-+	peer := pomogatorPeer{netip.MustParseAddrPort("192.0.2.10:8043"), netip.MustParseAddr("192.0.2.33"), 0x106}
++	for name, protocol := range map[string]uint8{"tcp": windows.IPPROTO_TCP, "udp": windows.IPPROTO_UDP} {
++		t.Run(name, func(t *testing.T) { checkPomogatorPeerFilterScope(t, protocol) })
++	}
++}
++
++func checkPomogatorPeerFilterScope(t *testing.T, protocol uint8) {
++	t.Helper()
++	peer := pomogatorPeer{netip.MustParseAddrPort("192.0.2.10:8043"), netip.MustParseAddr("192.0.2.33"), 0x106, protocol}
 +	blob := new(fwpByteBlob)
 +	var pinner runtime.Pinner
 +	pinner.Pin(blob)
@@ -149,7 +169,7 @@ index 0000000..bdc60ed
 +			value uintptr
 +		}{
 +			{identities[calls], fwpByteBlobType, uintptr(unsafe.Pointer(blob))},
-+			{fwpmConditionIPProtocol, fwpUint8, windows.IPPROTO_TCP},
++			{fwpmConditionIPProtocol, fwpUint8, uintptr(protocol)},
 +			{fwpmConditionIPRemoteAddress, fwpUint32, 0xc000020a},
 +			{fwpmConditionIPRemotePort, fwpUint16, 8043},
 +			{fwpmConditionIPLocalAddress, fwpUint32, 0xc0000221},
@@ -190,7 +210,7 @@ index 0000000..bdc60ed
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	peer := pomogatorPeer{netip.MustParseAddrPort("192.0.2.10:443"), netip.MustParseAddr("192.0.2.33"), loopback}
++	peer := pomogatorPeer{netip.MustParseAddrPort("192.0.2.10:443"), netip.MustParseAddr("192.0.2.33"), loopback, windows.IPPROTO_TCP}
 +	if err = addLeakFilters(engine, loopback, newLeakFilters(leaks, true, false), peer); err != nil {
 +		t.Fatal(err)
 +	}
@@ -324,7 +344,7 @@ index 86278c8..6051ba9 100644
  			if err := add(layer.key, "permit "+p.name, 0, fwpActionPermit, weightPermit, p.conditions...); err != nil {
  				return err
 diff --git a/proxy/tun/tun_windows_wfp_test.go b/proxy/tun/tun_windows_wfp_test.go
-index 47c6f70..86aeba4 100644
+index 47c6f70..d95c324 100644
 --- a/proxy/tun/tun_windows_wfp_test.go
 +++ b/proxy/tun/tun_windows_wfp_test.go
 @@ -145,7 +145,8 @@ func TestLeakFiltersAccepted(t *testing.T) {
@@ -333,7 +353,7 @@ index 47c6f70..86aeba4 100644
  		}
 -		if err := addLeakFilters(engine, loopback, newLeakFilters(leaks, c.route4, c.route6)); err != nil {
 +		if err := addLeakFilters(engine, loopback, newLeakFilters(leaks, c.route4, c.route6),
-+			pomogatorPeer{netip.MustParseAddrPort("192.0.2.1:443"), netip.MustParseAddr("192.0.2.2"), loopback}); err != nil {
++			pomogatorPeer{netip.MustParseAddrPort("192.0.2.1:443"), netip.MustParseAddr("192.0.2.2"), loopback, windows.IPPROTO_TCP}); err != nil {
  			skipUnlessElevated(err)
  		}
  	}
