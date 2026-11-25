@@ -35,12 +35,12 @@ export function savePlace(data: Data, place: Place, editing = false): Data {
     : [...data.places, place] }
 }
 
-export function orderPlace(data: Data, id: string, offset: -1 | 1): Data {
+export function orderPlace(data: Data, id: string, offset: -1 | 1, skip?: string): Data {
   const places = [...data.places]
   const index = places.findIndex(place => place.id === id)
   if (index === -1) return data
   for (let next = index + offset; next >= 0 && next < places.length; next += offset) {
-    if (places[next].parent === places[index].parent) {
+    if (places[next].id !== skip && places[next].parent === places[index].parent) {
       [places[index], places[next]] = [places[next], places[index]]
       break
     }

@@ -4,6 +4,8 @@ import { downloadFile } from './attachments'
 import { exportBackup, importBackup } from './backup'
 import { CardEditor } from './CardEditor'
 import { CardView } from './CardView'
+import { emptyCapture, inboxFor, saveCapture, withInbox } from './capture'
+import { CaptureActions, QuickCapture, useCaptureDraft } from './QuickCapture'
 import { blocksOf, cardStatus, createCard, kindName, kinds, kindOf, preferences, rootFor, setStatus, widgetNames, type Kind, type Preferences } from './cards'
 import { Dialog, Glyph, PlaceEditor } from './editors'
 import { contents, deleteEntry, deletePlace, orderPlace, pathTo, restoreDeleted, saveEntry, savePlace, search,
@@ -20,6 +22,7 @@ import { openStorage, transact } from './storage'
 type Modal = { kind: 'place'; value: Place; editing: boolean } |
   { kind: 'entry'; value: Entry; editing: boolean } |
   { kind: 'quick'; day: string } |
+  { kind: 'capture'; generation?: string } |
   { kind: 'shortcut'; value: Shortcut; previous?: Shortcut; generation?: string } |
   { kind: 'confirm'; title: string; message: string; action: Change; done?: () => void }
 const databaseName = import.meta.env.VITE_POMOGATOR_STORAGE || 'pomogator'
@@ -27,6 +30,7 @@ const messageOf = (cause: unknown) => cause instanceof Error ? cause.message : '
 
 export function App() {
   const [data, setData] = useState<Data>()
+  const capture = useCaptureDraft(databaseName + '-capture-draft')
   const writing = useRef(false)
   const navigation = useNavigation<Modal>(() => !writing.current)
   const { view, folder: current, query } = navigation.frame
@@ -65,7 +69,7 @@ export function App() {
       if (!database.current) return
       try {
         const next = await transact(database.current)
-        if (active) setData(next)
+        if (active) setData(withInbox(next))
       } catch (cause) { report(cause) }
     }
     openStorage(databaseName).then(db => {
@@ -128,8 +132,8 @@ export function App() {
 
   async function apply(change: Change) {
     if (!database.current) throw new Error('Локальная база недоступна.')
-    const next = await transact(database.current, change)
-    setData(next)
+    const next = await transact(database.current, snapshot => change(withInbox(snapshot)))
+    setData(withInbox(next))
     channel.current?.postMessage('updated')
     return next
   }
@@ -183,8 +187,11 @@ export function App() {
   const path = data && current ? pathTo(data, current) : []
   const place = path.at(-1)
   const parent = place?.id ?? null
-  const roots = data?.places.filter(item => item.parent === null) ?? []
-  const children = data?.places.filter(item => item.parent === parent) ?? []
+  const inbox = data && inboxFor(data)
+  const inInbox = Boolean(inbox && parent === inbox.id)
+  const inboxCount = inbox ? data!.entries.filter(item => item.parent === inbox.id).length : 0
+  const roots = data?.places.filter(item => item.parent === null && item.id !== inbox?.id) ?? []
+  const children = data?.places.filter(item => item.parent === parent && item.id !== inbox?.id) ?? []
   const entries = data?.entries.filter(entry => entry.parent === parent) ?? []
   const result = data && query.trim() ? search(data, query) : undefined
   const home = view === 'home' && !result
@@ -254,7 +261,7 @@ export function App() {
   }
 
   function renderPlace(item: Place) {
-    const siblings = data!.places.filter(candidate => candidate.parent === item.parent)
+    const siblings = data!.places.filter(candidate => candidate.parent === item.parent && candidate.id !== inbox?.id)
     const index = siblings.findIndex(candidate => candidate.id === item.id)
     const folderCount = data!.places.filter(candidate => candidate.parent === item.id).length
     const entryCount = data!.entries.filter(entry => entry.parent === item.id).length
@@ -268,8 +275,8 @@ export function App() {
       </button>
       <Disclosure className="place-menu" label={`Действия «${item.title}»`} icon={Ellipsis}>
         <button aria-label={`Настроить «${item.title}»`} onClick={() => show({ kind: 'place', value: item, editing: true })}><Pencil size={16} /> Настроить</button>
-        <button aria-label={`Передвинуть «${item.title}» выше`} disabled={busy || index === 0} onClick={() => void commit(snapshot => orderPlace(snapshot, item.id, -1))}><ArrowUp size={17} /> Выше</button>
-        <button aria-label={`Передвинуть «${item.title}» ниже`} disabled={busy || index === siblings.length - 1} onClick={() => void commit(snapshot => orderPlace(snapshot, item.id, 1))}><ArrowDown size={17} /> Ниже</button>
+        <button aria-label={`Передвинуть «${item.title}» выше`} disabled={busy || index === 0} onClick={() => void commit(snapshot => orderPlace(snapshot, item.id, -1, inboxFor(snapshot).id))}><ArrowUp size={17} /> Выше</button>
+        <button aria-label={`Передвинуть «${item.title}» ниже`} disabled={busy || index === siblings.length - 1} onClick={() => void commit(snapshot => orderPlace(snapshot, item.id, 1, inboxFor(snapshot).id))}><ArrowDown size={17} /> Ниже</button>
         <button className="remove-place" aria-label={`Удалить «${item.title}»`} onClick={() => removePlace(item)}><Trash2 size={16} /> Удалить</button>
       </Disclosure>
     </article>
@@ -315,6 +322,8 @@ export function App() {
         </div>}
         {!data && !error && <p role="status">Загрузка локальной базы…</p>}
         {data && <>
+          {inbox && !result && view !== 'settings' && <CaptureActions count={inboxCount} active={inInbox}
+            open={() => navigate(inbox.id)} capture={() => show({ kind: 'capture', generation: data.generation })} />}
           {!result && place && <nav className="breadcrumbs" aria-label="Расположение">
             <button onClick={() => navigate(null)}>Все разделы</button>
             {path.map(part => <span key={part.id}><ChevronRight size={14} />
@@ -323,7 +332,7 @@ export function App() {
           </nav>}
           {!result && !home && view !== 'settings' && view !== 'center' && <div className="page-header">
             <div className="actions">
-              {place && <button onClick={() => newPlace(parent)}><Plus size={18} /> Папка</button>}
+              {place && !inInbox && <button onClick={() => newPlace(parent)}><Plus size={18} /> Папка</button>}
               <button className="primary" onClick={() => {
                 if (parent) newEntry(parent)
                 else if (view === 'folders' || !roots.length) newPlace(null)
@@ -398,6 +407,11 @@ export function App() {
       </div>
       <footer role="contentinfo" className="build-label">{buildLabel}</footer>
     </main>
+    {modal?.kind === 'capture' && data && inbox && <QuickCapture {...capture} data={data}
+      inboxId={inbox.id} busy={busy} error={modalError} close={close} save={() => void commit(snapshot => {
+        if (snapshot.generation !== modal.generation) throw new Error('База заменена в другой вкладке. Откройте быстрый захват заново.')
+        return saveCapture(snapshot, capture.draft)
+      }, true, () => capture.change(emptyCapture))} />}
     {modal?.kind === 'quick' && <Dialog title="Выберите тип карточки" close={close}>
       <div className="quick-list">{kinds.map(kind => <button key={kind} onClick={() => {
         const selected = roots.find(root => root.id === rootFor[kind]) ?? roots[0]

@@ -93,7 +93,7 @@ test('сенсорные нажатия: навигация и сохранен�
 
 test('Android Chrome: сенсорные нажатия, навигация и сохранение карточки', async ({ baseURL }) => {
   test.skip(process.env.POMOGATOR_ANDROID !== '1', 'Нужен Android-эмулятор с Chrome и ADB.')
-  test.setTimeout(90_000)
+  test.setTimeout(145_000)
   const devices = await _android.devices()
   expect(devices).toHaveLength(1)
   const [device] = devices
@@ -106,6 +106,18 @@ test('Android Chrome: сенсорные нажатия, навигация и �
         await device.shell('input keyevent 4')
         return focus.toString()
       })
+      const dialog = page.getByRole('dialog')
+      const capture = page.getByRole('button', { name: 'Быстрый захват', exact: true })
+      await capture.tap()
+      await dialog.getByLabel('Текст', { exact: true }).fill('Заметка с Android')
+      await dialog.getByRole('button', { name: 'Закрыть', exact: true }).tap()
+      await capture.tap()
+      await expect(dialog.getByLabel('Текст', { exact: true })).toHaveValue('Заметка с Android')
+      await dialog.getByRole('button', { name: 'Сохранить запись' }).tap()
+      await expect(dialog).toHaveCount(0)
+      await page.reload()
+      await page.getByRole('button', { name: /Входящие\s*1/ }).tap()
+      await expect(page.getByRole('heading', { name: 'Заметка с Android' })).toBeVisible()
     } finally { await context.close() }
   } finally { await device.close() }
 })
