@@ -502,3 +502,8 @@ dialog::backdrop { background: var(--glass-scrim); }
 .capture-button, .add-section { min-height: 44px; }
 .add-section { margin-top: 12px; }
 .header-search { margin-top: 8px; }
+
+@media (pointer: coarse) {
+  /* Keep the submit button in the scrollable form on touch keyboards. */
+  .card-dialog .editor-footer { position: static; }
+}
