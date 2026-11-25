@@ -311,8 +311,9 @@ public partial class MainWindow : Window
 
             var uplink = recovery == null ? null : TunWindows.UplinkName(recovery.Before, peerSource);
             stage = Check.Xray;
-            var path = Path.Combine(AppContext.BaseDirectory, "xray.exe");
-            if (!File.Exists(path)) throw new VpnError("В комплекте отсутствует xray.exe. Распакуйте архив полностью.");
+            var executable = tunMode ? TunConfig.Executable : "xray.exe";
+            var path = Path.Combine(AppContext.BaseDirectory, executable);
+            if (!File.Exists(path)) throw new VpnError($"В комплекте отсутствует {executable}. Распакуйте архив полностью.");
             if (tunMode) tunStage = "запуск Xray для выбранного VLESS";
             Detail.Text = "Запуск Xray…";
             int port = 0;
@@ -932,7 +933,7 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog(this) != true) return;
         try
         {
-            var header = new[] { "ПОМОГАТОР VPN 0.3.4", Status.Text, CoreCheck.Text, ProxyCheck.Text, TrafficCheck.Text,
+            var header = new[] { "ПОМОГАТОР VPN 0.3.8", Status.Text, CoreCheck.Text, ProxyCheck.Text, TrafficCheck.Text,
                 SystemCheck.Text, TunCheck.Text, CheckedAt.Text, "" };
             var observations = tunObservation?.Lines() ?? Enumerable.Empty<string>();
             var probes = tunChecks?.Lines() ?? Enumerable.Empty<string>();

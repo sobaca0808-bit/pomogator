@@ -1,8 +1,8 @@
-name: ПОМОГАТОР VPN 0.3.4 — Windows x64
+name: ПОМОГАТОР VPN 0.3.8 — Windows x64
 
 on:
   push:
-    branches: [vpn-v0.3.0-tun, vpn-v0.3.1-tun-fix, vpn-v0.3.4-uplink, vpn-v0.3.4-egress-ab]
+    branches: [vpn-v0.3.0-tun, vpn-v0.3.1-tun-fix, vpn-v0.3.4-uplink, vpn-v0.3.4-egress-ab, vpn-v0.3.8-tun-peer]
     paths:
       - windows/vpn/**
       - .github/workflows/vpn-windows.yml
@@ -18,22 +18,27 @@ permissions:
 jobs:
   build-test:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
-      - name: Install pinned Xray
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache-dependency-path: windows/vpn/scripts/Build-TunXray.ps1
+      - name: Install stock Xray and build and test the TUN core
         shell: pwsh
         run: ./windows/vpn/scripts/Get-Xray.ps1 -Destination "$env:RUNNER_TEMP/pomogator-xray"
       - name: Test profiles, loopback VLESS and WinINet restoration
         shell: pwsh
         run: |
           $env:POMOGATOR_TEST_XRAY = Join-Path $env:RUNNER_TEMP 'pomogator-xray/xray.exe'
+          $env:POMOGATOR_TEST_TUN_XRAY = Join-Path $env:RUNNER_TEMP 'pomogator-xray/xray-tun.exe'
           # The runner is disposable. The test refuses to overwrite an active proxy.
           $env:POMOGATOR_TEST_WININET = '1'
-          # TUN CI adds only two documentation /32 routes and a documentation IPv6 filter in this disposable VM.
+          # CI uses documentation routes, temporary WFP filters and an isolated DoH responder.
           $env:POMOGATOR_TEST_TUN = '1'
           dotnet run --project windows/vpn/tests/Tests.csproj -c Release
       - name: Verify WPF and tray, render screenshots
@@ -41,7 +46,7 @@ jobs:
         run: dotnet run --project windows/vpn/tests/ui/UiTests.csproj -c Release -- "$env:RUNNER_TEMP/pomogator-vpn-screenshots"
       - uses: actions/upload-artifact@v4
         with:
-          name: PomogatorVpn-0.3.4-screenshots
+          name: PomogatorVpn-0.3.8-screenshots
           path: ${{ runner.temp }}/pomogator-vpn-screenshots/
           if-no-files-found: error
       - name: Build Windows x64 package
@@ -52,6 +57,6 @@ jobs:
           Copy-Item "$env:RUNNER_TEMP/pomogator-xray/*" windows/vpn/dist
       - uses: actions/upload-artifact@v4
         with:
-          name: PomogatorVpn-0.3.4-win-x64-egress-ab
+          name: PomogatorVpn-0.3.8-win-x64
           path: windows/vpn/dist/
           if-no-files-found: error

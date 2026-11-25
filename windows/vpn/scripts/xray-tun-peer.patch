@@ -1,0 +1,339 @@
+diff --git a/proxy/tun/pomogator_windows.go b/proxy/tun/pomogator_windows.go
+new file mode 100644
+index 0000000..b0f1be6
+--- /dev/null
++++ b/proxy/tun/pomogator_windows.go
+@@ -0,0 +1,85 @@
++package tun
++
++import (
++	"encoding/binary"
++	"errors"
++	"net/netip"
++	"os"
++	"runtime"
++	"strconv"
++	"unsafe"
++
++	"golang.org/x/sys/windows"
++	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
++)
++
++// Windows SDK fwpmu.h. ALE_ORIGINAL_APP_ID is available at ALE_AUTH_CONNECT_V4
++// from Windows 8. WFP can report a redirector as the current application.
++var (
++	fwpmConditionALEOriginalAppID = windows.GUID{Data1: 0x0e6cd086, Data2: 0xe1fb, Data3: 0x4212, Data4: [8]byte{0x84, 0x2f, 0x8a, 0x9f, 0x99, 0x3f, 0xb3, 0xf6}}
++	fwpmConditionIPLocalAddress   = windows.GUID{Data1: 0xd9ee00de, Data2: 0xc1ef, Data3: 0x4617, Data4: [8]byte{0xbf, 0xe3, 0xff, 0xd8, 0xf5, 0xa0, 0x89, 0x57}}
++)
++
++type pomogatorPeer struct {
++	server netip.AddrPort
++	source netip.Addr
++	uplink winipcfg.LUID
++}
++
++func readPomogatorPeer(tun winipcfg.LUID) (pomogatorPeer, error) {
++	server, err := netip.ParseAddrPort(os.Getenv("POMOGATOR_TUN_PEER"))
++	if err != nil || !server.Addr().Is4() || !server.Addr().IsGlobalUnicast() || server.Port() == 0 {
++		return pomogatorPeer{}, errors.New("invalid TUN peer endpoint")
++	}
++	source, err := netip.ParseAddr(os.Getenv("POMOGATOR_TUN_SOURCE"))
++	if err != nil || !source.Is4() || !source.IsGlobalUnicast() {
++		return pomogatorPeer{}, errors.New("invalid TUN uplink source address")
++	}
++	index, err := strconv.ParseUint(os.Getenv("POMOGATOR_TUN_IFINDEX"), 10, 32)
++	if err != nil || index == 0 {
++		return pomogatorPeer{}, errors.New("invalid TUN uplink interface index")
++	}
++	uplink, err := winipcfg.LUIDFromIndex(uint32(index))
++	if err != nil || uplink == 0 || uplink == tun {
++		return pomogatorPeer{}, errors.New("TUN uplink interface unavailable")
++	}
++	row, err := uplink.IPAddress(source)
++	if err != nil || row.DadState != winipcfg.DadStatePreferred {
++		return pomogatorPeer{}, errors.New("TUN source IPv4 is not preferred on the uplink")
++	}
++	return pomogatorPeer{server, source, uplink}, nil
++}
++
++type pomogatorAddFilter func(layer *windows.GUID, name string, flags, action uint32, weight uint8, conditions ...fwpmFilterCondition0) error
++
++func addPomogatorPeerPermits(pinner *runtime.Pinner, appID *fwpByteBlob, peer pomogatorPeer, add pomogatorAddFilter) error {
++	uplink := new(uint64)
++	*uplink = uint64(peer.uplink)
++	pinner.Pin(uplink)
++	source := peer.source.As4()
++	server := peer.server.Addr().As4()
++
++	// Separate filters express OR on application identity and AND on every
++	// network field. An unrelated application or a redirected socket whose
++	// original application is unknown receives no special permission.
++	for _, identity := range []struct {
++		field *windows.GUID
++		name  string
++	}{
++		{&fwpmConditionALEAppID, "permit verified peer"},
++		{&fwpmConditionALEOriginalAppID, "permit redirected verified peer"},
++	} {
++		err := add(&fwpmLayerALEAuthConnectV4, identity.name, 0, fwpActionPermit, weightXray,
++			condition(identity.field, fwpByteBlobType, uintptr(unsafe.Pointer(appID))),
++			condition(&fwpmConditionIPProtocol, fwpUint8, windows.IPPROTO_TCP),
++			condition(&fwpmConditionIPRemoteAddress, fwpUint32, uintptr(binary.BigEndian.Uint32(server[:]))),
++			condition(&fwpmConditionIPRemotePort, fwpUint16, uintptr(peer.server.Port())),
++			condition(&fwpmConditionIPLocalAddress, fwpUint32, uintptr(binary.BigEndian.Uint32(source[:]))),
++			condition(&fwpmConditionIPLocalInterface, fwpUint64, uintptr(unsafe.Pointer(uplink))),
++			condition(&fwpmConditionIPNexthopInterface, fwpUint64, uintptr(unsafe.Pointer(uplink))))
++		if err != nil {
++			return err
++		}
++	}
++	return nil
++}
+diff --git a/proxy/tun/pomogator_windows_test.go b/proxy/tun/pomogator_windows_test.go
+new file mode 100644
+index 0000000..bdc60ed
+--- /dev/null
++++ b/proxy/tun/pomogator_windows_test.go
+@@ -0,0 +1,100 @@
++package tun
++
++import (
++	"net/netip"
++	"runtime"
++	"testing"
++	"unsafe"
++
++	"golang.org/x/sys/windows"
++	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
++)
++
++func TestPomogatorPeerRequiresExplicitScope(t *testing.T) {
++	for _, c := range []struct{ peer, source, index, want string }{
++		{"", "", "", "invalid TUN peer endpoint"},
++		{"[2001:db8::1]:443", "192.0.2.33", "7", "invalid TUN peer endpoint"},
++		{"192.0.2.10:0", "192.0.2.33", "7", "invalid TUN peer endpoint"},
++		{"192.0.2.10:443", "0.0.0.0", "7", "invalid TUN uplink source address"},
++		{"192.0.2.10:443", "192.0.2.33", "0", "invalid TUN uplink interface index"},
++	} {
++		t.Setenv("POMOGATOR_TUN_PEER", c.peer)
++		t.Setenv("POMOGATOR_TUN_SOURCE", c.source)
++		t.Setenv("POMOGATOR_TUN_IFINDEX", c.index)
++		if _, err := readPomogatorPeer(0); err == nil || err.Error() != c.want {
++			t.Fatalf("invalid scope error = %v, want %s", err, c.want)
++		}
++	}
++}
++
++// Inspect the native conditions supplied to BFE, including both identities.
++// All seven fields are required on each permit; no unconstrained second rule.
++func TestPomogatorPeerFilterScope(t *testing.T) {
++	peer := pomogatorPeer{netip.MustParseAddrPort("192.0.2.10:8043"), netip.MustParseAddr("192.0.2.33"), 0x106}
++	blob := new(fwpByteBlob)
++	var pinner runtime.Pinner
++	pinner.Pin(blob)
++	defer pinner.Unpin()
++	identities := []windows.GUID{fwpmConditionALEAppID, fwpmConditionALEOriginalAppID}
++	calls := 0
++	err := addPomogatorPeerPermits(&pinner, blob, peer, func(layer *windows.GUID, _ string, flags, action uint32, weight uint8, conditions ...fwpmFilterCondition0) error {
++		if calls >= len(identities) || *layer != fwpmLayerALEAuthConnectV4 || flags != 0 ||
++			action != fwpActionPermit || weight != weightXray || len(conditions) != 7 {
++			t.Fatal("unexpected filter or broad permit")
++		}
++		uplinkPtr := conditions[5].conditionValue.value
++		if uplinkPtr == 0 {
++			t.Fatal("LUID is missing")
++		}
++		want := []struct {
++			field windows.GUID
++			typ   uint32
++			value uintptr
++		}{
++			{identities[calls], fwpByteBlobType, uintptr(unsafe.Pointer(blob))},
++			{fwpmConditionIPProtocol, fwpUint8, windows.IPPROTO_TCP},
++			{fwpmConditionIPRemoteAddress, fwpUint32, 0xc000020a},
++			{fwpmConditionIPRemotePort, fwpUint16, 8043},
++			{fwpmConditionIPLocalAddress, fwpUint32, 0xc0000221},
++			{fwpmConditionIPLocalInterface, fwpUint64, uplinkPtr},
++			{fwpmConditionIPNexthopInterface, fwpUint64, uplinkPtr},
++		}
++		for i, cond := range conditions {
++			if cond.fieldKey != want[i].field || cond.matchType != fwpMatchEqual ||
++				cond.conditionValue.typ != want[i].typ || cond.conditionValue.value != want[i].value {
++				t.Fatalf("condition %d on filter %d does not constrain the intended field", i, calls)
++			}
++		}
++		calls++
++		return nil
++	})
++	if err != nil || calls != len(identities) {
++		t.Fatalf("filters added: %d, error: %v", calls, err)
++	}
++}
++
++func TestPomogatorPeerNativeWFP(t *testing.T) {
++	// Windows validates the real filter keys, layers, types and weights inside
++	// an aborted transaction. Nothing becomes active on the build machine.
++	engine, err := openWFPEngine()
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer closeWFPEngine(engine)
++	if err = fwpmResult(procFwpmTransactionBegin0.Call(uintptr(engine), 0)); err != nil {
++		t.Fatal(err)
++	}
++	defer procFwpmTransactionAbort0.Call(uintptr(engine))
++	loopback, err := winipcfg.LUIDFromIndex(1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	leaks, err := ExpandWfpBlockLeak([]string{"allexceptlan", "[::/0]:all", "misconfigtun"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	peer := pomogatorPeer{netip.MustParseAddrPort("192.0.2.10:443"), netip.MustParseAddr("192.0.2.33"), loopback}
++	if err = addLeakFilters(engine, loopback, newLeakFilters(leaks, true, false), peer); err != nil {
++		t.Fatal(err)
++	}
++}
+diff --git a/proxy/tun/tun_windows.go b/proxy/tun/tun_windows.go
+index 1ff394e..e78cbf0 100644
+--- a/proxy/tun/tun_windows.go
++++ b/proxy/tun/tun_windows.go
+@@ -113,6 +113,11 @@ func ipv6Off() bool {
+ }
+ 
+ func (t *WindowsTun) Start() (err error) {
++	// Attest the session-specific outer connection before altering any address or route.
++	peer, err := readPomogatorPeer(t.luid)
++	if err != nil {
++		return err
++	}
+ 	var address4, address6 bool
+ 	addresses := make([]netip.Prefix, 0, len(t.options.Gateway))
+ 	for _, cidr := range t.options.Gateway {
+@@ -308,7 +313,7 @@ startOver:
+ 		}
+ 	}
+ 	if blocked := block.String(); (route4 || route6) && blocked != "" {
+-		if t.wfp, err = blockLeaks(t.luid, block); err != nil {
++		if t.wfp, err = blockLeaks(t.luid, block, peer); err != nil {
+ 			// Rather no TUN than a leaking one.
+ 			return errors.New("unable to block ", blocked, " outside the TUN (remove autoSystemWfpBlockLeak to run without)").Base(err)
+ 		}
+diff --git a/proxy/tun/tun_windows_wfp.go b/proxy/tun/tun_windows_wfp.go
+index 86278c8..6051ba9 100644
+--- a/proxy/tun/tun_windows_wfp.go
++++ b/proxy/tun/tun_windows_wfp.go
+@@ -34,9 +34,8 @@ var (
+ 
+ // fwptypes.h and fwpmtypes.h
+ const (
+-	rpcCAuthnWinNT                 = 10 // RPC_C_AUTHN_WINNT
+-	fwpmSessionFlagDynamic         = 1  // FWPM_SESSION_FLAG_DYNAMIC
+-	fwpmFilterFlagClearActionRight = 8  // FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT
++	rpcCAuthnWinNT         = 10 // RPC_C_AUTHN_WINNT
++	fwpmSessionFlagDynamic = 1  // FWPM_SESSION_FLAG_DYNAMIC
+ 
+ 	fwpUint8                  = 1     // FWP_UINT8
+ 	fwpUint16                 = 2     // FWP_UINT16
+@@ -332,8 +331,8 @@ const (
+ )
+ 
+ // blockLeaks keeps traffic from leaving through interfaces other than tun,
+-// for every program but Xray itself, whose outbounds (DNS included) use the
+-// other interfaces on purpose, as the values of block say, each to the
++// through the normal leak policy, with a scoped exception for the verified
++// outbound transport. The values of block apply each to the
+ // addresses of its CIDR, or to all:
+ //
+ //   - Protocols and ports: connections of these, TCP or UDP to some or all
+@@ -365,7 +364,7 @@ const (
+ //
+ // The filters live in a dynamic WFP session: closing the returned engine handle
+ // with closeWFPEngine deletes them, and so does Windows when the process dies.
+-func blockLeaks(tun winipcfg.LUID, block leakFilters) (windows.Handle, error) {
++func blockLeaks(tun winipcfg.LUID, block leakFilters, peer pomogatorPeer) (windows.Handle, error) {
+ 	engine, err := openWFPEngine()
+ 	if err != nil {
+ 		return 0, err
+@@ -374,7 +373,7 @@ func blockLeaks(tun winipcfg.LUID, block leakFilters) (windows.Handle, error) {
+ 		closeWFPEngine(engine)
+ 		return 0, errors.New("FwpmTransactionBegin0 failed").Base(err)
+ 	}
+-	err = addLeakFilters(engine, tun, block)
++	err = addLeakFilters(engine, tun, block, peer)
+ 	if err == nil {
+ 		if err = fwpmResult(procFwpmTransactionCommit0.Call(uintptr(engine))); err != nil {
+ 			err = errors.New("FwpmTransactionCommit0 failed").Base(err)
+@@ -411,7 +410,7 @@ func closeWFPEngine(engine windows.Handle) {
+ 
+ // addLeakFilters adds the filters of blockLeaks in a sublayer of their own.
+ // blockLeaks runs it in a transaction, so that they take effect all at once.
+-func addLeakFilters(engine windows.Handle, tun winipcfg.LUID, block leakFilters) error {
++func addLeakFilters(engine windows.Handle, tun winipcfg.LUID, block leakFilters, peer pomogatorPeer) error {
+ 	exe, err := os.Executable()
+ 	if err != nil {
+ 		return err
+@@ -446,14 +445,10 @@ func addLeakFilters(engine windows.Handle, tun winipcfg.LUID, block leakFilters)
+ 	*tunLUID = uint64(tun)
+ 	pinner.Pin(tunLUID) // the condition only holds it as uintptr
+ 
+-	// The heaviest matching filter of a sublayer decides. All sublayers have
+-	// their say, though, and a block in any of them beats a permit, unless
+-	// the permit is hard: it clears the action right, and then the blocks of
+-	// lower sublayers, Windows Firewall rules among them, no longer override
+-	// it, only a callout's veto does. Xray's own connections out get such a
+-	// hard permit. Connections from outside to Xray get an ordinary one, so
+-	// that firewalls keep guarding its inbounds.
+-	self := condition(&fwpmConditionALEAppID, fwpByteBlobType, uintptr(unsafe.Pointer(appID)))
++	// Each permit is soft. Other providers keep their usual authority to block.
++	if err := addPomogatorPeerPermits(&pinner, appID, peer, add); err != nil {
++		return err
++	}
+ 	// A connection goes through the TUN when its local address is the TUN's,
+ 	// and it also leaves, or arrives, through the TUN. The local address alone
+ 	// decides by default, but with weak host sending or receiving enabled,
+@@ -544,21 +539,17 @@ func addLeakFilters(engine windows.Handle, tun winipcfg.LUID, block leakFilters)
+ 	dhcpv6In := permit{"DHCPv6", dhcpv6}
+ 
+ 	for _, layer := range []struct {
+-		key       *windows.GUID
+-		selfFlags uint32
+-		via       *windows.GUID // the interface that has to be the TUN as well
+-		ipv6      bool
+-		permits   []permit
++		key     *windows.GUID
++		via     *windows.GUID // the interface that has to be the TUN as well
++		ipv6    bool
++		permits []permit
+ 	}{
+-		{&fwpmLayerALEAuthConnectV4, fwpmFilterFlagClearActionRight, &fwpmConditionIPNexthopInterface, false, []permit{loopback, dhcp}},
+-		{&fwpmLayerALEAuthRecvAcceptV4, 0, &fwpmConditionIPArrivalInterface, false, []permit{loopback, dhcp}},
+-		{&fwpmLayerALEAuthConnectV6, fwpmFilterFlagClearActionRight, &fwpmConditionIPNexthopInterface, true, []permit{loopback, discovery, dhcpv6Out}},
+-		{&fwpmLayerALEAuthRecvAcceptV6, 0, &fwpmConditionIPArrivalInterface, true, []permit{loopback, discovery, dhcpv6In}},
++		{&fwpmLayerALEAuthConnectV4, &fwpmConditionIPNexthopInterface, false, []permit{loopback, dhcp}},
++		{&fwpmLayerALEAuthRecvAcceptV4, &fwpmConditionIPArrivalInterface, false, []permit{loopback, dhcp}},
++		{&fwpmLayerALEAuthConnectV6, &fwpmConditionIPNexthopInterface, true, []permit{loopback, discovery, dhcpv6Out}},
++		{&fwpmLayerALEAuthRecvAcceptV6, &fwpmConditionIPArrivalInterface, true, []permit{loopback, discovery, dhcpv6In}},
+ 	} {
+ 		throughTUN := permit{"through the TUN", []fwpmFilterCondition0{onTUN(&fwpmConditionIPLocalInterface), onTUN(layer.via)}}
+-		if err := add(layer.key, "permit Xray", layer.selfFlags, fwpActionPermit, weightXray, self); err != nil {
+-			return err
+-		}
+ 		for _, p := range append(layer.permits, throughTUN) {
+ 			if err := add(layer.key, "permit "+p.name, 0, fwpActionPermit, weightPermit, p.conditions...); err != nil {
+ 				return err
+diff --git a/proxy/tun/tun_windows_wfp_test.go b/proxy/tun/tun_windows_wfp_test.go
+index 47c6f70..86aeba4 100644
+--- a/proxy/tun/tun_windows_wfp_test.go
++++ b/proxy/tun/tun_windows_wfp_test.go
+@@ -145,7 +145,8 @@ func TestLeakFiltersAccepted(t *testing.T) {
+ 		if err != nil {
+ 			t.Fatal(err)
+ 		}
+-		if err := addLeakFilters(engine, loopback, newLeakFilters(leaks, c.route4, c.route6)); err != nil {
++		if err := addLeakFilters(engine, loopback, newLeakFilters(leaks, c.route4, c.route6),
++			pomogatorPeer{netip.MustParseAddrPort("192.0.2.1:443"), netip.MustParseAddr("192.0.2.2"), loopback}); err != nil {
+ 			skipUnlessElevated(err)
+ 		}
+ 	}

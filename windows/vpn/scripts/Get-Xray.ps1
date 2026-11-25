@@ -19,6 +19,7 @@ try {
     Copy-Item (Join-Path $expanded 'geoip.dat') -Destination $Destination
     Copy-Item (Join-Path $expanded 'geosite.dat') -Destination $Destination
     Copy-Item (Join-Path $expanded 'LICENSE') -Destination (Join-Path $Destination 'XRAY-LICENSE.txt')
+    & (Join-Path $PSScriptRoot 'Build-TunXray.ps1') -Destination $Destination -WorkDirectory $temp
 } finally {
     Remove-Item -LiteralPath $temp -Recurse -Force
 }

@@ -10,6 +10,8 @@ internal readonly record struct TunDialDenial(uint FlowId, uint LocalAddress, us
 internal readonly record struct TunWfpDrop(DateTimeOffset At, uint LocalAddress, ushort LocalPort,
     ulong FilterId, ushort LayerId, bool ConnectLayer, string Filter);
 
+internal readonly record struct TunWfpUnattributedDrop(DateTimeOffset At, bool OtherImage);
+
 internal static class TunWfpDiagnostic
 {
     private static readonly Guid RemoteAddress = new("b235ae9a-1d64-49b8-a44c-5ff3d9095045");
@@ -68,24 +70,35 @@ internal static class TunWfpDiagnostic
                 try
                 {
                     var drops = new List<TunWfpDrop>();
+                    var unattributed = new List<TunWfpUnattributedDrop>();
                     var filters = new Dictionary<ulong, (bool Connect, string Label)>();
                     for (var i = 0; i < count && i < limit; i++)
                     {
                         var address = Marshal.ReadIntPtr(entries, i * IntPtr.Size);
                         var item = Marshal.PtrToStructure<NetEvent>(address);
-                        const uint required = 0x01 | 0x04 | 0x10 | 0x20 | 0x100;
+                        const uint required = 0x01 | 0x04 | 0x10 | 0x100; // protocol, remote address/port, IP version
+                        const uint appIdSet = 0x20;
                         if (item.Type != 3 || item.Detail == IntPtr.Zero || (item.Flags & required) != required ||
-                            item.IpVersion != 0 || item.Protocol != 6 || item.RemoteAddress != peer || item.RemotePort != port ||
-                            !SameApp(app, item.App)) continue;
+                            item.IpVersion != 0 || item.Protocol != 6 || item.RemoteAddress != peer || item.RemotePort != port) continue;
+
+                        var at = DateTimeOffset.FromFileTime(item.Timestamp);
+                        var identified = (item.Flags & appIdSet) != 0 && item.App.Valid && app.Valid;
+                        if (!identified || !SameApp(app, item.App))
+                        {
+                            // Keep only the time and whether the ID differed. A matching endpoint
+                            // or TCP tuple cannot establish ownership when the image did not match.
+                            unattributed.Add(new(at, OtherImage: identified));
+                            continue;
+                        }
 
                         var id = unchecked((ulong)Marshal.ReadInt64(item.Detail));
                         if (!filters.TryGetValue(id, out var filter))
                             filters[id] = filter = GetFilter(engine, id);
-                        drops.Add(new(DateTimeOffset.FromFileTime(item.Timestamp), (item.Flags & 2) != 0 ? item.LocalAddress : 0,
+                        drops.Add(new(at, (item.Flags & 2) != 0 ? item.LocalAddress : 0,
                             (item.Flags & 8) != 0 ? item.LocalPort : (ushort)0, id,
                             unchecked((ushort)Marshal.ReadInt16(item.Detail, 8)), filter.Connect, filter.Label));
                     }
-                    return Correlate(denied, drops, source, count >= limit);
+                    return Correlate(denied, drops, source, count >= limit, unattributed);
                 }
                 finally { if (entries != IntPtr.Zero) FwpmFreeMemory0(ref entries); }
             }
@@ -96,8 +109,7 @@ internal static class TunWfpDiagnostic
 
     private static bool SameApp(Blob left, Blob right)
     {
-        if (left.Size == 0 || left.Size != right.Size || left.Size > 32768 || left.Data == IntPtr.Zero || right.Data == IntPtr.Zero)
-            return false;
+        if (left.Size != right.Size) return false;
         for (var i = 0; i < left.Size; i++)
             if (Marshal.ReadByte(left.Data, i) != Marshal.ReadByte(right.Data, i)) return false;
         return true;
@@ -124,15 +136,17 @@ internal static class TunWfpDiagnostic
         finally { FwpmFreeMemory0(ref memory); }
     }
 
-    internal static string[] Correlate(TunDialDenial[] denied, IEnumerable<TunWfpDrop> observed, uint source = 0, bool capped = false)
+    internal static string[] Correlate(TunDialDenial[] denied, IEnumerable<TunWfpDrop> observed, uint source = 0,
+        bool capped = false, IEnumerable<TunWfpUnattributedDrop>? unattributed = null)
     {
-        var drops = observed.Where(drop => denied.Any(attempt =>
-            drop.At >= attempt.From.AddMilliseconds(-500) && drop.At <= attempt.Until.AddMilliseconds(500))).ToArray();
-        if (drops.Length == 0)
-            return [capped ? "WFP · достигнут предел выборки, совпадения не установлены." :
-                "WFP · зарегистрированной блокировки для образа Xray и IP:порта сервера в окне отказа не найдено."];
+        bool InWindow(DateTimeOffset at) => denied.Any(attempt =>
+            at >= attempt.From.AddMilliseconds(-500) && at <= attempt.Until.AddMilliseconds(500));
+        var drops = observed.Where(drop => InWindow(drop.At)).ToArray();
 
         var lines = new List<string>();
+        if (drops.Length == 0)
+            lines.Add(capped ? "WFP · в прочитанной части выборки блокировки для образа Xray и IP:порта сервера не найдено." :
+                "WFP · зарегистрированной блокировки для образа Xray и IP:порта сервера в окне отказа не найдено.");
         foreach (var group in drops.GroupBy(x => (x.FilterId, x.LayerId, x.Filter)).Take(8))
         {
             var ids = group.Select(drop => ExactFlow(drop, denied)).OfType<uint>().Distinct().Order().Take(12).ToArray();
@@ -142,6 +156,19 @@ internal static class TunWfpDiagnostic
                 x.LocalAddress == source ? "ожидаемый IPv4 источника" :
                 x.LocalAddress == Address(IPAddress.Parse(TunConfig.Address)) ? "IPv4 источника Wintun" : "иной IPv4 источника").Distinct());
             lines.Add($"WFP · блокировок {group.Count()} · фильтр {group.Key.FilterId}, слой {group.Key.LayerId} · {group.Key.Filter} · {origins} · {match}.");
+        }
+        if (unattributed != null)
+        {
+            var missing = 0;
+            var other = 0;
+            foreach (var entry in unattributed.Where(entry => InWindow(entry.At)))
+            {
+                if (entry.OtherImage) other++;
+                else missing++;
+            }
+            if (missing + other > 0)
+                lines.Add($"WFP · другие блокировки к IP:порту сервера в окне отказа · образ не определён: {missing}, " +
+                    $"другой образ: {other}. Связь этих событий с запросом Xray не установлена.");
         }
         if (capped) lines.Add("WFP · выборка ограничена первыми 512 событиями.");
         return lines.ToArray();
@@ -173,7 +200,12 @@ internal static class TunWfpDiagnostic
     private struct EventTemplate { internal long Start, End; internal uint Count; internal IntPtr Conditions; }
 
     [StructLayout(LayoutKind.Sequential)]
-    private struct Blob { internal uint Size; internal IntPtr Data; }
+    private struct Blob
+    {
+        internal uint Size;
+        internal IntPtr Data;
+        internal readonly bool Valid => Size is > 0 and <= 32768 && Data != IntPtr.Zero;
+    }
 
     // Windows SDK FWPM_NET_EVENT0, x64. The two address unions each reserve 16 bytes for IPv6.
     [StructLayout(LayoutKind.Explicit)]

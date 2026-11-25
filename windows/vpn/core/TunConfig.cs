@@ -7,8 +7,34 @@ namespace Pomogator.Vpn;
 
 public sealed record TunControlEndpoint(int Port, string User, string Password, string Destination, int DestinationPort);
 
+// Only the child that installs our TUN filters receives the verified transport tuple.
+public sealed record TunEgress(IPEndPoint Peer, IPAddress Source, int InterfaceIndex)
+{
+    internal static void Configure(System.Diagnostics.ProcessStartInfo start, TunEgress? egress)
+    {
+        const string peer = "POMOGATOR_TUN_PEER";
+        const string source = "POMOGATOR_TUN_SOURCE";
+        const string index = "POMOGATOR_TUN_IFINDEX";
+        // Reference and proxy processes must never inherit an unrelated session scope.
+        if (egress == null)
+        {
+            start.Environment.Remove(peer);
+            start.Environment.Remove(source);
+            start.Environment.Remove(index);
+            return;
+        }
+        if (egress.Peer.AddressFamily != AddressFamily.InterNetwork || egress.Peer.Port == 0 ||
+            egress.Source.AddressFamily != AddressFamily.InterNetwork || egress.InterfaceIndex <= 0)
+            throw new VpnError("Не подтверждены параметры исходящего IPv4-подключения для TUN.");
+        start.Environment[peer] = egress.Peer.ToString();
+        start.Environment[source] = egress.Source.ToString();
+        start.Environment[index] = egress.InterfaceIndex.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
+}
+
 public static class TunConfig
 {
+    public const string Executable = "xray-tun.exe";
     public const string Address = "198.18.240.1";
     public const int PrefixLength = 30;
     public const string InternetProbe = "1.1.1.1";

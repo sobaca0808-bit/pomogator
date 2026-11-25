@@ -70,7 +70,7 @@ public sealed class Xray : IDisposable
 
     public static async Task<Xray> StartAsync(string executable, string config, int port, CancellationToken token,
         Func<Process, IDisposable?>? protect = null, Func<int, int, bool>? ownsPort = null, Action? started = null, bool inheritConsole = false, int startupSeconds = 6,
-        Action<string>? diagnosticLine = null, Action<int>? startupExit = null)
+        Action<string>? diagnosticLine = null, Action<int>? startupExit = null, TunEgress? tunEgress = null)
     {
         var info = new ProcessStartInfo(executable) {
             UseShellExecute = false, CreateNoWindow = !inheritConsole, RedirectStandardInput = true,
@@ -83,6 +83,7 @@ public sealed class Xray : IDisposable
         info.Environment.Remove("XRAY_LOCATION_CONFIG");
         info.Environment.Remove("XRAY_LOCATION_CONFDIR");
         info.Environment.Remove("XRAY_VMESS_AEAD_FORCED");
+        TunEgress.Configure(info, tunEgress);
         var process = new Process { StartInfo = info };
         try { if (!process.Start()) throw new InvalidOperationException(); }
         catch
