@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       source_sha:
-        description: Проверенный коммит organizer-v0.2-fixes
+        description: Проверенный коммит ветки постоянного стенда
         type: string
       build_run:
         description: Номер прогона сборки
@@ -23,6 +23,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  POMOGATOR_SOURCE_BRANCH: organizer-v0.2.5-glass
   PAGES_ROOT: https://sobaca0808-bit.github.io/pomogator/
   POMOGATOR_PAGES_URL: https://sobaca0808-bit.github.io/pomogator/preview-v0.2/
   POMOGATOR_022_URL: https://sobaca0808-bit.github.io/pomogator/preview-v0.2.2/
@@ -48,10 +49,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REQUESTED: ${{ inputs.source_sha }}
         run: |
-          sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/organizer-v0.2-fixes" --jq .object.sha)
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$POMOGATOR_SOURCE_BRANCH" --jq .object.sha)
           [[ "$sha" =~ ^[a-f0-9]{40}$ ]]
           if [[ -n "$REQUESTED" && "$REQUESTED" != "$sha" ]]; then
-            echo "::error::The requested source is no longer the tip of organizer-v0.2-fixes."
+            echo "::error::The requested source is no longer the tip of $POMOGATOR_SOURCE_BRANCH."
             exit 1
           fi
           preview=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/organizer-v0.2.1-preview" --jq .object.sha)
@@ -183,6 +184,21 @@ jobs:
         run: |
           npx playwright install --with-deps chromium
           npm run test:e2e -- e2e/home-evidence.spec.ts
+      - uses: actions/checkout@v4
+        with:
+          path: pages-tools
+          persist-credentials: false
+      - name: Save a synthetic folder and the current cached HTML before deployment
+        working-directory: pages-tools
+        run: |
+          npm ci
+          node e2e/pages-upgrade.mjs capture "$RUNNER_TEMP/pages-before.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pages-before-upgrade
+          path: ${{ runner.temp }}/pages-before.json
+          if-no-files-found: error
+          retention-days: 1
       - uses: actions/upload-pages-artifact@v4
         with:
           path: site
@@ -208,7 +224,7 @@ jobs:
           PREVIEW_023_COMMIT: ${{ needs.build.outputs.glass }}
           PREVIEW_024_COMMIT: ${{ needs.build.outputs.redesign }}
         run: |
-          latest=$(gh api "repos/$PROJECT/git/ref/heads/organizer-v0.2-fixes" --jq .object.sha)
+          latest=$(gh api "repos/$PROJECT/git/ref/heads/$POMOGATOR_SOURCE_BRANCH" --jq .object.sha)
           if [[ "$latest" != "$PREVIEW_COMMIT" ]]; then
             echo "::error::A newer source revision is available. This build will not replace it."
             exit 1
@@ -252,19 +268,28 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      - name: Verify live HTTPS at a mobile viewport
+      - uses: actions/download-artifact@v4
+        with:
+          name: pages-before-upgrade
+          path: ${{ runner.temp }}/pages-before
+      - name: Verify live HTTPS at a mobile viewport and confirm the upgrade
         env:
           EXPECTED_COMMIT: ${{ needs.build.outputs.source }}
+          EXPECTED_VERSION: ${{ needs.build.outputs.version }}
+          POMOGATOR_CURRENT_PREVIEW: '1'
         run: |
           curl --fail --silent --show-error --retry 6 --retry-delay 5 --retry-all-errors \
             --max-time 20 --output /dev/null "$POMOGATOR_PAGES_URL"
           for attempt in {1..24}; do
             actual=$(curl -fsS --max-time 10 "${POMOGATOR_PAGES_URL}build.json?v=$EXPECTED_COMMIT" | jq -r .commit || true)
-            [[ "$actual" == "$EXPECTED_COMMIT" ]] && break
+            html=$(curl -fsS --max-time 10 "$POMOGATOR_PAGES_URL" || true)
+            [[ "$actual" == "$EXPECTED_COMMIT" && "$html" == *"$EXPECTED_COMMIT"* ]] && break
             sleep 10
           done
           test "$actual" = "$EXPECTED_COMMIT"
+          [[ "$html" == *"$EXPECTED_COMMIT"* ]]
           node e2e/pages-smoke.mjs
+          node e2e/pages-upgrade.mjs verify "$RUNNER_TEMP/pages-before/pages-before.json"
           status=$(curl --silent --show-error --max-time 20 --output /dev/null --write-out '%{http_code}' "$PAGES_ROOT")
           test "$status" = 404
           echo "Pages root still returns HTTP 404."
@@ -310,12 +335,10 @@ jobs:
 
       - name: Verify 0.2.4 and its isolation from the previous preview
         env:
-          POMOGATOR_PAGES_URL: ${{ env.POMOGATOR_024_URL }}
-          POMOGATOR_DATABASE: pomogator-v024-pages
-          POMOGATOR_V01_URL: ${{ env.POMOGATOR_023_URL }}
-          POMOGATOR_PREVIOUS_DATABASE: pomogator-v023-pages
-          EXPECTED_COMMIT: ${{ needs.build.outputs.redesign }}
-          EXPECTED_VERSION: '0.2.4'
+          POMOGATOR_V01_URL: ${{ env.POMOGATOR_024_URL }}
+          POMOGATOR_PREVIOUS_DATABASE: pomogator-v024-pages
+          EXPECTED_COMMIT: ${{ needs.build.outputs.source }}
+          EXPECTED_VERSION: ${{ needs.build.outputs.version }}
         run: |
           curl --fail --silent --show-error --retry 8 --retry-delay 7 --retry-all-errors \
             --max-time 20 --output /dev/null "${POMOGATOR_PAGES_URL}build.json?v=$EXPECTED_COMMIT"
@@ -344,7 +367,7 @@ jobs:
             if [[ "$BUILD_RUN" =~ ^[0-9]+$ && "$WINDOWS_ZIP" =~ ^[0-9]+$ ]]; then
               echo "- [ZIP Windows x64](https://github.com/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN/artifacts/$WINDOWS_ZIP)"
             fi
-            echo "- [Рабочая ветка](https://github.com/$GITHUB_REPOSITORY/tree/organizer-v0.2-fixes)"
+            echo "- [Рабочая ветка](https://github.com/$GITHUB_REPOSITORY/tree/$POMOGATOR_SOURCE_BRANCH)"
           } >> "$GITHUB_STEP_SUMMARY"
 
   android-install:
@@ -374,9 +397,8 @@ jobs:
           script: node e2e/pages-smoke.mjs
         env:
           POMOGATOR_ANDROID: '1'
-          POMOGATOR_PAGES_URL: ${{ env.POMOGATOR_024_URL }}
-          POMOGATOR_DATABASE: pomogator-v024-pages
-          POMOGATOR_V01_URL: ${{ env.POMOGATOR_023_URL }}
-          POMOGATOR_PREVIOUS_DATABASE: pomogator-v023-pages
-          EXPECTED_COMMIT: ${{ needs.build.outputs.redesign }}
-          EXPECTED_VERSION: '0.2.4'
+          POMOGATOR_CURRENT_PREVIEW: '1'
+          POMOGATOR_V01_URL: ${{ env.POMOGATOR_024_URL }}
+          POMOGATOR_PREVIOUS_DATABASE: pomogator-v024-pages
+          EXPECTED_COMMIT: ${{ needs.build.outputs.source }}
+          EXPECTED_VERSION: ${{ needs.build.outputs.version }}

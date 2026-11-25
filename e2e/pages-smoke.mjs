@@ -9,6 +9,7 @@ const sitePath = site.pathname
 const database = process.env.POMOGATOR_DATABASE || 'pomogator-v02-pages'
 const previousDatabase = process.env.POMOGATOR_PREVIOUS_DATABASE || 'pomogator'
 const android = process.env.POMOGATOR_ANDROID === '1'
+const currentPreview = process.env.POMOGATOR_CURRENT_PREVIEW === '1'
 const device = android ? (await _android.devices())[0] : undefined
 if (android && !device) throw new Error('Android device unavailable')
 const profile = device ? undefined : await mkdtemp(join(tmpdir(), 'pomogator-pages-'))
@@ -65,7 +66,7 @@ try {
   expect(width).toBeLessThanOrEqual(500)
   expect(scroll).toBeLessThanOrEqual(width)
 
-  if (process.env.EXPECTED_VERSION === '0.2.4') {
+  if (currentPreview || process.env.EXPECTED_VERSION === '0.2.4') {
     await expect(page.locator('.app-header')).toHaveCSS('backdrop-filter', /blur/)
     await expect(page.locator('.overview-places > article')).toHaveCount(6)
     const image = await page.locator('.shell').evaluate(element =>
@@ -111,6 +112,33 @@ try {
   await expect(page.getByRole('heading', { name: 'Карточка проверки' })).toBeVisible()
   const names = await page.evaluate(async () => (await indexedDB.databases()).map(database => database.name).sort())
   expect(names).toEqual(process.env.POMOGATOR_V01_URL ? [previousDatabase, database].sort() : [database])
+
+  if (currentPreview) {
+    const address = 'https://example.org/pomogator-payment-check'
+    await context.route(address, route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: '<title>Проверка оплаты</title>' }))
+    const action = name => page.getByRole('button', { name, exact: true })
+    await navigate('Финансы')
+    await expect(page.getByRole('region', { name: 'Финансовая сводка' })).toHaveClass(/glass-surface/)
+    await activate(action('Новая карточка'))
+    const editor = page.getByRole('dialog')
+    await expect(editor).toHaveClass(/glass-surface/)
+    await editor.getByLabel('Название').fill('Ссылка оплаты Pages')
+    await editor.getByLabel('Адрес сайта оплаты').fill(address)
+    await activate(action('Готово'))
+    await expect(editor).toHaveCount(0)
+    await page.reload()
+    await navigate('Финансы')
+    const card = page.getByRole('article').filter({ has: page.getByRole('heading', { name: 'Ссылка оплаты Pages', exact: true }) })
+    await expect(card).toHaveClass(/glass-surface/)
+    const link = card.getByRole('link', { name: /Сайт оплаты/ })
+    await expect(link).toHaveAttribute('href', address)
+    const [target] = await Promise.all([page.waitForEvent('popup'), activate(link)])
+    await expect(target).toHaveURL(address)
+    await expect(target).toHaveTitle('Проверка оплаты')
+    await target.close()
+    await expect(editor).toHaveCount(0)
+    console.log('Опубликованный Glass UI · адрес оплаты сохранён после перезагрузки и открылся в новой вкладке.')
+  }
 
   if (['0.2.2', '0.2.3', '0.2.4'].includes(process.env.EXPECTED_VERSION)) {
     await navigate('Обзор')
