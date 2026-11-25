@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import { ArrowDown, ArrowUp, Bell, CalendarDays, ChevronLeft, ChevronRight, Clock3, Download, ListTodo, Plus, Settings2, Star, Wallet, BriefcaseBusiness } from 'lucide-react'
 import { downloadFile } from './attachments'
-import { cardStatus, firstValue, kindName, kindOf, preferences, progress, reorder, widgetNames, type Preferences, type Widget } from './cards'
-import { shortDate } from './CardView'
+import { blocksOf, cardStatus, firstValue, kindName, kindOf, preferences, progress, reorder, widgetNames, type Preferences, type Widget } from './cards'
+import { CardLinks, shortDate } from './CardView'
 import { Dialog } from './editors'
 import { financeCsv, financeTotals, money, operations } from './finance'
 import type { Data, Entry } from './model'
@@ -11,13 +11,18 @@ import { dayEntries, dayKey, fromDay, shiftDay, upcoming } from './schedule'
 const icons = { today: CalendarDays, tasks: ListTodo, payments: Wallet, projects: BriefcaseBusiness, recent: Clock3, favorites: Star }
 const longDate = { dateStyle: 'full' } as const
 
-function Row({ data, entry, detail, open, ratio }: { data: Data; entry: Entry; detail?: string; open?: (entry: Entry) => void; ratio?: number }) {
+function Row({ data, entry, detail, open, ratio, showPaymentLinks }: {
+  data: Data; entry: Entry; detail?: string; open?: (entry: Entry) => void; ratio?: number; showPaymentLinks?: boolean
+}) {
+  const kind = kindOf(data, entry)
   const content = <>
-    <span><strong>{entry.title}</strong><small>{detail || kindName[kindOf(data, entry)]}</small></span>
+    <span><strong>{entry.title}</strong><small>{detail || kindName[kind]}</small></span>
     {ratio !== undefined ? <small className="ratio">{ratio}%</small> : <ChevronRight size={16} />}
   </>
-  return open ? <button className="summary-row" onClick={() => open(entry)}>{content}</button> :
+  const row = open ? <button className="summary-row" onClick={() => open(entry)}>{content}</button> :
     <div className="summary-row">{content}</div>
+  if (!showPaymentLinks || kind !== 'payment') return row
+  return <div className="payment-row">{row}<CardLinks blocks={blocksOf(entry)} payment /></div>
 }
 
 export type WidgetView = Exclude<Widget, 'today'>
@@ -47,8 +52,8 @@ export function WidgetSection({ data, today, widget, open }: {
   data: Data; today: string; widget: WidgetView; open: (entry: Entry) => void
 }) {
   const rows = widgetRows(data, today, widget)
-  return <section className="widget">
-    {rows.length ? <div className="summary-list">{rows.map(row => <Row key={row.entry.id} data={data} open={open} {...row} />)}</div> :
+  return <section className="widget glass-surface">
+    {rows.length ? <div className="summary-list">{rows.map(row => <Row key={row.entry.id} data={data} open={open} showPaymentLinks {...row} />)}</div> :
       <p className="widget-empty">{empty[widget]}</p>}
   </section>
 }
@@ -77,7 +82,7 @@ export function Overview({ data, open, navigate, update, busy, today }: {
         </button>}
       </section>
     })}</div>
-    {!visible.length && <p className="empty">Все виджеты скрыты. Откройте настройки виджетов, чтобы вернуть их.</p>}
+    {!visible.length && <p className="empty glass-surface">Все виджеты скрыты. Откройте настройки виджетов, чтобы вернуть их.</p>}
     {configure && <Dialog title="Настроить виджеты" close={() => setConfigure(false)}>
       <p className="muted">Видимость и порядок сохраняются автоматически.</p>
       <div className="widget-settings">{prefs.order.map((widget, index) => <div className="widget-setting" key={widget}>
@@ -112,7 +117,7 @@ export function Calendar({ data, open, create, today }: {
   }
   const entries = dayEntries(data, selected)
   return <div className="calendar-layout">
-    <section className="widget calendar">
+    <section className="widget glass-surface calendar">
       <header>
         <h2>{first.toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' })}</h2>
         <div className="tools">
@@ -135,14 +140,14 @@ export function Calendar({ data, open, create, today }: {
       </div>
     </section>
     <div className="calendar-aside">
-      <section className="widget">
+      <section className="widget glass-surface">
         <header><span className="widget-icon"><CalendarDays size={19} /></span><h2>{shortDate(selected)}</h2></header>
-        {entries.length ? entries.map(entry => <Row key={entry.id} data={data} entry={entry} open={open}
+        {entries.length ? entries.map(entry => <Row key={entry.id} data={data} entry={entry} open={open} showPaymentLinks
           detail={[firstValue(entry, 'time'), kindName[kindOf(data, entry)]].filter(Boolean).join(' · ')} />) :
           <p className="widget-empty">На эту дату нет карточек.</p>}
         <button disabled={!data.places.length} onClick={() => create(selected)}><Plus size={17} /> Карточка на эту дату</button>
       </section>
-      <section className="widget">
+      <section className="widget glass-surface">
         <header><span className="widget-icon"><Bell size={19} /></span><h2>Напоминания</h2></header>
         <p className="widget-empty">Срабатывают, пока органайзер открыт.</p>
         {notification === 'default' && <button onClick={() => void Notification.requestPermission().then(setNotification,
@@ -160,7 +165,7 @@ export function Finance({ data, open }: { data: Data; open: (entry: Entry) => vo
   const [end, setEnd] = useState('')
   const items = operations(data).filter(item => (!start || item.day >= start) && (!end || (item.day && item.day <= end)))
   const totals = financeTotals(items)
-  return <section className="widget finance-panel" aria-label="Финансовая сводка">
+  return <section className="widget glass-surface finance-panel" aria-label="Финансовая сводка">
     <header><span className="widget-icon"><Wallet size={19} /></span><h2>Сводка операций</h2></header>
     <div className="finance-totals">
       {[[ 'Баланс', totals.balance], ['Доходы', totals.income], ['Расходы', totals.expenses], ['В плане', totals.planned]].map(([label, amount]) =>
@@ -178,7 +183,7 @@ export function Finance({ data, open }: { data: Data; open: (entry: Entry) => vo
         <span>{category}</span><small>{money(amount)}</small>
         <progress value={Number(amount * 10000n / totals.expenses)} max={10000} aria-label={category} />
       </div>)}</div>}
-    {items.length ? <div className="summary-list">{items.map(item => <Row key={item.entry.id} data={data} entry={item.entry} open={open}
+    {items.length ? <div className="summary-list">{items.map(item => <Row key={item.entry.id} data={data} entry={item.entry} open={open} showPaymentLinks
       detail={[item.day && shortDate(item.day), item.category, money(item.amount), item.planned && 'В плане'].filter(Boolean).join(' · ')} />)}</div> :
       <p className="widget-empty">Операций за выбранный период нет.</p>}
   </section>

@@ -81,7 +81,7 @@ export function kindOf(data: Data, entry: Pick<Entry, 'kind' | 'parent'>): Kind 
 
 const templateBlocks: Record<Kind, BlockType[]> = {
   project: ['status', 'date', 'checklist', 'amount', 'text'], task: ['status', 'date', 'time', 'checklist'],
-  purchase: ['amount', 'date', 'status'], payment: ['amount', 'date', 'status'],
+  purchase: ['amount', 'date', 'status'], payment: ['amount', 'date', 'status', 'link'],
   note: ['text'], document: ['file', 'date', 'text'], link: ['link', 'text'],
 }
 export const rootFor: Record<Kind, string> = {

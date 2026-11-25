@@ -4,12 +4,12 @@ import { AttachmentView } from './attachments'
 import { validateBlocks } from './backup'
 import { blockNames, blocksOf, createCard, firstValue, kindName, kinds, kindOf, makeBlock, priorities, priorityName,
   reorder, repeatName, repeatValues, stateName, states, type Block, type BlockType, type Kind } from './cards'
-import { Dialog, formatTime } from './editors'
+import { Dialog, formatTime, useDiscardDialog } from './editors'
 import { icons, pathTo, type Data, type Entry } from './model'
 
 const formats = { paragraph: 'Абзац', heading: 'Заголовок', list: 'Список' } as const
 
-function BlockEditor({ block, cards, change }: { block: Block; cards: Entry[]; change: (block: Block) => void }) {
+function BlockEditor({ block, cards, change, paymentLink }: { block: Block; cards: Entry[]; change: (block: Block) => void; paymentLink: boolean }) {
   switch (block.type) {
     case 'text': return <>
       <label>Формат<select value={block.format} onChange={event => change({ ...block, format: event.target.value as typeof block.format })}>
@@ -18,7 +18,7 @@ function BlockEditor({ block, cards, change }: { block: Block; cards: Entry[]; c
       <label>Текст<textarea rows={4} value={block.value} onChange={event => change({ ...block, value: event.target.value })} /></label>
     </>
     case 'link': return <div className="form-columns">
-      <label>Адрес ссылки<input type="url" value={block.value} onChange={event => change({ ...block, value: event.target.value.trim() })} /></label>
+      <label>{paymentLink ? 'Адрес сайта оплаты' : 'Адрес ссылки'}<input type="url" placeholder="https://" autoCapitalize="none" spellCheck={false} value={block.value} onChange={event => change({ ...block, value: event.target.value.trim() })} /></label>
       <label>Подпись ссылки<input value={block.label} onChange={event => change({ ...block, label: event.target.value })} /></label>
     </div>
     case 'checklist': return <>
@@ -90,6 +90,8 @@ export function CardEditor({ entry, editing, data, persist, close, child, guard 
   guard: RefObject<(() => boolean | Promise<boolean>) | null>;
   persist: (value: Entry, editing: boolean, revision: number, generation?: string) => Promise<Entry>
 }) {
+  const discard = useDiscardDialog('Закрыть карточку без сохранения изменений?')
+  const [optionalPaymentLink] = useState(() => makeBlock('link'))
   const [draft, setDraft] = useState<Entry>(() => ({ ...entry, kind: kindOf(data, entry), blocks: blocksOf(entry) }))
   const generation = useRef(data.generation)
   const template = useRef(draft.blocks)
@@ -165,7 +167,7 @@ export function CardEditor({ entry, editing, data, persist, close, child, guard 
       // A failed autosave must not consume the explicit save request.
       await pending.current
       if (await save(latest.current)) return true
-      return allowDiscard && window.confirm('Закрыть карточку и потерять несохранённые изменения?')
+      return allowDiscard && await discard.confirm()
     } finally {
       finishing.current = false
       setSubmitting(false)
@@ -184,11 +186,13 @@ export function CardEditor({ entry, editing, data, persist, close, child, guard 
   const blocks = blocksOf(draft)
   const cards = data.entries.filter(item => item.id !== entry.id)
   const kind = draft.kind!
+  const paymentLink = kind === 'payment' ? blocks.find(block => block.type === 'link') ?? optionalPaymentLink : undefined
+  const shownBlocks = paymentLink === optionalPaymentLink ? [...blocks, optionalPaymentLink] : blocks
   const supportsParent = kind === 'project' || kind === 'task'
   const supportsFinance = kind === 'payment' || kind === 'purchase'
   const parents = cards.filter(item => kindOf(data, item) === kind)
   const children = cards.filter(item => item.parentCard === draft.id)
-  return <Dialog showBack className="card-dialog" title={editing ? 'Карточка' : 'Новая карточка'} close={() => void finish(close, true)}>
+  return <><Dialog showBack className="card-dialog" title={editing ? 'Карточка' : 'Новая карточка'} close={() => void finish(close, true)}>
     <form inert={submitting} onInvalidCapture={event => {
       const field = event.target as HTMLInputElement
       setError(field.validationMessage)
@@ -241,16 +245,18 @@ export function CardEditor({ entry, editing, data, persist, close, child, guard 
         {children.length > 0 && <ul>{children.map(item => <li key={item.id}>{item.title}</li>)}</ul>}
       </details>
       <div className="block-list">
-        {blocks.map((block, index) => <section className="block-editor" key={block.id} aria-label={blockNames[block.type]}>
-          <div className="block-heading"><strong>{blockNames[block.type]}</strong><div className="tools">
+        {shownBlocks.map((block, index) => <section className="block-editor" key={block.id}
+          aria-label={block === paymentLink ? 'Сайт оплаты' : blockNames[block.type]}>
+          <div className="block-heading"><strong>{block === paymentLink ? 'Сайт оплаты' : blockNames[block.type]}</strong>{block !== optionalPaymentLink && <div className="tools">
             <button className="icon-button" type="button" disabled={index === 0} aria-label={`Поднять блок «${blockNames[block.type]}»`} onClick={() => changed({ blocks: reorder(blocks, index, -1) })}><ArrowUp size={17} /></button>
             <button className="icon-button" type="button" disabled={index === blocks.length - 1} aria-label={`Опустить блок «${blockNames[block.type]}»`} onClick={() => changed({ blocks: reorder(blocks, index, 1) })}><ArrowDown size={17} /></button>
             <button className="icon-button" type="button" aria-label={`Удалить блок «${blockNames[block.type]}»`} onClick={() => {
               setRemoved({ block, index })
               changed({ blocks: blocks.filter(item => item.id !== block.id) })
             }}><Trash2 size={17} /></button>
-          </div></div>
-          <BlockEditor block={block} cards={cards} change={value => changed({ blocks: blocks.map(item => item.id === value.id ? value : item) })} />
+          </div>}</div>
+          <BlockEditor block={block} cards={cards} paymentLink={block === paymentLink} change={value =>
+            changed({ blocks: block === optionalPaymentLink ? [...blocks, value] : blocks.map(item => item.id === value.id ? value : item) })} />
         </section>)}
       </div>
       <div className="add-block">
@@ -277,5 +283,5 @@ export function CardEditor({ entry, editing, data, persist, close, child, guard 
         <button type="submit" className="primary" disabled={submitting || !draft.title.trim()}>Готово</button>
       </div>
     </form>
-  </Dialog>
+  </Dialog>{discard.dialog}</>
 }

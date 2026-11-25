@@ -1,4 +1,4 @@
-/* The shared navigation and dashboard use the same frosted material above a separate, static backdrop. */
+/* Shared glass material used by the workspace, dashboard and dialogs. */
 :root {
   --glass: #1d392fc7;
   --glass-strong: #1c3b31e6;
@@ -12,6 +12,10 @@
   --glass-shadow: 0 4px 10px #101d1929, 0 12px 28px #081b183d;
   --caption-shadow: 0 1px 6px #0e2019, 0 1px 2px #0e2019;
   --glass-blur: 15px;
+  --glass-radius: 20px;
+  --glass-control: #baf6ce18;
+  --glass-control-edge: #a5c8b6;
+  --glass-scrim: #101f1852;
   --photo-wash: linear-gradient(160deg, #142721a0 0%, #20372a66 50%, #132d26ba 100%);
   --workspace-width: 1200px;
 }
@@ -27,6 +31,9 @@
   --glass-hover: #d5eadd;
   --glass-shadow: 0 3px 8px #263d301c, 0 12px 27px #3c5e4729;
   --caption-shadow: none;
+  --glass-control: #fbfff27a;
+  --glass-control-edge: #648674;
+  --glass-scrim: #2e463c43;
   --photo-wash: linear-gradient(165deg, #d3e5d2a0 0%, #dce8c96b 48%, #e2efe4a8 100%);
 }
 
@@ -39,7 +46,7 @@
   display: flex;
   flex-direction: column;
 }
-.shell[data-workspace]::before {
+.shell::before {
   content: '';
   position: fixed;
   inset: 0;
@@ -49,10 +56,11 @@
 }
 .shell > main { flex: 1; padding: 0 0 1.5rem; }
 .glass-surface {
+  min-width: 0;
   color: var(--glass-text);
   background: linear-gradient(157deg, var(--glass-tint), transparent 52%), var(--glass-solid);
   border: 1px solid var(--glass-edge);
-  border-radius: 20px;
+  border-radius: var(--glass-radius);
   box-shadow: inset 0 1px var(--glass-rim), var(--glass-shadow);
 }
 @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
@@ -64,7 +72,88 @@
   /* Nested controls share their parent's frost. Only the outer panel needs a filter. */
   .glass-surface .glass-surface { -webkit-backdrop-filter: none; backdrop-filter: none; }
 }
-.glass-surface small { color: var(--glass-muted); }
+.glass-surface :where(small, .muted, .metadata, .detail, .widget-empty) { color: var(--glass-muted); }
+
+/* Inset controls reuse the panel colors without adding another blur layer. */
+:is(.interior, dialog) {
+  --surface: var(--glass-control);
+  --subtle: var(--glass-control);
+  --field: var(--glass-control);
+  --line: var(--glass-edge);
+  --control-line: var(--glass-control-edge);
+  --hover: var(--glass-hover);
+  --pressed: var(--glass-hover);
+  --selected: var(--glass-tint);
+  --highlight: var(--glass-rim);
+  --muted: var(--glass-muted);
+}
+.interior .search, .interior .breadcrumbs, .interior > .workspace > [role=status] {
+  color: var(--glass-text);
+}
+.breadcrumbs > span { color: inherit; min-width: 0; }
+.breadcrumbs {
+  width: fit-content;
+  max-width: 100%;
+  padding: 4px 8px;
+  background: var(--glass-solid);
+  border: 1px solid var(--glass-edge);
+  border-radius: var(--control-radius);
+}
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .breadcrumbs { background: var(--glass); }
+}
+.breadcrumbs [aria-current=page] { padding: 4px; font-weight: 600; }
+.interior .search {
+  background: var(--glass-solid);
+  border-color: var(--glass-edge);
+  box-shadow: var(--rim);
+}
+.interior .search:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--glow);
+}
+.entries { align-items: start; }
+.entry, .widget, .shortcut-card, .result { border-radius: 16px; }
+.empty { color: var(--glass-muted); }
+.error { color: var(--critical); }
+.glass-surface.banner { border-color: var(--critical); }
+.card-links { display: grid; min-width: 0; gap: 4px; justify-items: start; }
+.card-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  max-width: 100%;
+  padding: 6px 12px;
+  border: 1px solid var(--glass-edge);
+  border-radius: var(--control-radius);
+  background: var(--glass-tint);
+  overflow-wrap: anywhere;
+}
+.card-link span { display: grid; min-width: 0; line-height: 1.35; }
+.card-link small { font-weight: 400; }
+.card-link:active { background: var(--glass-hover); }
+@media (hover: hover) {
+  .card-link:hover { background: var(--glass-hover); border-color: var(--accent); }
+}
+.payment-row { min-width: 0; }
+.payment-row .card-links { padding: 0 4px 8px; }
+
+dialog.glass-surface { color: var(--glass-text); }
+:root:has(dialog[open]) { overflow: hidden; scrollbar-gutter: stable; }
+dialog::backdrop { background: var(--glass-scrim); }
+:where(.dialog-header, .editor-footer, .shortcut-editor-actions) {
+  background: linear-gradient(157deg, var(--glass-tint), transparent 58%), var(--glass-solid);
+  border-color: var(--glass-edge);
+}
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  dialog.glass-surface { background-color: var(--glass-strong); }
+}
+:is(dialog, .interior) :is(fieldset, .editor-options, .block-editor, .attachment) {
+  border-radius: var(--control-radius);
+  background: var(--glass-tint);
+}
+:is(dialog, .interior) :is(.icon-button, .back-button) { color: var(--glass-text); }
 @media (hover: hover) {
   button.glass-surface:hover:not(:disabled), .app-header :is(button, summary):hover {
     background-color: var(--glass-hover);
@@ -314,7 +403,7 @@
   padding-inline: 12px;
   border-radius: 999px;
 }
-[data-workspace] .build-label { color: var(--glass-text); text-shadow: var(--caption-shadow); }
+.build-label { color: var(--glass-text); text-shadow: var(--caption-shadow); }
 .build-label { padding-bottom: env(safe-area-inset-bottom, 0px); padding-right: 110px; }
 @media (max-width: 980px) {
   .primary-navigation, kbd { display: none; }
@@ -328,7 +417,7 @@
 @media (max-width: 760px) {
   :root { --glass-blur: 7px; }
   .shell { padding-inline: 12px; padding-top: calc(env(safe-area-inset-top, 0px) + 8px); }
-  .shell[data-workspace]::before {
+  .shell::before {
     background-image: var(--photo-wash), url('./assets/organizer-glass-mobile.webp');
     background-position: center;
   }
@@ -358,8 +447,15 @@
   :root { --glass-blur: 7px; }
 }
 @media (max-width: 540px) {
-  /* Keep only the header and featured surfaces blurred on narrow phones. */
-  :is(.overview-places, .overview-grid) > .glass-surface { -webkit-backdrop-filter: none; backdrop-filter: none; }
+  /* Long lists retain translucent surfaces with one fixed backdrop. */
+  :is(.overview-places, .overview-grid, .entries, .grid, .results, .shortcut-grid) > .glass-surface {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+  .entry-heading { display: grid; grid-template-columns: auto minmax(0, 1fr); }
+  .entry-heading .tools { grid-column: 2; justify-content: flex-end; }
+  .finance-filter label { width: min(100%, 10rem); }
+
   .overview-places, .overview-grid { grid-template-columns: minmax(0, 1fr); }
   .overview-places .place-open { grid-template-columns: auto minmax(0, 1fr) auto; }
   .overview-places .card-chevron { display: block; }
@@ -375,12 +471,13 @@
   .overview-intro { padding: 12px; }
 }
 @media (prefers-reduced-transparency: reduce) {
-  .glass-surface { background: var(--glass-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
-  .shell[data-workspace]::before { display: none; }
-  [data-workspace] .build-label, .overview-section-heading h2, .overview-toolbar h2 { color: inherit; }
+  .glass-surface, dialog.glass-surface { background: var(--glass-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
+  :where(.dialog-header, .editor-footer, .shortcut-editor-actions), .breadcrumbs { background: var(--glass-solid); }
+  .shell::before { display: none; }
+  .build-label, .overview-section-heading h2, .overview-toolbar h2 { color: inherit; }
 }
 @media (forced-colors: active) {
-  .glass-surface { background: Canvas; border-color: CanvasText; -webkit-backdrop-filter: none; backdrop-filter: none; }
-  .shell[data-workspace]::before { display: none; }
+  .glass-surface, dialog.glass-surface { background: Canvas; border-color: CanvasText; -webkit-backdrop-filter: none; backdrop-filter: none; }
+  .shell::before { display: none; }
   .disclosure[open] > summary, .app-header button[aria-current=page] { border-color: Highlight; }
 }
