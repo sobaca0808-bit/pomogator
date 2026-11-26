@@ -11,9 +11,12 @@ public sealed record TunControlEndpoint(int Port, string User, string Password, 
 public sealed record TunEgress(IPEndPoint Peer, IPAddress Source, int InterfaceIndex, ProtocolType Protocol = ProtocolType.Tcp)
 {
     // Xray splithttp's decideHTTPVersion selects QUIC only for TLS with a single h3 ALPN.
+    public static bool UsesQuic(Profile profile) =>
+        profile is { Security: "tls", Transport: "xhttp" } && profile.Option("alpn") == "h3";
+
     public static TunEgress ForProfile(IPAddress peer, IPAddress source, int index, Profile profile) =>
         new(new IPEndPoint(peer, profile.Port), source, index,
-            profile is { Security: "tls", Transport: "xhttp" } && profile.Option("alpn") == "h3"
+            UsesQuic(profile)
                 ? ProtocolType.Udp : ProtocolType.Tcp);
 
     internal static void Configure(System.Diagnostics.ProcessStartInfo start, TunEgress? egress)

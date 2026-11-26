@@ -25,7 +25,7 @@ public static class InternetHealth
         ("https://www.microsoft.com/favicon.ico", 200)
     };
 
-    public static async Task<TimeSpan?> ProbeAsync(HttpClient client, CancellationToken token)
+    public static async Task<TimeSpan?> ProbeAsync(HttpClient client, CancellationToken token, Action<string>? report = null)
     {
         using var stop = CancellationTokenSource.CreateLinkedTokenSource(token);
         var attempts = Targets.Select(target => TryTarget(client, target.Url, target.Status, stop.Token)).ToList();
@@ -33,7 +33,9 @@ public static class InternetHealth
         {
             var completed = await Task.WhenAny(attempts);
             attempts.Remove(completed);
-            if (await completed is { } time)
+            var (time, outcome) = await completed;
+            report?.Invoke(outcome);
+            if (time.HasValue)
             {
                 stop.Cancel();
                 return time;
@@ -43,7 +45,7 @@ public static class InternetHealth
         return null;
     }
 
-    private static async Task<TimeSpan?> TryTarget(HttpClient client, string url, int status, CancellationToken token)
+    private static async Task<(TimeSpan? Elapsed, string Outcome)> TryTarget(HttpClient client, string url, int status, CancellationToken token)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         deadline.CancelAfter(TimeSpan.FromSeconds(5));
@@ -51,9 +53,19 @@ public static class InternetHealth
         {
             var measure = Stopwatch.StartNew();
             using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
-            return (int)response.StatusCode == status ? measure.Elapsed : null;
+            return ((int)response.StatusCode == status ? measure.Elapsed : null, $"HTTPS · {new Uri(url).Host} · HTTP {(int)response.StatusCode}");
         }
-        catch (Exception error) when (error is HttpRequestException or OperationCanceledException) { return null; }
+        catch (OperationCanceledException) { return (null, $"HTTPS · {new Uri(url).Host} · ожидание завершено"); }
+        catch (HttpRequestException error)
+        {
+            var codes = new List<string> { error.HttpRequestError.ToString() };
+            for (Exception? cause = error; cause != null; cause = cause.InnerException)
+            {
+                codes.Add($"0x{cause.HResult:X8}");
+                if (cause is System.Net.Sockets.SocketException socket) codes.Add($"WinSock {socket.NativeErrorCode}");
+            }
+            return (null, $"HTTPS · {new Uri(url).Host} · {string.Join(" · ", codes)}");
+        }
     }
 
     public static async Task<string?> ExternalIpAsync(HttpClient client, CancellationToken token)
