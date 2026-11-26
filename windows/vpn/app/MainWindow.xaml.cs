@@ -141,7 +141,7 @@ public partial class MainWindow : Window
     private void SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (!IsLoaded) return;
-        LatencyText.Text = "Задержка измеряется по TCP до сервера.";
+        LatencyText.Text = Servers.SelectedItem is Profile item && TunEgress.UsesQuic(item) ? "Для HTTP/3 проверяется исходящий маршрут UDP." : "Задержка измеряется по TCP до сервера.";
         if (Connection.Phase == Phase.Disconnected && Servers.SelectedItem != null)
             Detail.Text = "Нажмите круглую кнопку, чтобы подключиться.";
         Render();
@@ -284,49 +284,64 @@ public partial class MainWindow : Window
                     throw new VpnError("Для этого режима нужна Windows 10 22H2 x64 или новее.");
                 if (TunWindows.OtherVpn() || SystemProxy.AnyInUse())
                     throw new VpnError("Обнаружен другой VPN, UBoost или активный системный прокси. Выберите локальный прокси или завершите другой клиент самостоятельно.");
-                using var dnsDeadline = CancellationTokenSource.CreateLinkedTokenSource(source.Token);
-                dnsDeadline.CancelAfter(TimeSpan.FromSeconds(5));
-                try
-                {
-                    var addresses = await Dns.GetHostAddressesAsync(profile.Host, AddressFamily.InterNetwork, dnsDeadline.Token);
-                    peer = addresses.FirstOrDefault(address => !IPAddress.IsLoopback(address) &&
-                        address.ToString() != TunConfig.Resolver && address.ToString() != TunConfig.InternetProbe);
-                }
-                catch (Exception error) when (error is SocketException or OperationCanceledException && !source.IsCancellationRequested)
-                { throw new VpnError("Не удалось получить IPv4-адрес VPN-сервера через текущий DNS."); }
-                if (peer == null) throw new VpnError("У VPN-сервера нет пригодного IPv4-адреса для TUN.");
-                recovery = new TunRecovery(Guid.NewGuid(), peer.ToString(), TunWindows.Capture(peer),
-                    TunConfig.Routes(peer));
+                LogSecurityContext();
             }
-            var (latency, peerSource) = await Xray.CheckServerSourceAsync(
-                peer == null ? profile : profile with { Host = peer.ToString() }, source.Token);
-            if (recovery != null)
-            {
-                if (!recovery.Before.HasSource(peerSource))
-                    throw new VpnError("Источник TCP-подключения не принадлежит исходному интерфейсу IPv4. TUN не запущен.");
-                recovery = recovery with { Before = recovery.Before with { SourceIpv4 = peerSource.ToString() } };
-            }
-            LatencyText.Text = $"Задержка TCP до сервера: {Math.Round(latency.TotalMilliseconds)} мс.";
-            AddLog("TCP-порт VPN-сервера доступен.");
 
-            var uplink = recovery == null ? null : TunWindows.UplinkName(recovery.Before, peerSource);
-            stage = Check.Xray;
             var executable = tunMode ? TunConfig.Executable : "xray.exe";
             var path = Path.Combine(AppContext.BaseDirectory, executable);
             if (!File.Exists(path)) throw new VpnError($"В комплекте отсутствует {executable}. Распакуйте архив полностью.");
-            if (tunMode) tunStage = "запуск Xray для выбранного VLESS";
-            Detail.Text = "Запуск Xray…";
             int port = 0;
-            core = await Xray.StartWithPortsAsync(path, () =>
+            TunProbe? baselineProbe = null;
+            if (tunMode)
             {
-                port = Xray.FreePort();
-                checkPort = tunMode || profile.Full == null ? port : DistinctPort(port);
-                socksPort = !tunMode && profile.Full?.SocksTag != null ? DistinctPort(port, checkPort) : null;
-                var config = tunMode ? TunConfig.PreflightEngine(peer!, peerSource, uplink!, profile, port) :
-                    XrayConfig.Create(profile, port, checkPort, socksPort);
-                return (config, port, new int?[] { checkPort, socksPort }.OfType<int>().Distinct().ToArray());
-            }, source.Token, WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback,
-                startupExit: tunMode ? code => tunEngineNote = BridgeExit(code) : null);
+                tunStage = "проверка IPv4 сервера и HTTPS через VLESS до TUN";
+                Detail.Text = "Проверка HTTPS через VLESS до запуска Wintun…";
+                using (var direct = new HttpClient(new HttpClientHandler { UseProxy = false, AllowAutoRedirect = false, UseCookies = false }))
+                {
+                    var ordinary = await InternetHealth.ProbeAsync(direct, source.Token);
+                    AddLog(ordinary.HasValue ? "Обычный HTTPS до TUN доступен, системный прокси выключен для пробы." :
+                        "Обычный HTTPS до TUN не подтверждён.");
+                }
+                VerifiedPeer verified;
+                try
+                {
+                    try { verified = await TunPeerSelection.Open(profile, path, AddLog, source.Token); }
+                    catch (NoVerifiedPeer first) when (ProfilesList.Count == 2 && !source.IsCancellationRequested)
+                    {
+                        AddLog(first.Message);
+                        var reserve = ProfilesList.First(p => !ReferenceEquals(p, profile));
+                        if (MessageBox.Show(this, $"Проверить другой сохранённый профиль «{reserve.DisplayName}» и использовать его при успешном HTTPS?",
+                            Title, MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No) != MessageBoxResult.Yes) throw;
+                        verified = await TunPeerSelection.Open(reserve, path, AddLog, source.Token);
+                        profile = reserve;
+                        Servers.SelectedItem = reserve;
+                    }
+                }
+                catch (NoVerifiedPeer error) { throw new VpnError(error.Message, error.FailedCheck); }
+                core = verified.Core;
+                recovery = verified.Recovery;
+                peer = verified.Address;
+                baselineProbe = verified.Baseline;
+                checkPort = port = core.Port;
+                socksPort = null;
+                LatencyText.Text = "Сервер выбран по проверенному HTTPS через VLESS.";
+            }
+            else
+            {
+                var latency = await Xray.CheckServerAsync(profile, source.Token);
+                LatencyText.Text = TunEgress.UsesQuic(profile) ? "Маршрут UDP выбран." :
+                    $"Задержка TCP до сервера: {Math.Round(latency.TotalMilliseconds)} мс.";
+                stage = Check.Xray;
+                Detail.Text = "Запуск Xray…";
+                core = await Xray.StartWithPortsAsync(path, () =>
+                {
+                    port = Xray.FreePort();
+                    checkPort = profile.Full == null ? port : DistinctPort(port);
+                    socksPort = profile.Full?.SocksTag != null ? DistinctPort(port, checkPort) : null;
+                    return (XrayConfig.Create(profile, port, checkPort, socksPort), port,
+                        new int?[] { checkPort, socksPort }.OfType<int>().Distinct().ToArray());
+                }, source.Token, WindowsLifetime.Attach, WindowsLifetime.OwnsLoopback);
+            }
             Connection.Record(Check.Xray, CheckResult.Passed);
             AddLog("Процесс Xray запущен.");
             Connection.Record(Check.Proxy, CheckResult.Passed);
@@ -337,15 +352,6 @@ public partial class MainWindow : Window
             if (recovery != null)
             {
                 tunStage = "запуск Wintun и подтверждение параметров Windows";
-                var baselineProbe = await TunConnectivity.CheckBeforeTun(checkPort, core.ProcessId, source.Token);
-                AddLog(baselineProbe.Line("До запуска TUN · HTTPS к той же IPv4-цели через VLESS"));
-                if (!baselineProbe.Success)
-                {
-                    using var preflight = Xray.ThroughProxy(checkPort);
-                    if (await InternetHealth.ProbeAsync(preflight, source.Token) == null)
-                        throw new VpnError("HTTPS через выбранный VLESS недоступен до включения TUN.");
-                    AddLog("До запуска TUN · HTTPS через VLESS подтверждён на резервном адресе.");
-                }
                 Detail.Text = "Ожидание интерфейса, IPv4-адреса, маршрутов и DNS Wintun…";
                 tun = new TunSession(recovery);
                 try { await tun.StartAsync(profile, source.Token); }
@@ -386,7 +392,7 @@ public partial class MainWindow : Window
                 stage = Check.Https;
                 Detail.Text = "Контрольные HTTPS-запросы через выбранный VLESS…";
                 using var http = NetworkProbeClient();
-                result = await InternetHealth.ProbeAsync(http, source.Token) ??
+                result = await InternetHealth.ProbeAsync(http, source.Token, AddLog) ??
                     throw new VpnError("Контрольные адреса не ответили через выбранный VLESS. Доступ не подтверждён.");
             }
             lastCheck = DateTimeOffset.Now;
@@ -888,13 +894,13 @@ public partial class MainWindow : Window
     {
         if (measuring || Servers.SelectedItem is not Profile profile) return;
         measuring = true;
-        LatencyText.Text = "Измерение времени TCP-соединения…";
+        LatencyText.Text = TunEgress.UsesQuic(profile) ? "Проверка маршрута UDP…" : "Измерение времени TCP-соединения…";
         Render();
         try
         {
             var latency = await Xray.CheckServerAsync(profile, CancellationToken.None);
             if (ReferenceEquals(Servers.SelectedItem, profile))
-                LatencyText.Text = $"Задержка TCP до сервера: {Math.Round(latency.TotalMilliseconds)} мс.";
+                LatencyText.Text = TunEgress.UsesQuic(profile) ? "Маршрут UDP найден. Доступность подтвердит HTTPS через профиль." : $"Задержка TCP до сервера: {Math.Round(latency.TotalMilliseconds)} мс.";
         }
         catch (Exception error)
         {
@@ -927,13 +933,29 @@ public partial class MainWindow : Window
         LogBox.ScrollToEnd();
     }
 
+    private void LogSecurityContext()
+    {
+        bool present = false;
+        try
+        {
+            foreach (var name in new[] { "avp", "avpui" })
+                foreach (var process in System.Diagnostics.Process.GetProcessesByName(name))
+                    using (process) { present = true; }
+            AddLog("Касперский · процессы avp/avpui " + (present ? "обнаружены" : "не обнаружены") +
+                ". Состояние защиты указывает владелец в протоколе испытаний.");
+        }
+        catch (Exception error) when (error is InvalidOperationException or Win32Exception)
+        { AddLog("Сведения о процессах Касперского недоступны."); }
+        AddLog("TUN · Xray 26.11.9, нативный Wintun, IPv4. Состояние расширения U-Boost проверяется в браузере.");
+    }
+
     private void ExportClick(object sender, RoutedEventArgs e)
     {
         var dialog = new SaveFileDialog { FileName = "pomogator-vpn-diagnostics", Filter = "Текст (*.txt)|*.txt" };
         if (dialog.ShowDialog(this) != true) return;
         try
         {
-            var header = new[] { "ПОМОГАТОР VPN 0.3.8", Status.Text, CoreCheck.Text, ProxyCheck.Text, TrafficCheck.Text,
+            var header = new[] { "ПОМОГАТОР VPN 0.3.9", Status.Text, CoreCheck.Text, ProxyCheck.Text, TrafficCheck.Text,
                 SystemCheck.Text, TunCheck.Text, CheckedAt.Text, "" };
             var observations = tunObservation?.Lines() ?? Enumerable.Empty<string>();
             var probes = tunChecks?.Lines() ?? Enumerable.Empty<string>();

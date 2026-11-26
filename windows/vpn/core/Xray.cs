@@ -161,21 +161,22 @@ public sealed class Xray : IDisposable
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         deadline.CancelAfter(TimeSpan.FromSeconds(6));
-        using var client = new TcpClient();
+        var quic = TunEgress.UsesQuic(profile);
+        using var socket = new Socket(quic ? SocketType.Dgram : SocketType.Stream, quic ? ProtocolType.Udp : ProtocolType.Tcp);
         try
         {
             var watch = Stopwatch.StartNew();
-            await client.ConnectAsync(profile.Host, profile.Port, deadline.Token);
-            var address = ((IPEndPoint)client.Client.LocalEndPoint!).Address;
+            await socket.ConnectAsync(profile.Host, profile.Port, deadline.Token);
+            var address = ((IPEndPoint)socket.LocalEndPoint!).Address;
             return (watch.Elapsed, address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address);
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested)
-        { throw new VpnError("VPN-сервер не ответил на TCP-проверку за 6 секунд."); }
+        { throw new VpnError(quic ? "Не удалось определить адрес источника для UDP за 6 секунд." : "VPN-сервер не ответил на TCP-проверку за 6 секунд."); }
         catch (SocketException error)
         {
-            throw new VpnError(error.SocketErrorCode is SocketError.HostNotFound or SocketError.TryAgain or SocketError.NoData
+            throw new VpnError((error.SocketErrorCode is SocketError.HostNotFound or SocketError.TryAgain or SocketError.NoData
                 ? "Windows не разрешила имя VPN-сервера. Проверьте адрес и DNS."
-                : "VPN-сервер недоступен по TCP. Проверьте адрес, порт и своё подключение.");
+                : quic ? "Исходящий маршрут UDP недоступен." : "VPN-сервер недоступен по TCP.") + $" WinSock {error.NativeErrorCode}.");
         }
     }
 

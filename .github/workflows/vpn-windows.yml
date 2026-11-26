@@ -1,8 +1,8 @@
-name: ПОМОГАТОР VPN 0.3.8 — Windows x64
+name: ПОМОГАТОР VPN 0.3.9 — Windows x64
 
 on:
   push:
-    branches: [vpn-v0.3.0-tun, vpn-v0.3.1-tun-fix, vpn-v0.3.4-uplink, vpn-v0.3.4-egress-ab, vpn-v0.3.8-tun-peer]
+    branches: [vpn-v0.3.0-tun, vpn-v0.3.1-tun-fix, vpn-v0.3.4-uplink, vpn-v0.3.4-egress-ab, vpn-v0.3.8-tun-peer, vpn-v0.3.9-verified-endpoints]
     paths:
       - windows/vpn/**
       - .github/workflows/vpn-windows.yml
@@ -17,6 +17,7 @@ permissions:
 
 jobs:
   build-test:
+    if: github.event_name != 'pull_request' || github.head_ref != 'vpn-v0.3.9-verified-endpoints' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: windows-latest
     timeout-minutes: 35
     steps:
@@ -46,7 +47,7 @@ jobs:
         run: dotnet run --project windows/vpn/tests/ui/UiTests.csproj -c Release -- "$env:RUNNER_TEMP/pomogator-vpn-screenshots"
       - uses: actions/upload-artifact@v4
         with:
-          name: PomogatorVpn-0.3.8-screenshots
+          name: PomogatorVpn-0.3.9-screenshots
           path: ${{ runner.temp }}/pomogator-vpn-screenshots/
           if-no-files-found: error
       - name: Build Windows x64 package
@@ -55,8 +56,16 @@ jobs:
           dotnet publish windows/vpn/app/PomogatorVpn.csproj -c Release -r win-x64 --self-contained true -o windows/vpn/dist
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item "$env:RUNNER_TEMP/pomogator-xray/*" windows/vpn/dist
+          $revision = (git rev-parse HEAD).Trim()
+          $built = [DateTimeOffset]::UtcNow.ToString("o")
+          @{ version = "0.3.9"; commit = $revision; builtUtc = $built; xray = "26.11.9"; binaries = @(
+            Get-ChildItem windows/vpn/dist -File -Include *.exe,*.dll -Recurse | ForEach-Object {
+              @{ name = $_.Name; sha256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash }
+            }
+          ) } | ConvertTo-Json -Depth 4 | Set-Content windows/vpn/dist/build-info.json -Encoding utf8
+          Write-Host "Windows x64 package $revision built $built"
       - uses: actions/upload-artifact@v4
         with:
-          name: PomogatorVpn-0.3.8-win-x64
+          name: PomogatorVpn-0.3.9-win-x64
           path: windows/vpn/dist/
           if-no-files-found: error

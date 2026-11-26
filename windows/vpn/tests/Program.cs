@@ -134,6 +134,42 @@ await TestAsync("Report an unavailable server with no credential details", async
     Assert(error.Message.Contains("TCP") && !error.Message.Contains(Id));
 });
 
+await TestAsync("Choose a verified IPv4 after HTTPS failure; exclude duplicates and reserved addresses", async () => {
+    var first = IPAddress.Parse("192.0.2.11");
+    var second = IPAddress.Parse("192.0.2.12");
+    var seen = new List<IPAddress>();
+    var selected = await TunPeerSelection.TryCandidates(
+        new[] { IPAddress.Loopback, IPAddress.IPv6Loopback, IPAddress.Parse(TunConfig.Resolver), first, first, second },
+        (ip, token) => {
+            seen.Add(ip);
+            if (ip.Equals(first)) throw new VpnError("fixture: TLS failure", Check.Https);
+            return Task.FromResult(ip);
+        }, _ => { }, CancellationToken.None);
+    Assert(selected.Equals(second) && seen.SequenceEqual(new[] { first, second }));
+});
+await TestAsync("Limit endpoint attempts, preserve failure stage and propagate user cancellation", async () => {
+    var peers = Enumerable.Range(1, 6).Select(i => IPAddress.Parse($"192.0.2.{i}"));
+    var calls = 0;
+    try {
+        await TunPeerSelection.TryCandidates<int>(peers, (_, _) => { calls++; throw new VpnError("fixture", Check.Https); },
+            _ => { }, CancellationToken.None);
+        throw new Exception("Missing exhaustion error");
+    } catch (NoVerifiedPeer error) { Assert(calls == 3 && error.FailedCheck == Check.Https); }
+    using var cancel = new CancellationTokenSource();
+    try {
+        await TunPeerSelection.TryCandidates<int>(peers, (_, token) => {
+            calls++; cancel.Cancel(); token.ThrowIfCancellationRequested(); return Task.FromResult(1);
+        }, _ => { }, cancel.Token);
+        throw new Exception("Cancellation ignored");
+    } catch (OperationCanceledException) { Assert(calls == 4); }
+});
+await TestAsync("HTTP/3 source selection does not require a TCP listener", async () => {
+    using var udp = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+    var port = ((IPEndPoint)udp.Client.LocalEndPoint!).Port;
+    var profile = Profiles.Parse($"vless://{Id}@127.0.0.1:{port}?security=tls&type=xhttp&alpn=h3&sni=fixture.test");
+    var route = await Xray.CheckServerSourceAsync(profile, CancellationToken.None);
+    Assert(route.Source.Equals(IPAddress.Loopback));
+});
 Test("Restore exact original proxy and retained automatic flag", () => {
     var before = new ProxyState(ProxyState.Direct | ProxyState.AutoDetect, "old:80", "<local>", "");
     var windows = new FakeProxy(before);
@@ -672,7 +708,8 @@ if (OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable("POMOGATOR
     var tunnelExecutable = Environment.GetEnvironmentVariable("POMOGATOR_TEST_TUN_XRAY");
     if (string.IsNullOrEmpty(tunnelExecutable)) throw new InvalidOperationException("Missing scoped TUN binary for Windows CI.");
     Test("Administrator guard rejects a Windows token with the Administrators SID disabled", NativeTunTests.CheckPrivilegeGuard);
-    await TestAsync("Native Wintun, HTTPS over VLESS, DNS and recovery", () => NativeTunTests.Run(tunnelExecutable));
+    for (var cycle = 1; cycle <= 10; cycle++)
+        await TestAsync($"Native Wintun cycle {cycle}/10: duplex TLS VLESS, UDP/TCP DNS and recovery", () => NativeTunTests.Run(tunnelExecutable));
     await TestAsync("Scoped TUN filter permits a physical TLS peer only to the tunnel transport", () => PhysicalPeerTests.Run(tunnelExecutable));
 }
 Console.WriteLine($"{passed} checks passed.");

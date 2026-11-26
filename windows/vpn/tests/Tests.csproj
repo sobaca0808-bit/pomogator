@@ -9,6 +9,7 @@
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <Compile Remove="ui/**/*.cs" />
+    <Compile Include="../app/TunPeerSelection.cs" Link="TunPeerSelection.cs" />
     <Compile Include="../app/TunSession.cs" Link="TunSession.cs" />
     <Compile Include="../app/LocalData.cs" Link="LocalData.cs" />
     <Compile Include="../app/TunControlProbe.cs" Link="TunControlProbe.cs" />
